@@ -244,8 +244,9 @@ class NetworkTopologyBuilder:
             if not hasattr(node, "labels") or "NetworkHost" not in (node.labels or []):
                 continue
             attrs = node.attributes or {}
-            is_vulnerable = node.uuid in vulnerable_host_uuids
-            controls_str = attrs.get("controls", "")
+            node_uuid = str(node.uuid) if hasattr(node, "uuid") else None
+            is_vulnerable = node_uuid in vulnerable_host_uuids
+            controls_str = attrs.get("controls") or ""
             missing_critical = "edr" not in controls_str and "siem" not in controls_str
 
             if is_vulnerable or missing_critical:
@@ -414,7 +415,7 @@ Extract ALL hosts, servers, containers, and network devices. Be specific about z
         # Build text chunks: 1 chunk per asset + raw text chunks
         from .text_processor import TextProcessor
         asset_texts = [a.to_zep_text() for a in assets]
-        raw_chunks = TextProcessor.split_text(raw_text, chunk_size=600, chunk_overlap=50)
+        raw_chunks = TextProcessor.split_text(raw_text, chunk_size=600, overlap=50)
 
         all_chunks = asset_texts + raw_chunks
         logger.info(f"Sending {len(all_chunks)} chunks to Zep ({len(asset_texts)} asset + {len(raw_chunks)} raw)")

@@ -220,7 +220,7 @@ class VulnReportAgent:
         ]
 
         for iteration in range(self.max_iterations):
-            response = self.llm.chat(messages, temperature=0.3, max_tokens=3000)
+            response = self.llm.chat(messages, temperature=0.3, max_tokens=8192)
             messages.append({"role": "assistant", "content": response})
 
             # Check for FINAL_ANSWER
@@ -250,7 +250,7 @@ class VulnReportAgent:
             "role": "user",
             "content": "Max iterations reached. Write FINAL_ANSWER: with your complete vulnerability report now."
         })
-        final = self.llm.chat(messages, temperature=0.3, max_tokens=4000)
+        final = self.llm.chat(messages, temperature=0.3, max_tokens=8192)
         if "FINAL_ANSWER:" in final:
             return final[final.index("FINAL_ANSWER:") + len("FINAL_ANSWER:"):].strip()
         return final

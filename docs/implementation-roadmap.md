@@ -114,6 +114,13 @@ curl -X POST http://localhost:5001/api/cyber/ttp-library/context \
   -d '{"domain": "network_security", "persona": "defensive"}'
 ```
 
+**Test 2b: Network context từ Zep (optional — khi dùng graph_id thay vì text)**
+```bash
+# Chỉ cần test nếu đã build graph trước
+curl http://localhost:5001/api/cyber/network-context/<graph_id>
+# Kết quả mong đợi: JSON có "summary" text mô tả hạ tầng
+```
+
 **Test 3: Build network graph**
 ```bash
 curl -X POST http://localhost:5001/api/cyber/setup \
@@ -137,6 +144,22 @@ curl -X POST http://localhost:5001/api/cyber/agents/generate \
     "graph_id": "test"
   }'
 # Kết quả mong đợi: tier1_count=13, tier2_count=5, total=18
+# Lưu lại oasis_profiles từ response để dùng ở Test 5
+```
+
+**Test 5: Khởi động session (cần oasis_profiles từ Test 4)**
+```bash
+curl -X POST http://localhost:5001/api/cyber/session/start \
+  -H "Content-Type: application/json" \
+  -d '{
+    "graph_id": "test",
+    "network_summary": "2 hosts: Apache 2.4.49 DMZ (CVE-2021-41773, unpatched), MySQL Database (critical, no EDR)",
+    "oasis_profiles": <oasis_profiles từ Test 4>
+  }'
+# Kết quả mong đợi: { task_id, session_id }
+
+# Poll session status
+curl http://localhost:5001/api/cyber/review/<session_id>/status
 ```
 
 ---
@@ -456,8 +479,10 @@ Backend:
 
 Verify & Test:
   🔲 Ollama + qwen2.5:32b chạy được
-  🔲 Flask khởi động không lỗi
-  🔲 /api/cyber/ttp-library trả về đúng
+  🔲 Flask khởi động không lỗi (cyber_bp registered)
+  🔲 /api/cyber/ttp-library trả về đúng (20 techniques)
+  🔲 /api/cyber/agents/generate trả về tier1=13, tier2=5
+  🔲 /api/cyber/session/start khởi động không lỗi
   🔲 Pipeline end-to-end ra report.md
 
 Frontend:

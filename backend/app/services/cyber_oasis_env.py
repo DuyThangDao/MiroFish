@@ -25,35 +25,35 @@ PHASE_CONFIG = {
     "A": {
         "name": "Intra-group Analysis",
         "rounds": [1, 2, 3],
-        "description": "Domain experts thảo luận trong nội bộ group của mình",
+        "description": "Domain experts discuss within their own group",
         "attacker_active": False,
         "instruction_addition": (
-            "Trong phase này, bạn thảo luận CHỦ YẾU với các chuyên gia cùng domain. "
-            "Tập trung vào domain expertise của bạn. "
-            "Đề xuất findings và validate với peer trong cùng nhóm."
+            "In this phase, discuss PRIMARILY with experts in your own domain. "
+            "Focus on your domain expertise. "
+            "Propose findings and validate them with peers in your group."
         ),
     },
     "B": {
         "name": "Cross-group Challenge",
         "rounds": [4, 5, 6, 7],
-        "description": "Domain experts challenge findings của nhau cross-group",
+        "description": "Domain experts challenge each other's findings across groups",
         "attacker_active": False,
         "instruction_addition": (
-            "Trong phase này, bạn ĐỌC và CHALLENGE findings từ các domain group khác. "
-            "Đặt câu hỏi: finding này có đúng không? Severity có bị overestimate không? "
-            "Có missing context từ góc độ của bạn không? "
-            "Cũng bổ sung finding mới nếu bạn thấy domain group khác bỏ sót."
+            "In this phase, READ and CHALLENGE findings from other domain groups. "
+            "Ask: is this finding accurate? Is the severity overestimated? "
+            "Is there missing context from your perspective? "
+            "Also add new findings if you notice another domain group has missed something."
         ),
     },
     "C": {
         "name": "Attacker Challenge",
         "rounds": [8, 9, 10],
-        "description": "Attacker profiles đọc toàn bộ findings và phản biện",
+        "description": "Attacker profiles read all findings and provide real-world challenge",
         "attacker_active": True,
         "instruction_addition": (
-            "Trong phase này, CÁC ATTACKER PROFILES được kích hoạt. "
-            "Domain expert agents: hãy phản hồi nếu attacker challenge finding của bạn. "
-            "Attacker agents: đọc toàn bộ findings và phản biện từ góc nhìn của kẻ tấn công."
+            "In this phase, ATTACKER PROFILES are activated. "
+            "Domain expert agents: respond if an attacker challenges your finding. "
+            "Attacker agents: read all findings and challenge them from an attacker's perspective."
         ),
     },
 }

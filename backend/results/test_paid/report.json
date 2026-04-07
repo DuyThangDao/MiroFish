@@ -1,0 +1,245 @@
+{
+  "session_id": "script_20260407_015358",
+  "graph_id": "scenario_sme_no_tools",
+  "generated_at": "2026-04-07T01:56:50.307064",
+  "report": "**Vulnerability Report: Small Enterprise Infrastructure Assessment**\n\n**Date:** October 26, 2023\n**Prepared For:** Small Enterprise Management\n**Prepared By:** VulnReportAgent\n\n---\n\n### 1. Executive Summary\n\nThis report details critical security vulnerabilities identified within the enterprise's IT infrastructure, comprising five hosts. The assessment reveals a severe lack of fundamental security controls, including the absence of EDR, SIEM, WAF, AV, NDR, MFA, and DLP solutions. This deficiency, combined with unpatched systems, exposed services",
+  "consensus_vulnerabilities": [
+    {
+      "vuln_id": "vuln_6daaa3cd",
+      "title": "Critical Vulnerability in Public-Facing Web Server",
+      "description": "Critical Vulnerability in Public-Facing Web Server",
+      "affected_assets": [
+        "WEB-01 (Apache 2.",
+        "WEB-01 (",
+        "WEB-01 (Apache 2.4.",
+        "WEB-01 (Apache 2.4.4",
+        "WEB-01 (Apache 2",
+        "WEB-0",
+        "WEB-01 (Apache"
+      ],
+      "severity": "critical",
+      "intra_group_score": 0.6,
+      "cross_group_score": 1.0,
+      "attacker_score": 0.5,
+      "confidence_score": 0.755,
+      "supporting_groups": [
+        "threat_intel",
+        "risk",
+        "appsec",
+        "network_security",
+        "endpoint_security"
+      ],
+      "supporting_attackers": [],
+      "dismissing_attackers": [],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "source_finding_ids": [
+        "ef_0e53b5ac",
+        "ef_086e5e6f",
+        "ef_9d1c2840",
+        "ef_ae0fe345",
+        "ef_138429c3",
+        "ef_1669ab11",
+        "ef_31707b0b",
+        "ef_7944fee7",
+        "ef_544bfd72",
+        "ef_51b40d8c",
+        "ef_d44458bc"
+      ],
+      "attacker_finding_ids": [],
+      "is_attacker_only": false,
+      "needs_review": false
+    },
+    {
+      "vuln_id": "vuln_83254248",
+      "title": "Lack of EDR and Vulnerable Windows Server Enables Credential Dumping and Lateral Movement",
+      "description": "Lack of EDR and Vulnerable Windows Server Enables Credential Dumping and Lateral Movement",
+      "affected_assets": [
+        "WIN-01",
+        "WEB-01"
+      ],
+      "severity": "critical",
+      "intra_group_score": 1.0,
+      "cross_group_score": 0.2,
+      "attacker_score": 1.0,
+      "confidence_score": 0.64,
+      "supporting_groups": [
+        "endpoint_security"
+      ],
+      "supporting_attackers": [
+        "insider_threat",
+        "opportunistic",
+        "ransomware",
+        "apt",
+        "supply_chain"
+      ],
+      "dismissing_attackers": [],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "source_finding_ids": [
+        "ef_0215e69b",
+        "ef_57ecc979",
+        "ef_b42f28d2",
+        "ef_83e35d76"
+      ],
+      "attacker_finding_ids": [],
+      "is_attacker_only": false,
+      "needs_review": false
+    },
+    {
+      "vuln_id": "vuln_69a1791f",
+      "title": "Lack of Network Segmentation Between Internal and Database Zones",
+      "description": "Lack of Network Segmentation Between Internal and Database Zones",
+      "affected_assets": [
+        "WIN",
+        "Network (Internal",
+        "Database zones)",
+        "DB-01",
+        "WIN-0",
+        "All hosts (WEB-"
+      ],
+      "severity": "critical",
+      "intra_group_score": 0.5,
+      "cross_group_score": 0.4,
+      "attacker_score": 0.95,
+      "confidence_score": 0.5675,
+      "supporting_groups": [
+        "risk",
+        "network_security"
+      ],
+      "supporting_attackers": [
+        "insider_threat",
+        "supply_chain",
+        "apt"
+      ],
+      "dismissing_attackers": [],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "source_finding_ids": [
+        "ef_65c5db94",
+        "ef_a9e6736e",
+        "ef_871bf46b",
+        "ef_00057f44"
+      ],
+      "attacker_finding_ids": [],
+      "is_attacker_only": false,
+      "needs_review": false
+    },
+    {
+      "vuln_id": "vuln_04d02206",
+      "title": "Apache HTTP Server Path Traversal and File Disclosure (CVE-2021-41773)",
+      "description": "Apache HTTP Server Path Traversal and File Disclosure (CVE-2021-41773)",
+      "affected_assets": [
+        "WEB-0"
+      ],
+      "severity": "critical",
+      "intra_group_score": 1.0,
+      "cross_group_score": 0.2,
+      "attacker_score": 0.65,
+      "confidence_score": 0.5525,
+      "supporting_groups": [
+        "appsec"
+      ],
+      "supporting_attackers": [
+        "opportunistic"
+      ],
+      "dismissing_attackers": [],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "source_finding_ids": [
+        "ef_fa0e09f0",
+        "ef_7a17c052",
+        "ef_adcda12e"
+      ],
+      "attacker_finding_ids": [],
+      "is_attacker_only": false,
+      "needs_review": false
+    },
+    {
+      "vuln_id": "vuln_2f3ad224",
+      "title": "Unpatched Apache on WEB-01 allows RCE and initial access",
+      "description": "Unpatched Apache on WEB-01 allows RCE and initial access",
+      "affected_assets": [
+        "WEB-01 (",
+        "WEB-01 (Apache"
+      ],
+      "severity": "critical",
+      "intra_group_score": 0.5,
+      "cross_group_score": 0.4,
+      "attacker_score": 0.8,
+      "confidence_score": 0.53,
+      "supporting_groups": [
+        "appsec",
+        "endpoint_security"
+      ],
+      "supporting_attackers": [
+        "opportunistic",
+        "ransomware"
+      ],
+      "dismissing_attackers": [],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "source_finding_ids": [
+        "ef_16290992",
+        "ef_7a37a186",
+        "ef_14e4b43c"
+      ],
+      "attacker_finding_ids": [],
+      "is_attacker_only": false,
+      "needs_review": false
+    },
+    {
+      "vuln_id": "vuln_c3bdd6fa",
+      "title": "Complete absence of Endpoint Detection and Response (EDR) across all hosts",
+      "description": "Complete absence of Endpoint Detection and Response (EDR) across all hosts",
+      "affected_assets": [
+        "All hosts (WEB-0",
+        "All hosts (WEB-01",
+        "DB-01",
+        "WEB-01",
+        "WIN-01"
+      ],
+      "severity": "critical",
+      "intra_group_score": 0.5,
+      "cross_group_score": 0.4,
+      "attacker_score": 0.5,
+      "confidence_score": 0.455,
+      "supporting_groups": [
+        "network_security",
+        "endpoint_security"
+      ],
+      "supporting_attackers": [],
+      "dismissing_attackers": [],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "source_finding_ids": [
+        "ef_e36fd8d3",
+        "ef_84d94f5c",
+        "ef_ebaf9ca3",
+        "ef_02c257e8",
+        "ef_cf5e7851"
+      ],
+      "attacker_finding_ids": [],
+      "is_attacker_only": false,
+      "needs_review": true
+    }
+  ],
+  "coverage_gaps": {
+    "silent_domain_groups": [],
+    "low_cross_validation_findings": [
+      "Lack of EDR and Vulnerable Windows Server Enables Credential Dumping and Lateral Movement",
+      "Apache HTTP Server Path Traversal and File Disclosure (CVE-2021-41773)"
+    ],
+    "attacker_only_paths": [],
+    "total_vulns": 6,
+    "critical_count": 6,
+    "high_count": 0
+  },
+  "stats": {
+    "total_expert_findings": 36,
+    "total_attacker_findings": 0,
+    "consensus_vulns": 6,
+    "critical": 6,
+    "high": 0
+  }
+}

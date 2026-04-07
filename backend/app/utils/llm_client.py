@@ -29,7 +29,9 @@ class LLMClient:
         
         self.client = OpenAI(
             api_key=self.api_key,
-            base_url=self.base_url
+            base_url=self.base_url,
+            timeout=1800,   # 30 min — sufficient for large model responses
+            max_retries=0,  # disable built-in retry; caller handles rate limiting
         )
     
     def chat(

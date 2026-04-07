@@ -458,11 +458,13 @@ Focus vào: vendor access scope, update mechanism, trusted connection, 3rd-party
 
 class CyberExpertProfileGenerator:
 
-    def generate_agent_matrix(self, network_context: str) -> List[Dict]:
+    def generate_all_profiles(self, network_summary: str, graph_id: Optional[str] = None) -> Dict:
         """
         Tạo toàn bộ 18 agents:
-          - Tầng 1: 13 domain × mindset agents
-          - Tầng 2: 5 attacker profile agents
+          - Tầng 1: 13 domain × mindset agents  → result["tier1"]
+          - Tầng 2: 5 attacker profile agents    → result["tier2"]
+          - Tất cả profiles                      → result["all"]
+          - OASIS-compatible profiles             → result["oasis_profiles"]
         Reuse OASISProfileGenerator pattern — chỉ thay template.
         """
 
@@ -560,12 +562,12 @@ Orchestrate toàn bộ quá trình 2-phase review, collect findings, tính group
 
 ### Bước 3.1 — Review Session Orchestrator
 
-**File cần tạo**: `backend/app/services/review_session_orchestrator.py`
+**File**: `backend/app/services/cyber_session_orchestrator.py`
 
 ```python
-class ReviewSessionOrchestrator:
+class CyberSessionOrchestrator:
 
-    def run_session(self, graph_id: str, config: ReviewConfig) -> List[ExpertFinding]:
+    def run_session_async(self, graph_id: str, network_summary: str, profiles: List[CyberAgentProfile]) -> str:
         """
         Phase A (round 1–3): Intra-group — Domain experts thảo luận nội bộ
           - Agents cùng group share feed riêng
@@ -585,7 +587,7 @@ class ReviewSessionOrchestrator:
         Kết quả: findings từ cả 3 phase, tagged rõ nguồn gốc
         """
 
-    def _build_network_context(self, graph_id: str) -> str:
+    def build_network_context_from_zep(self, graph_id: str) -> str:
         """
         Query Zep KG → tóm tắt hạ tầng inject vào tất cả agents:
           - Host, zone, CVE, service, security controls
@@ -708,26 +710,30 @@ class VulnReportAgent(ReportAgent):
 Thêm vào `backend/app/api/cyber.py`:
 
 ```
-POST /api/cyber/review/start
-  Body: { graph_id, rounds, agent_matrix_config }
-  Return: { session_id, task_id, agent_count }
+POST /api/cyber/session/start
+  Body: { graph_id, network_summary, oasis_profiles }   ← oasis_profiles từ /agents/generate
+  Return: { task_id, session_id }
 
 GET  /api/cyber/review/<session_id>/status
-  Return: { status, current_phase, current_round, finding_count }
+  Return: { status, current_phase, current_round, finding_count, attacker_finding_count }
 
 GET  /api/cyber/review/<session_id>/findings
-  Return: { findings[], group_breakdown, cross_validated_count }
+  Query: phase, group, severity, type (expert|attacker|all)
+  Return: { findings[], group_breakdown, cross_validated_count, attacker_count }
 
 GET  /api/cyber/review/<session_id>/feed
-  Return: { feed_posts[] }    ← intra-group và cross-group posts
+  Query: phase, round_num, agent_id, limit, offset
+  Return: { posts[], total, phase_breakdown }
+
+GET  /api/cyber/network-context/<graph_id>
+  Return: { graph_id, summary }   ← lấy network_summary khi dùng Zep graph
 
 POST /api/cyber/report/generate
-  Body: { session_id }
+  Body: { session_id, expert_findings, attacker_findings, network_summary, graph_id }
   Return: { task_id }
 
-GET  /api/cyber/report/<report_id>
-  Return: { executive_summary, vulnerabilities[], disagreements[],
-            gap_analysis, roadmap, persona_insights }
+GET  /api/cyber/report/<session_id>
+  Return: { report, consensus_vulnerabilities[], coverage_gaps, stats }
 ```
 
 ---
