@@ -132,11 +132,13 @@ class VulnReportAgent:
         """Synchronous version — trả về report dict trực tiếp."""
         engine = ConsensusEngine()
         consensus_vulns = engine.run(expert_findings, attacker_findings)
+        unvalidated_gaps = engine.enforce_control_coverage(consensus_vulns, expert_findings)
 
         tool_context = _ToolContext(
             consensus_vulns=consensus_vulns,
             expert_findings=expert_findings,
             attacker_findings=attacker_findings,
+            unvalidated_control_gaps=unvalidated_gaps,
         )
 
         report_text = self._run_react_loop(
@@ -152,11 +154,13 @@ class VulnReportAgent:
             "generated_at": datetime.now().isoformat(),
             "report": report_text,
             "consensus_vulnerabilities": [asdict(v) for v in consensus_vulns],
+            "unvalidated_control_gaps": unvalidated_gaps,
             "coverage_gaps": coverage_gaps,
             "stats": {
                 "total_expert_findings": len(expert_findings),
                 "total_attacker_findings": len(attacker_findings),
                 "consensus_vulns": len(consensus_vulns),
+                "unvalidated_gaps": len(unvalidated_gaps),
                 "critical": sum(1 for v in consensus_vulns if v.severity == "critical"),
                 "high": sum(1 for v in consensus_vulns if v.severity == "high"),
             }
@@ -304,10 +308,12 @@ class _ToolContext:
         consensus_vulns: List[ConsensusVulnerability],
         expert_findings: List[Dict[str, Any]],
         attacker_findings: List[Dict[str, Any]],
+        unvalidated_control_gaps: List[Dict[str, Any]] = None,
     ):
         self.vulns = consensus_vulns
         self.expert_findings = expert_findings
         self.attacker_findings = attacker_findings
+        self.unvalidated_control_gaps = unvalidated_control_gaps or []
 
     def execute(self, tool_name: str, args: Dict[str, Any]) -> str:
         """Dispatch tool call → return string observation."""
@@ -431,6 +437,13 @@ class _ToolContext:
         ]
         if gaps["low_cross_validation_findings"]:
             lines.append("  Low validation: " + "; ".join(gaps["low_cross_validation_findings"][:5]))
+        if self.unvalidated_control_gaps:
+            lines.append(f"\nUnvalidated control gaps (not in consensus — single-domain findings):")
+            for g in self.unvalidated_control_gaps:
+                lines.append(
+                    f"  [{g['severity'].upper()}] {g['control']}: {g['title']}"
+                    f" (mentioned in {g['source_count']} raw findings, by {g['author_group']})"
+                )
         return "\n".join(lines)
 
     def _get_findings_by_group(self, args: Dict) -> str:

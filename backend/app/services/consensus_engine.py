@@ -8,8 +8,18 @@ Consensus Engine — Multi-Expert Panel (Direction B)
 
 Final confidence = L1×0.30 + L2×0.45 + L3×0.25
 Filter: confidence < 0.35 → discard (likely false positive)
+
+Enhancements:
+  B-dynamic — Semantic anchor clustering: findings sharing a control/host keyword
+              in their title are clustered together even if title tokens differ.
+              Anchors derived dynamically from SecurityControls fields + affected_assets
+              in findings — no hardcoding, works across all scenarios.
+  D         — Post-consensus control coverage enforcement: after scoring, any
+              standard security control absent from consensus list is collected
+              from raw findings into an `unvalidated_control_gaps` section.
 """
 
+import re
 import uuid
 from typing import Dict, List, Any, Optional, Set, Tuple
 from collections import defaultdict
@@ -104,17 +114,80 @@ class ConsensusEngine:
 
     # ─── Clustering ───────────────────────────────────────────────────────────
 
+    def _build_anchors(self, findings: List[Dict[str, Any]]) -> Set[str]:
+        """
+        B-dynamic: derive semantic anchors from existing data — no hardcoding.
+
+        Sources:
+          1. SecurityControls field names (edr, siem, waf, …) — stable, scenario-independent
+          2. Host IDs from affected_assets in findings — scenario-specific, auto-extracted
+        """
+        from ..models.cyber_models import SecurityControls
+        from dataclasses import fields as dc_fields
+
+        # 1. Standard security controls
+        anchors: Set[str] = {f.name for f in dc_fields(SecurityControls)}
+
+        # 2. Host IDs mentioned in any finding's affected_assets
+        for f in findings:
+            for asset in f.get("affected_assets", []):
+                token = asset.lower().strip()
+                if token:
+                    anchors.add(token)
+
+        return anchors
+
+    @staticmethod
+    def _anchor_in_text(anchor: str, text: str) -> bool:
+        """Word-boundary match to prevent 'av' hitting 'traversal', 'have', etc."""
+        return bool(re.search(r'\b' + re.escape(anchor) + r'\b', text))
+
+    def _shares_anchor(
+        self, f1: Dict[str, Any], f2: Dict[str, Any], anchors: Set[str]
+    ) -> bool:
+        """
+        True if both findings share a semantic anchor where the anchor appears
+        in the TITLE of at least one finding (title-dominant requirement).
+
+        This prevents over-clustering: compound findings that mention many controls
+        only in their description (e.g. "No EDR, SIEM, WAF, AV, NDR, MFA, DLP —
+        None deployed") do not act as hubs that absorb all control findings into
+        one mega-cluster. Clustering only fires when the topic is salient enough
+        to appear in a title.
+
+        Rule: anchor `a` triggers clustering of (f1, f2) when:
+          - `a` in title(f1) AND `a` in title(f2)   ← both-title condition
+
+        Requiring the anchor in BOTH titles (not just one) prevents compound
+        findings like "Complete Absence of Foundational Security Controls"
+        (whose description mentions every control) from acting as hubs.
+        Only two findings that independently chose the same control as their
+        primary topic (visible in the title) will be clustered.
+        """
+        t1 = f1.get("title", "").lower()
+        t2 = f2.get("title", "").lower()
+
+        return any(
+            self._anchor_in_text(a, t1) and self._anchor_in_text(a, t2)
+            for a in anchors
+        )
+
     def _cluster_findings(
         self, findings: List[Dict[str, Any]]
     ) -> List[List[Dict[str, Any]]]:
         """
         Cluster findings theo tiêu đề tương đồng.
-        Simple approach: normalize title → shared keyword token matching.
-        Findings chia sẻ ≥ 2 significant tokens → cùng cluster.
+
+        Two passes:
+          Pass 1 (original): ≥2 shared significant title tokens → same cluster
+          Pass 2 (B-dynamic): shared semantic anchor in title → same cluster
+                              catches "No centralized logging" + "Absence of SIEM"
+                              which share anchor "siem" but differ in title tokens
         """
         if not findings:
             return []
 
+        anchors = self._build_anchors(findings)
         clusters: List[List[Dict]] = []
         assigned: Set[int] = set()
 
@@ -129,8 +202,12 @@ class ConsensusEngine:
                 if j <= i or j in assigned:
                     continue
                 tokens_j = self._title_tokens(g.get("title", ""))
-                overlap = tokens_i & tokens_j
-                if len(overlap) >= 2:
+                # Pass 1: original token overlap
+                if len(tokens_i & tokens_j) >= 2:
+                    cluster.append(g)
+                    assigned.add(j)
+                # Pass 2: semantic anchor match
+                elif self._shares_anchor(f, g, anchors):
                     cluster.append(g)
                     assigned.add(j)
 
@@ -338,6 +415,63 @@ class ConsensusEngine:
             is_attacker_only=True,
             needs_review=True,
         )
+
+    # ─── Solution D: Post-consensus control coverage enforcement ─────────────
+
+    def enforce_control_coverage(
+        self,
+        consensus_vulns: List[ConsensusVulnerability],
+        expert_findings_raw: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """
+        Solution D: after ConsensusEngine runs, collect any standard security
+        control that is absent from consensus output but has at least 1 raw finding.
+
+        Returns a list of unvalidated_control_gaps — findings that didn't survive
+        consensus scoring but represent real coverage signals. These appear in the
+        report as a separate section labeled "Single-domain — not cross-validated".
+
+        Controls checked: all fields of SecurityControls dataclass (edr, siem, waf, …).
+        """
+        from ..models.cyber_models import SecurityControls
+        from dataclasses import fields as dc_fields
+
+        standard_controls = [f.name for f in dc_fields(SecurityControls)]
+        unvalidated: List[Dict[str, Any]] = []
+
+        for control in standard_controls:
+            # Check if this control already covered in consensus (word boundary)
+            in_consensus = any(
+                self._anchor_in_text(control, v.title.lower())
+                or self._anchor_in_text(control, v.description.lower())
+                for v in consensus_vulns
+            )
+            if in_consensus:
+                continue
+
+            # Find all raw findings that mention this control (word boundary)
+            candidates = [
+                f for f in expert_findings_raw
+                if self._anchor_in_text(control, f.get("title", "").lower())
+                or self._anchor_in_text(control, f.get("description", "").lower())
+            ]
+            if not candidates:
+                continue
+
+            # Pick highest-confidence finding as representative
+            best = max(candidates, key=lambda f: f.get("confidence", 0.0))
+            unvalidated.append({
+                "control":       control.upper(),
+                "title":         best.get("title", f"Missing {control.upper()}"),
+                "description":   best.get("description", ""),
+                "severity":      best.get("severity", "medium"),
+                "affected_assets": best.get("affected_assets", []),
+                "author_group":  best.get("author_group", ""),
+                "source_count":  len(candidates),   # how many raw findings agreed
+                "note":          "Single-domain finding — not cross-validated by consensus",
+            })
+
+        return unvalidated
 
     # ─── Utility ──────────────────────────────────────────────────────────────
 

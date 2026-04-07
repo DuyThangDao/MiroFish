@@ -1,0 +1,3349 @@
+{
+  "session_id": "script_20260407_161558",
+  "graph_id": "scenario_sme_no_tools",
+  "current_phase": "done",
+  "current_round": 10,
+  "total_rounds": 10,
+  "expert_findings": [
+    {
+      "finding_id": "ef_5a9d7104",
+      "author_group": "network_security",
+      "author_persona": "offensive",
+      "title": "Critical Remote Code Execution (RCE) on WEB-01 via Apache Path Traversal",
+      "description": "The WEB-01 server, directly exposed to the internet in the DMZ, is running an unpatched Apache HTTP Server 2.4.49 with a critical vulnerability, CVE-2021-41773. This vulnerability allows for path traversal and arbitrary file disclosure, which can be leveraged to achieve Remote Code Execution (RCE). An attacker can exploit this directly from the internet to gain full control over the WEB-01 server, establishing a primary foothold within the organization's network. This is the most immediate and critical initial access vector.",
+      "affected_assets": [
+        "WEB-01 (Apache 2.4.49)"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "\"WEB-01: Apache 2.4.49, zone DMZ, Ubuntu 20.04, unpatched, CVE-2021-41773\""
+      ],
+      "recommendations": [
+        "Immediately patch Apache HTTP Server on WEB-01 to version 2.4.50 or higher. As a temporary mitigation, configure a Web Application Firewall (WAF) to block requests containing path traversal sequences (e.g., `../`) and restrict access to sensitive files."
+      ],
+      "mitre_techniques": [],
+      "phase": "A",
+      "round_number": 1,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_f51fca89",
+      "author_group": "appsec",
+      "author_persona": "defensive",
+      "title": "Absence of Web Application Firewall (WAF)",
+      "description": "There is no Web Application Firewall (WAF) deployed in front of WEB-01. This leaves the public-facing web server and any hosted applications directly exposed to a wide array of web-based attacks, including SQL Injection, Cross-Site Scripting (XSS), and attempts to exploit known vulnerabilities like CVE-2021-41773. A WAF would provide a critical layer of defense, detecting and blocking malicious requests before they reach the application. It could also offer virtual patching capabilities for unpatched vulnerabilities, buying time for proper remediation. Its absence significantly increases the attack surface and the likelihood of successful exploitation (T1190).",
+      "affected_assets": [
+        "WEB-01 (all web applications)"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "\"Security controls: none (no ... WAF)\""
+      ],
+      "recommendations": [
+        "Implement a robust WAF solution in front of WEB-01. Configure the WAF with strong rule sets to detect and block common web attack vectors, and consider using it to virtually patch the Apache CVE until a full server patch can be applied. Regularly review and update WAF rules."
+      ],
+      "mitre_techniques": [
+        "T1190"
+      ],
+      "phase": "A",
+      "round_number": 1,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_713a1029",
+      "author_group": "appsec",
+      "author_persona": "offensive",
+      "title": "Public-Facing Remote Code Execution on WEB-01 (CVE-2021-41773)",
+      "description": "CVE-2021-41773 is a critical path traversal and remote code execution vulnerability affecting Apache HTTP Server 2.4.49. An attacker can exploit this vulnerability to traverse directories outside the intended document root, enabling them to read arbitrary files (e.g., `/etc/passwd`) or, more critically, execute arbitrary code if CGI scripts are enabled. Given WEB-01's placement in the DMZ with direct internet exposure, this provides a straightforward initial access vector (T1190) for a remote unauthenticated attacker to gain full control over the host. The absence of WAF, EDR, or SIEM means such an attack would likely go undetected.",
+      "affected_assets": [
+        "WEB-01 (Apache 2.4.49)"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "WEB-01 is running Apache 2.4.49, which is explicitly stated as \"unpatched\" and vulnerable to \"CVE-2021-41773\". It is located in the DMZ, indicating direct internet exposure."
+      ],
+      "recommendations": [
+        "Immediately update Apache HTTP Server on WEB-01 to version 2.4.50 or later. As an interim measure, ensure that the `require all denied` directive is applied to directories not intended for public access, specifically for the `/cgi-bin/` directory if it exists and is vulnerable. Implement a WAF to detect and block exploitation attempts against public-facing applications."
+      ],
+      "mitre_techniques": [
+        "T1190"
+      ],
+      "phase": "A",
+      "round_number": 1,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_e850ed9a",
+      "author_group": "network_security",
+      "author_persona": "architect",
+      "title": "Inadequate Network Segmentation for Critical Database Server",
+      "description": "The absence of network segmentation between the Internal and Database zones creates an unreasonable trust relationship and a significant architectural flaw. Any compromise within the Internal zone (e.g., gaining access to WIN-01, which is unpatched and has RDP exposed) can directly lead to unauthorized access to the critical DB-01 server without further network-level controls. This facilitates lateral movement (T1021.001, T1018) to the most critical asset once the internal network is breached, violating the principle of least privilege and defense-in-depth.",
+      "affected_assets": [
+        "DB-01",
+        "Internal Zone",
+        "Database Zone"
+      ],
+      "severity": "critical",
+      "confidence": 0.49999999999999994,
+      "evidence": [
+        "The infrastructure explicitly states, \"No network segmentation between Internal and Database.\" DB-01 is marked `is_critical=true`."
+      ],
+      "recommendations": [
+        "Implement robust network segmentation using FW-01 to enforce strict firewall rules between the Internal and Database zones. Only allow necessary and explicitly defined traffic (e.g., specific application ports from designated internal application servers) to reach DB-01. All other traffic should be explicitly denied. Consider implementing a dedicated database access proxy or bastion host for management access to DB-01."
+      ],
+      "mitre_techniques": [
+        "T1190",
+        "T1021.001",
+        "T1018"
+      ],
+      "phase": "A",
+      "round_number": 1,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": [
+        {
+          "profile_id": "opportunistic",
+          "action": "ATTACKER_DISMISS",
+          "comment": "Regulatory compliance? I don't care about their legal problems, I care about their vulnerabilities.",
+          "confidence_delta": -0.2
+        }
+      ]
+    },
+    {
+      "finding_id": "ef_2f6cdb87",
+      "author_group": "network_security",
+      "author_persona": "defensive",
+      "title": "Unprotected and Unpatched RDP Service on Internal Server",
+      "description": "The `WIN-01` server has RDP exposed, which serves as a potential entry point (`T1133 External Remote Services` if internet-facing) or a primary vector for lateral movement (`T1021.001 Remote Desktop Protocol`) within the internal network. Being unpatched, it may be vulnerable to known RDP exploits (e.g., BlueKeep-like vulnerabilities). The absence of EDR, SIEM, and MFA means that brute-force attacks, credential stuffing, or successful RDP compromises would go undetected, allowing attackers to establish persistence or move laterally.",
+      "affected_assets": [
+        "WIN-01"
+      ],
+      "severity": "high",
+      "confidence": 0.6,
+      "evidence": [
+        "`WIN-01` is an \"unpatched\" Windows Server 2019 with \"RDP exposed.\" No EDR, SIEM, or MFA are deployed."
+      ],
+      "recommendations": [
+        "Immediately patch `WIN-01` to address known vulnerabilities. Restrict RDP access to `WIN-01` to only trusted administrative hosts or a dedicated jump server. If RDP must be externally accessible (not recommended without"
+      ],
+      "mitre_techniques": [
+        "T1190",
+        "T1018",
+        "T1021",
+        "T1133",
+        "T1021.001"
+      ],
+      "phase": "A",
+      "round_number": 1,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_77e7da1d",
+      "author_group": "endpoint_security",
+      "author_persona": "defensive",
+      "title": "Complete Absence of Endpoint Detection and Response (EDR) and Antivirus (AV)",
+      "description": "The enterprise has no EDR or AV deployed on any of its endpoints. This represents a critical security gap, as there is no capability for detecting, preventing, or responding to threats at the host level.",
+      "affected_assets": [
+        "All hosts (WEB-01",
+        "DB-01",
+        "FW-01",
+        "WIN-01",
+        "MAIL-01)"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "\"No EDR, SIEM, or WAF deployed.\" and \"Security controls: none (no EDR, SIEM, AV, NDR, WAF, MFA, DLP)\""
+      ],
+      "recommendations": [
+        "Immediately deploy a robust EDR solution with integrated Next-Generation Antivirus (NGAV) capabilities to all applicable hosts (WEB-01, DB-01, WIN-01, MAIL-01). Ensure the EDR provides comprehensive visibility into process activity, file changes, network connections, and detailed script execution logging (e.g., PowerShell script block logging, AMSI integration). Configure EDR to prevent credential dumping and detect ransomware activity."
+      ],
+      "mitre_techniques": [
+        "T1059.001",
+        "T1059.003",
+        "T1003.001",
+        "T1005",
+        "T1486"
+      ],
+      "phase": "A",
+      "round_number": 1,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_81272fc6",
+      "author_group": "endpoint_security",
+      "author_persona": "offensive",
+      "title": "Data Collection for Lateral Movement on WEB-01",
+      "description": "After exploiting CVE-2021-41773 to achieve Remote Code Execution (RCE) on WEB-01, an attacker can perform extensive data collection (T1005). This involves searching for sensitive configuration files within the web application directory or system (`/var/www/html/`, `/etc/apache2/`, etc.). These files frequently contain hardcoded database credentials (e.g., for DB-01), API keys, SSH keys, or other secrets. The lack of security controls means such data collection activities will go undetected, providing the attacker with the necessary credentials to pivot laterally from the DMZ to the critical Database zone (DB-01).",
+      "affected_assets": [
+        "WEB-01"
+      ],
+      "severity": "high",
+      "confidence": 0.6,
+      "evidence": [
+        "Ubuntu 20.04, Apache 2.4.49, unpatched (CVE-2021-41773), no EDR, SIEM, or AV."
+      ],
+      "recommendations": [
+        "Implement strict file permissions on configuration files, ensuring they are not readable by the web server process if not absolutely necessary. Implement secrets management best practices, avoiding hardcoded credentials in configuration files. Conduct regular security audits of web application code and server configurations."
+      ],
+      "mitre_techniques": [
+        "T1003.001",
+        "T1053.005",
+        "T1005"
+      ],
+      "phase": "A",
+      "round_number": 1,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_e1963889",
+      "author_group": "appsec",
+      "author_persona": "auditor",
+      "title": "Lack of Application Security Logging and Monitoring",
+      "description": "The absence of a Security Information and Event Management (SIEM) system means that critical application logs (e.g., web server access logs, application error logs, authentication logs, API activity logs) are not being centrally collected, analyzed, or monitored for security events. This represents a severe gap in OWASP A09: Security Logging and Monitoring Failures. Without proper logging and monitoring, detecting ongoing attacks, identifying successful breaches, or performing effective incident response becomes extremely difficult, allowing attackers (e.g., exploiting T1190) to operate undetected for extended periods.",
+      "affected_assets": [
+        "All applications/APIs"
+      ],
+      "severity": "high",
+      "confidence": 0.6,
+      "evidence": [
+        "\"Security controls: none (no EDR, SIEM, AV, NDR, WAF, MFA, DLP)\""
+      ],
+      "recommendations": [
+        "Implement a centralized logging solution and integrate all relevant application logs, web server logs, and API gateway logs into it. Establish monitoring rules and alerts for suspicious activities such as multiple failed login attempts, unusual access patterns, anomalous error messages indicative of attacks (e.g., SQL injection attempts), and unauthorized access attempts. If a full SIEM is not immediately feasible, at least ensure robust local logging is configured and establish a process for regular, manual review of these logs."
+      ],
+      "mitre_techniques": [
+        "T1190"
+      ],
+      "phase": "A",
+      "round_number": 1,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_5767623c",
+      "author_group": "endpoint_security",
+      "author_persona": "admin",
+      "title": "Lack of Local Administrator Account Management",
+      "description": "Without proper management and restriction of local administrator accounts, any compromise of a standard user account on an endpoint can quickly lead to full system control. This facilitates lateral movement (e.g., using techniques like T1003.001 LSASS Memory Dump for credential access or T1053.005 Scheduled Task / Job for persistence) and makes it easier for attackers to install malware, modify critical configurations, or exfiltrate data from any compromised host.",
+      "affected_assets": [
+        "All hosts (WEB-01",
+        "DB-01",
+        "FW-01",
+        "WIN-01",
+        "MAIL-01)"
+      ],
+      "severity": "high",
+      "confidence": 0.6,
+      "evidence": [
+        "The infrastructure description lacks any mention of controls for local administrator accounts, privileged access management (PAM), or enforcement of the principle of least privilege. The complete absence of security controls (no EDR, SIEM, AV) strongly suggests that local admin accounts are not properly managed or audited."
+      ],
+      "recommendations": [
+        "Implement a strict policy for local administrator accounts across all endpoints. This includes:"
+      ],
+      "mitre_techniques": [
+        "T1003.001",
+        "T1053.005"
+      ],
+      "phase": "A",
+      "round_number": 1,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_44f6a364",
+      "author_group": "threat_intel",
+      "author_persona": "apt_analyst",
+      "title": "Exposed and Unpatched Windows Server with RDP",
+      "description": "The WIN-01 host, an unpatched Windows Server 2019, has its RDP service directly exposed to the internet. This creates a severe initial access vulnerability (T1078 - Valid Accounts, T1021.001 - Remote Services: RDP). APT28 commonly exploits exposed RDP services via brute-force attacks or by leveraging stolen credentials. The unpatched state increases the risk of known RDP exploits and local privilege escalation vulnerabilities once an initial foothold is gained. The absence of EDR or",
+      "affected_assets": [
+        "WIN-01 (Windows Server 2019)"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "Windows Server 2019, unpatched, RDP exposed. No EDR/SIEM."
+      ],
+      "recommendations": [
+        "Immediately patch Apache to a version that remediates CVE-2021-41773 (e.g., 2.4.50 or later). Implement a Web Application Firewall (WAF) in front of WEB-01 to mitigate web-based attacks."
+      ],
+      "mitre_techniques": [
+        "T1190",
+        "T1021.001",
+        "T1071.001",
+        "T1041",
+        "T1048",
+        "T1078"
+      ],
+      "phase": "A",
+      "round_number": 1,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_be8b96fd",
+      "author_group": "risk",
+      "author_persona": "compliance",
+      "title": "Absence of Core Security Controls (SIEM, EDR, WAF, MFA, DLP)",
+      "description": "The enterprise lacks fundamental security tools such as Security Information and Event Management (SIEM), Endpoint Detection and Response (EDR), Web Application Firewall (WAF), Antivirus (AV), Network Detection and Response (NDR), Multi-Factor Authentication (MFA), and Data Loss Prevention (DLP). This means there is no capability to effectively detect, prevent, monitor, or respond to security incidents. Without these controls, the organization operates with significant blind spots and is highly vulnerable to sophisticated and even basic attacks.",
+      "affected_assets": [
+        "Entire infrastructure/All hosts"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "No EDR, SIEM, or WAF deployed. No AV, NDR, MFA, DLP mentioned."
+      ],
+      "recommendations": [
+        "Implement network segmentation using FW-01 to create distinct security zones for the Internal and Database networks. Restrict traffic between these zones to only essential services and ports on a \"least privilege\" basis."
+      ],
+      "mitre_techniques": [],
+      "phase": "A",
+      "round_number": 1,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_b3603b9d",
+      "author_group": "threat_intel",
+      "author_persona": "ir_analyst",
+      "title": "Immediate Monitoring for Database Compromise",
+      "description": "DB-01 holds critical data. While patched, it's vulnerable if WIN-01 or WEB-01 (via lateral movement) are compromised. Monitoring database-specific logs is crucial for detecting unauthorized access, data manipulation, or exfiltration.",
+      "affected_assets": [
+        "DB-01"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "MySQL 8.0, is_critical=true, no network segmentation from WIN-01."
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "A",
+      "round_number": 1,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_03e22c19",
+      "author_group": "appsec",
+      "author_persona": "defensive",
+      "title": "Insufficient Application-Level Input Validation and Output Encoding",
+      "description": "With no Web Application Firewall (WAF) in place, the web application(s) hosted on WEB-01 are solely reliant on their internal code for protection against common web vulnerabilities. The lack of any mentioned Secure Development Lifecycle (SDL) practices, security-focused code reviews, or application security testing (SAST/DAST) strongly indicates that developers may not have adequately implemented robust input validation (to sanitize or reject malicious user-supplied data) and context-aware output encoding (to prevent injection of malicious scripts or commands into responses). This oversight violates fundamental application security best practices. Such deficiencies make the application(s) highly susceptible to attacks like SQL Injection, Cross-Site Scripting (XSS), Command Injection, and other data manipulation or code execution flaws, significantly increasing the attack surface for WEB-01 and potentially leading to the compromise of the backend DB-01.",
+      "affected_assets": [
+        "WEB-01 (any web application hosted)"
+      ],
+      "severity": "high",
+      "confidence": 0.6,
+      "evidence": [],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "A",
+      "round_number": 2,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_e7f5326f",
+      "author_group": "appsec",
+      "author_persona": "offensive",
+      "title": "Unmitigated Risk of Application-Level Vulnerabilities on WEB-01",
+      "description": "Beyond the known Apache RCE (CVE-2021-41773), any web application(s) hosted on WEB-01 are highly susceptible to common application-level vulnerabilities such as SQL Injection, Cross-Site Scripting (XSS), Server-Side Request Forgery (SSRF), and Authentication Bypass. The complete absence of a Web Application Firewall (WAF) means these attacks can be launched and executed without any inline detection or prevention. A successful SQL Injection could directly compromise DB-01 due to the lack of network segmentation between the Internal and Database zones. The lack of application security logging and monitoring further compounds this risk by making detection of exploitation difficult.",
+      "affected_assets": [
+        "WEB-01 (and potentially DB-01)"
+      ],
+      "severity": "high",
+      "confidence": 0.6,
+      "evidence": [
+        "WEB-01 is a public-facing web server, implying the presence of a web application. The infrastructure explicitly states \"no WAF\" and \"no EDR, SIEM, AV, NDR, WAF, MFA, DLP\"."
+      ],
+      "recommendations": [
+        "Conduct a comprehensive application security assessment (e.g., manual penetration testing, DAST, SAST) for all web applications and APIs hosted on WEB-01. Prioritize the implementation of a WAF to provide a baseline layer of defense against common web exploits. Ensure robust input validation and output encoding are implemented at the application layer."
+      ],
+      "mitre_techniques": [],
+      "phase": "A",
+      "round_number": 2,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_409fc75a",
+      "author_group": "network_security",
+      "author_persona": "offensive",
+      "title": "Absence of Network Intrusion Detection/Prevention System (NDR/NIDS)",
+      "description": "The Postfix mail server (version 3.5) is located in the DMZ, directly exposed to the internet. Given the documented lack of patching for other critical public-facing and internal systems (WEB-01, WIN-01), it is highly probable that MAIL-01 is also running unpatched software and is vulnerable to publicly known exploits (MITRE ATT&CK: [T1190] Exploit Public-Facing Application). A successful exploit on MAIL-01 could lead to initial access to the DMZ. From this foothold, an attacker could then attempt to pivot into the internal network, especially given the identified poor network segmentation between Internal and Database zones.",
+      "affected_assets": [
+        "Entire network infrastructure"
+      ],
+      "severity": "high",
+      "confidence": 0.6,
+      "evidence": [
+        "\"Security controls: none (no E"
+      ],
+      "recommendations": [
+        "Immediately update Postfix to the latest stable version and ensure the underlying Ubuntu 22.04 operating system is fully patched. Implement a robust, regular patching schedule for all DMZ-facing servers. Conduct a thorough vulnerability scan on MAIL-01 to identify and remediate specific vulnerabilities."
+      ],
+      "mitre_techniques": [
+        "T1190"
+      ],
+      "phase": "A",
+      "round_number": 2,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_cfdf88f1",
+      "author_group": "network_security",
+      "author_persona": "architect",
+      "title": "Inadequate Isolation of DMZ from Internal and Database Zones",
+      "description": "While DMZ hosts are designed for direct internet exposure, they must be robustly isolated from internal and database resources. Given that WEB-01 is critically vulnerable to RCE (CVE-2021-41773), a compromise of this public-facing application (T1190) is highly probable. Without strong, explicit firewall rules to segment the DMZ from the Internal and Database zones, an attacker gaining a foothold on WEB-01 could easily pivot (T1018) to discover and",
+      "affected_assets": [
+        "WEB-01",
+        "MAIL-01",
+        "WIN-01",
+        "DB-01"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "WEB-01 (DMZ) is unpatched with CVE-2021-41773 (RCE via T1190) and MAIL-01 (DMZ) is also directly exposed to the internet. The network description does not specify explicit segmentation rules between the DMZ and internal zones."
+      ],
+      "recommendations": [
+        "Implement strict network segmentation between the Internal and Database zones using FW-01 or a dedicated internal firewall. Define granular firewall rules to permit only the absolute minimum necessary traffic (least privilege principle) from specific, authorized internal hosts to DB-01 (e.g., specific application servers, not general user workstations)."
+      ],
+      "mitre_techniques": [
+        "T1133",
+        "T1021.001",
+        "T1190",
+        "T1018"
+      ],
+      "phase": "A",
+      "round_number": 2,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_29dbf152",
+      "author_group": "endpoint_security",
+      "author_persona": "defensive",
+      "title": "No Behavioral Detection for Advanced Threats (Ransomware, Obfuscation)",
+      "description": "Without an EDR solution, the environment completely lacks behavioral analysis capabilities necessary to detect sophisticated and novel threats, including ransomware (T1486 - Data Encrypted for Impact) and obfuscated malware (T1027 - Obfuscated Files or Information). Traditional signature-based antivirus (which is also absent) is insufficient against such threats, and without EDR's ability to monitor process activity, file system changes, and network connections for anomalous behavior, these attacks will go undetected until significant impact has occurred.",
+      "affected_assets": [
+        "WEB-01",
+        "DB-01",
+        "FW-01",
+        "WIN-01",
+        "MAIL-01"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "\"No EDR, SIEM, or WAF deployed.\""
+      ],
+      "recommendations": [
+        "Prioritize the deployment of a modern EDR solution that leverages advanced behavioral analytics, machine learning, and anomaly detection to identify and prevent novel and obfuscated threats, including ransomware, across all endpoints."
+      ],
+      "mitre_techniques": [
+        "T1059.001",
+        "T1059.003",
+        "T1003.001",
+        "T1486",
+        "T1027"
+      ],
+      "phase": "A",
+      "round_number": 2,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_b475b1bb",
+      "author_group": "appsec",
+      "author_persona": "auditor",
+      "title": "Unspecified and Potentially Weak API Authentication and Authorization Controls",
+      "description": "The fundamental security of any API relies on strong authentication and granular authorization. The complete absence of general security controls, particularly the explicit mention of no Multi-Factor Authentication (MFA), strongly suggests that any APIs hosted on WEB-01 are likely to have weak or inadequate authentication and authorization controls. This could lead to account compromise, unauthorized data access, and privilege escalation if an attacker bypasses basic authentication or exploits a design flaw in authorization logic. This is a direct violation of OWASP Top 10 A07: Identification and Authentication Failures and A01: Broken Access Control. An attacker could leverage techniques like [T1190] Exploit Public-Facing Application through credential stuffing or exploiting broken authentication.",
+      "affected_assets": [
+        "WEB-01 (potential APIs)"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "\"Security controls: none (no EDR, SIEM, AV, NDR, WAF, MFA, DLP)\" explicitly states no MFA. No details on API authentication mechanisms (e.g., OAuth, API keys, session tokens, JWTs) or authorization frameworks."
+      ],
+      "recommendations": [
+        "Implement strong, industry-standard authentication mechanisms for all APIs (e.g., OAuth 2.0, OpenID Connect with robust token validation). Enforce MFA for all user accounts accessing sensitive API functionalities. Design and implement granular authorization controls (e.g., Role-Based Access Control - RBAC, or Attribute-Based Access Control - ABAC) to ensure users can only access resources and perform actions for which they are explicitly authorized. Perform regular security audits and penetration tests on API authentication and authorization logic."
+      ],
+      "mitre_techniques": [
+        "T1190"
+      ],
+      "phase": "A",
+      "round_number": 2,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_eb94a4d7",
+      "author_group": "endpoint_security",
+      "author_persona": "admin",
+      "title": "Incomplete Software Inventory and Lack of Hardening Baselines",
+      "description": "A complete software inventory is fundamental for vulnerability management, license compliance, and understanding the attack surface. The current inventory is minimal, suggesting a lack of a comprehensive asset discovery process. Without knowing what software is installed, it's impossible to track all vulnerabilities effectively. Furthermore, the exposed RDP on `WIN-01` and the unpatched Apache on `WEB-01` indicate that hardening baselines are either non-existent or not enforced. Without a defined hardening baseline, systems are left with default, insecure configurations, increasing the risk of compromise through common attack vectors, including those leveraging default credentials or services (T1005 Data from Local System, T1059.003 Windows Command Shell).",
+      "affected_assets": [
+        "All hosts (WEB-01",
+        "DB-01",
+        "FW-01",
+        "WIN-01",
+        "MAIL-01)"
+      ],
+      "severity": "high",
+      "confidence": 0.6,
+      "evidence": [],
+      "recommendations": [
+        "Implement a robust asset management system to maintain a complete and up-to-date software and hardware inventory across all endpoints. Develop and enforce hardening baselines for all operating systems and applications (e.g., CIS Benchmarks). Regularly audit configurations against these baselines to ensure compliance and reduce the attack surface. Disable unnecessary services and ports, and secure critical services like RDP (e.g., restricting access to specific IPs, using strong authentication, changing default ports)."
+      ],
+      "mitre_techniques": [
+        "T1053.005",
+        "T1003.001",
+        "T1005",
+        "T1059.003"
+      ],
+      "phase": "A",
+      "round_number": 2,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_ba49a0ec",
+      "author_group": "threat_intel",
+      "author_persona": "apt_analyst",
+      "title": "High Likelihood of APT/Financially Motivated Group Compromise via Multiple Attack Vectors",
+      "description": "This infrastructure presents a highly attractive and low-resistance target for various opportunistic APT groups and financially motivated threat actors, such as **APT28 (Fancy Bear), Lazarus Group, or ransomware affiliates**. These groups commonly leverage known vulnerabilities in public-facing applications and exposed services like RDP for initial access.",
+      "affected_assets": [
+        "WEB-01",
+        "WIN-01",
+        "Entire Infrastructure"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "WEB-01 (Apache 2.4.49, unpatched, CVE-2021-41773), WIN-01 (unpatched, RDP exposed), absence of EDR/SIEM/WAF/AV/MFA/segmentation."
+      ],
+      "recommendations": [],
+      "mitre_techniques": [
+        "T1190",
+        "T1078",
+        "T1071.001",
+        "T1041",
+        "T1048",
+        "T1566.001"
+      ],
+      "phase": "A",
+      "round_number": 2,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_7fd081fa",
+      "author_group": "risk",
+      "author_persona": "ciso",
+      "title": "Lack of Data Classification and Data Protection Policies",
+      "description": "Without a clear understanding of what data is processed, stored, or transmitted across the enterprise (especially on critical systems like WEB-01 and DB-01), its sensitivity, and its regulatory requirements, effective data protection controls cannot be designed or implemented. This is a foundational business risk, as it makes it impossible to accurately assess the true impact of a data breach, prioritize security investments based on data value, or demonstrate compliance with data privacy regulations (e.g., GDPR, CCPA, PCI DSS if applicable). A breach involving unknown quantities or types of sensitive data could lead to unforeseen severe financial penalties, significant reputational harm, and legal repercussions.",
+      "affected_assets": [
+        "Enterprise-wide (especially WEB-01",
+        "DB-01",
+        "WIN-01)"
+      ],
+      "severity": "high",
+      "confidence": 0.6,
+      "evidence": [
+        "The existing risk GAP \"Cannot verify if personal or cardholder data is processed or stored on WEB-01\" highlights this foundational issue. No data classification or data mapping is mentioned in the infrastructure description."
+      ],
+      "recommendations": [
+        "Implement a data classification framework to identify, label, and categorize all data assets based on sensitivity and regulatory requirements. Conduct thorough data mapping exercises to understand where sensitive data resides and how it flows through the systems. Develop and enforce data protection policies and access controls commensurate with the data classification."
+      ],
+      "mitre_techniques": [],
+      "phase": "A",
+      "round_number": 2,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_c0d05783",
+      "author_group": "risk",
+      "author_persona": "compliance",
+      "title": "Absence of a Formal Information Security Management System (ISMS) and Risk Management Process",
+      "description": "The current infrastructure demonstrates a complete lack of foundational security controls and processes. This indicates the absence of a formal Information Security Management System (ISMS), which is a core requirement for frameworks like ISO 27001 (explicitly A.5, A.6, A.12.6.1) and SOC2 (CC3.",
+      "affected_assets": [
+        "Enterprise-wide operations and data"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "\"Security controls: none (no EDR, SIEM, AV, NDR, WAF, MFA, DLP)\", \"unpatched hosts\", \"no network segmentation\", \"RDP exposed\", \"CVE-2021-41773\""
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "A",
+      "round_number": 2,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_40905ed9",
+      "author_group": "network_security",
+      "author_persona": "architect",
+      "title": "Architecturally Flawed Placement of Perimeter Firewall (FW-01) in an Internal Management Zone",
+      "description": "A perimeter firewall's fundamental role is to establish and enforce trust boundaries between external (Internet) and internal networks, as well as between internal zones (DMZ, Internal, Database). Placing FW-01 within a dedicated \"Management\" zone rather than at the true network perimeter (i.e., between the Internet and the DMZ/Internal zones) indicates a severe architectural misconfiguration. This design choice can lead to:",
+      "affected_assets": [
+        "FW-01",
+        "Network Architecture",
+        "DMZ",
+        "Internal",
+        "Database Zones"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "FW-01 (pfSense 2.5) is listed as being in the \"Management\" zone, while simultaneously being the presumed primary network firewall given the small enterprise context and lack of other listed firewall devices."
+      ],
+      "recommendations": [
+        "Re-architect the network to position FW-01 at the true network perimeter, acting as the gateway between the Internet, DMZ, Internal, and Database zones. Ensure that the firewall's management interfaces are isolated on a dedicated, highly restricted management segment, accessible only by authorized personnel from secure jump hosts, and not directly from other internal zones."
+      ],
+      "mitre_techniques": [],
+      "phase": "A",
+      "round_number": 3,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_ffc9fd21",
+      "author_group": "appsec",
+      "author_persona": "defensive",
+      "title": "Critical Gap: Absence of Web Application Firewall (WAF) for Public-Facing Applications",
+      "description": "The complete absence of a Web Application Firewall (WAF) leaves the public-facing WEB-01 host directly exposed to a wide array of web application attacks, including SQL Injection, Cross-Site Scripting (XSS), command injection, and other OWASP Top 10 vulnerabilities. A WAF serves as a crucial first line of defense, providing virtual patching capabilities for known vulnerabilities (such as CVE-2021-41773 on Apache, which is a critical path traversal and RCE vulnerability) and detecting/blocking malicious requests before they reach the application. Relying solely on the application's inherent security for these threats is a severe security best practice violation, especially given the unpatched state of the web server and the overall lack of security controls. This also directly impacts our ability to defend against [T1190] Exploit Public-Facing Application.",
+      "affected_assets": [
+        "WEB-01"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "The infrastructure explicitly states \"no WAF deployed\". WEB-01 is an Apache web server (2.4.49, unpatched, CVE-2021-41773) located in the DMZ with direct internet exposure."
+      ],
+      "recommendations": [
+        "Urgently deploy a WAF solution (e.g., ModSecurity with OWASP Core Rule Set, or a cloud-based WAF service) in front of WEB-01. Configure it to actively block malicious traffic, implement virtual patching for known vulnerabilities, and continuously monitor web traffic for suspicious activity."
+      ],
+      "mitre_techniques": [
+        "T1190"
+      ],
+      "phase": "A",
+      "round_number": 3,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_d7268fec",
+      "author_group": "appsec",
+      "author_persona": "offensive",
+      "title": "Unrestricted Post-Exploitation Capabilities on Compromised Windows Host",
+      "description": "Once an attacker gains initial access to WIN-01 (e.g., via exploiting the exposed RDP, lateral movement from WEB-01, or a successful spearphishing attack), they will have virtually unrestricted capabilities for post-exploitation. The absence of EDR and AV means that PowerShell (MITRE ATT&CK T1059.001) and Windows Command Shell (T1059.003) can be used extensively for reconnaissance, privilege escalation, lateral movement, and data exfiltration without detection. Furthermore, obfuscated payloads (T1027) designed to bypass signature-based detection will likely execute unimpeded, significantly increasing the impact and stealth of a compromise.",
+      "affected_assets": [
+        "WIN-01"
+      ],
+      "severity": "high",
+      "confidence": 0.6,
+      "evidence": [
+        "WIN-01 is an \"unpatched\" Windows Server 2019 with \"RDP exposed\" and \"No EDR, SIEM, or AV deployed.\""
+      ],
+      "recommendations": [
+        "Implement a comprehensive email security gateway for inbound and outbound mail, deploy EDR and antivirus solutions on all endpoints (servers and workstations), and conduct regular, mandatory security awareness training for all employees, emphasizing phishing recognition and reporting."
+      ],
+      "mitre_techniques": [
+        "T1566.001",
+        "T1204.002",
+        "T1059.001",
+        "T1059.003",
+        "T1027"
+      ],
+      "phase": "A",
+      "round_number": 3,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_e5802125",
+      "author_group": "endpoint_security",
+      "author_persona": "defensive",
+      "title": "Unmitigated Credential Theft Risk via LSASS on Windows Server",
+      "description": "The absence of an EDR solution means there is no behavioral protection or detection mechanism against techniques like LSASS Memory Dump (T1003.001) on WIN-01. An attacker who gains local administrator privileges could easily dump LSASS memory to extract credentials (e.g., NTLM hashes, clear-text passwords if available) of logged-on users. This is a critical risk, as it provides a direct path to acquiring privileged credentials for lateral movement across the network, potentially compromising the entire environment, especially if domain administrators authenticate to this server.",
+      "affected_assets": [
+        "WIN-01"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "\"No EDR, SIEM, or WAF deployed.\" and \"WIN-01: Windows Server 2019\"."
+      ],
+      "recommendations": [
+        "Deploy an EDR solution with specific capabilities to protect LSASS processes from unauthorized access and memory dumping. Implement Credential Guard (if Hyper-V virtualization-based security is available and compatible) to further protect credentials. Enforce the principle of least privilege, ensuring no unnecessary administrative access to WIN-01."
+      ],
+      "mitre_techniques": [
+        "T1059.001",
+        "T1059.003",
+        "T1003.001"
+      ],
+      "phase": "A",
+      "round_number": 3,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_658b4a0c",
+      "author_group": "appsec",
+      "author_persona": "auditor",
+      "title": "Absence of API Rate Limiting to Prevent Resource Exhaustion and Brute-Force Attacks",
+      "description": "The public-facing web server, WEB-01, is a prime candidate for hosting applications that expose APIs directly to the internet. The complete absence of a Web Application Firewall (WAF) and any other stated security controls (EDR, SIEM) strongly indicates a lack of API rate limiting. This leaves any API endpoints vulnerable to various automated attacks, including brute-force attempts against authentication credentials, denial of service (DoS) through resource exhaustion, and excessive data scraping. Such attacks can lead to account takeovers, service unavailability, and unauthorized data collection, directly addressing OWASP API4:2023 Unrestricted Resource Consumption and MITRE ATT&CK T1190 (Exploit Public-Facing Application). The unpatched Apache server further exacerbates the risk by potentially allowing bypasses of any rudimentary controls.",
+      "affected_assets": [
+        "WEB-01 (Public-facing API endpoints)"
+      ],
+      "severity": "high",
+      "confidence": 0.6,
+      "evidence": [
+        "\"Apache 2.4.49, zone DMZ, Ubuntu 20.04, unpatched\", \"No EDR, SIEM, or WAF deployed.\" \"Direct internet exposure on DMZ hosts.\""
+      ],
+      "recommendations": [
+        "Implement robust API rate limiting mechanisms. This can be achieved through a dedicated WAF, an API Gateway, or directly within the application code. Rate limits should be configured per IP address, per user session, and potentially per API endpoint to protect against various attack vectors. Monitor and alert on rate-limiting breaches."
+      ],
+      "mitre_techniques": [
+        "T1190"
+      ],
+      "phase": "A",
+      "round_number": 3,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_99e54af1",
+      "author_group": "endpoint_security",
+      "author_persona": "offensive",
+      "title": "Unrestricted Execution of Malicious Payloads via PowerShell and Command Shell on Windows Server",
+      "description": "PowerShell (T1059.001) and the Windows Command Shell (T1059.003) are powerful tools that attackers commonly abuse for reconnaissance, execution of malicious code, and \"living off the land.\" Given the complete absence of EDR, SIEM, or AV, an attacker can execute arbitrary commands and scripts, including highly obfuscated or encoded payloads (T1027). This allows for direct execution of malware, downloaders, stagers, and post-exploitation frameworks without detection. This makes WIN-01 an extremely permissive environment for an attacker to conduct a wide range of malicious activities.",
+      "affected_assets": [
+        "WIN-01"
+      ],
+      "severity": "high",
+      "confidence": 0.75,
+      "evidence": [
+        "WIN-01 is a Windows Server 2019, unpatched, with no EDR, SIEM, or AV deployed. PowerShell and cmd.exe are native components of Windows."
+      ],
+      "recommendations": [
+        "Implement EDR with advanced PowerShell script block logging, behavioral analysis, and threat hunting capabilities. Enforce PowerShell Constrained Language Mode to limit its capabilities for unprivileged users. Implement application whitelisting to restrict which executables and scripts can run."
+      ],
+      "mitre_techniques": [
+        "T1003.001",
+        "T1053.005",
+        "T1059.001",
+        "T1059.003",
+        "T1027"
+      ],
+      "phase": "A",
+      "round_number": 3,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": [
+        {
+          "profile_id": "supply_chain",
+          "action": "ATTACKER_CONFIRM",
+          "comment": "Post-exploitation, after pivoting through a third-party onto WIN-01, this is a critical finding for credential harvesting, enabling further lateral movement within the target's network.",
+          "confidence_delta": 0.15
+        }
+      ]
+    },
+    {
+      "finding_id": "ef_a343d560",
+      "author_group": "endpoint_security",
+      "author_persona": "admin",
+      "title": "Absence of a Disaster Recovery Plan and Backup Strategy",
+      "description": "A severe administrative and operational gap exists due to the apparent absence of a documented disaster recovery plan and a comprehensive, tested backup strategy. This leaves the organization highly vulnerable to irreversible data loss and prolonged service disruption from various threats, including ransomware (T1486), hardware failures, or accidental deletions. Without a robust plan and validated backups, business continuity is critically jeopardized, and the ability to recover from an incident is severely impaired.",
+      "affected_assets": [
+        "All hosts",
+        "especially critical ones (DB-01",
+        "FW-01",
+        "WIN-01)"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "The infrastructure description provides no information about backup procedures, recovery time objectives (RTO), or recovery point objectives (RPO). The question \"Are backups offline / air-gapped?\" from the T1486 ATT&CK technique (Data Encrypted for Impact) cannot be answered."
+      ],
+      "recommendations": [
+        "Develop and implement a comprehensive disaster recovery plan that includes defined RTOs and RPOs for all critical systems and data. Establish a robust and regularly tested backup strategy following best practices (e.g., 3-2-1 rule: 3 copies, 2 different media, 1 offsite/air-gapped). Ensure backups are immutable and protected from compromise."
+      ],
+      "mitre_techniques": [
+        "T1053.005",
+        "T1003.001",
+        "T1486"
+      ],
+      "phase": "A",
+      "round_number": 3,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_841a2cd8",
+      "author_group": "threat_intel",
+      "author_persona": "apt_analyst",
+      "title": "Undetected APT Command & Control (C2) and Data Exfiltration Due to Lack of Visibility",
+      "description": "Once an APT group (e.g., APT28, Lazarus Group) establishes initial access, the infrastructure's complete lack of monitoring, detection, and prevention capabilities ensures that subsequent malicious activities, including establishing command and control (C2) and exfiltrating critical data, will go entirely unnoticed.",
+      "affected_assets": [
+        "All hosts (WEB-01",
+        "DB-01",
+        "FW-01",
+        "WIN-01",
+        "MAIL-01)",
+        "Critical data (is_critical=true on DB-01)"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "Complete absence of EDR, SIEM, NDR, WAF, DLP. Lack of network segmentation between Internal and Database zones."
+      ],
+      "recommendations": [],
+      "mitre_techniques": [
+        "T1190",
+        "T1133",
+        "T1566.001",
+        "T1071.001",
+        "T1041",
+        "T1048"
+      ],
+      "phase": "A",
+      "round_number": 3,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_8c427e5b",
+      "author_group": "risk",
+      "author_persona": "compliance",
+      "title": "GDPR: Violation of Security of Processing (Article 32) and Data Protection by Design (Article 25)",
+      "description": "GDPR: Violation of Security of Processing (Article 32) and Data Protection by Design (Article 25)",
+      "affected_assets": [
+        "All hosts (WEB-01",
+        "DB-01",
+        "FW-01",
+        "WIN-01",
+        "MAIL-01) and any personal data processed."
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "A",
+      "round_number": 3,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_c7f5c788",
+      "author_group": "network_security",
+      "author_persona": "architect",
+      "title": "Inadequate Isolation of Management Zone for Critical Infrastructure",
+      "description": "While a separate \"Management\" zone is designated for FW-01, there is no indication that this zone is properly isolated from less trusted networks (like the Internal zone or potentially the DMZ if misconfigured). If management interfaces of critical devices like the firewall are accessible from general user workstations (e.g., WIN-01) or potentially compromised DMZ hosts (WEB-01, MAIL-01), it presents a significant attack vector. An attacker gaining a foothold in the Internal network could easily pivot to the firewall's management interface, leading to configuration changes, rule bypasses, or complete network control.",
+      "affected_assets": [
+        "FW-01",
+        "Management Zone"
+      ],
+      "severity": "high",
+      "confidence": 0.6,
+      "evidence": [
+        "\"FW-01: pfSense 2.5, zone Management, is_critical=true.\" The infrastructure description does not provide details on how the 'Management' zone is isolated or protected from other zones or the internet. Given the overall lack of security controls and segmentation, it is highly probable that the management zone lacks proper isolation."
+      ],
+      "recommendations": [
+        "Establish a dedicated, strictly isolated management network (e.g., a separate VLAN/subnet) with stringent access controls. Access to this management network should be highly restricted to specific, hardened administrative jump hosts or workstations, ideally utilizing multi-factor authentication (MFA). Management interfaces of all critical infrastructure, especially FW-01, should only be accessible from this dedicated, isolated management network."
+      ],
+      "mitre_techniques": [],
+      "phase": "B",
+      "round_number": 4,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_bd63840e",
+      "author_group": "network_security",
+      "author_persona": "offensive",
+      "title": "Direct RCE via Apache CVE-2021-41773 on WEB-01",
+      "description": "Direct RCE via Apache CVE-2021-41773 on WEB-01",
+      "affected_assets": [
+        "WEB-01 (Apache 2.4.49)"
+      ],
+      "severity": "critical",
+      "confidence": 0.85,
+      "evidence": [
+        "WEB-01 is running Apache 2.4.49, is unpatched, located in the DMZ, and directly exposed to the internet. The infrastructure explicitly states CVE-2021-41773 is applicable."
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "B",
+      "round_number": 4,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": [
+        {
+          "profile_id": "insider_threat",
+          "action": "ATTACKER_CONFIRM",
+          "comment": "If I can reach WEB-01 from my internal access (e.g., from WIN-01 due to lack of segmentation,",
+          "confidence_delta": 0.15
+        }
+      ]
+    },
+    {
+      "finding_id": "ef_f97fb77a",
+      "author_group": "threat_intel",
+      "author_persona": "apt_analyst",
+      "title": "Exposed and Unsecured RDP on Unpatched Windows Server",
+      "description": "The exposure of RDP on WIN-01, combined with the lack of multi-factor authentication (MFA) and an unpatched operating system, presents a critical initial access and lateral movement vector for APTs. APTs frequently conduct brute-force attacks or credential stuffing against exposed RDP services (MITRE ATT&CK T1078: Valid Accounts, T1021.001: Remote Services: RDP). The absence of EDR or SIEM means that such attempts, or successful compromises, would not be detected, allowing an APT to gain an immediate foothold in the internal network. An unpatched Windows Server 2019 may also harbor other vulnerabilities exploitable over RDP.",
+      "affected_assets": [
+        "WIN-01"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "Windows Server 2019, unpatched, RDP exposed, no EDR, SIEM, MFA"
+      ],
+      "recommendations": [
+        "Restrict RDP access to WIN-01 to trusted IP ranges (e.g., via a VPN connection or specific jump hosts). Implement multi-factor authentication (MFA) for all RDP access. Ensure Windows Server 2019 is fully patched to mitigate any known RDP-related vulnerabilities. Deploy EDR on WIN-01 for behavioral detection and logging."
+      ],
+      "mitre_techniques": [
+        "T1078",
+        "T1059.001",
+        "T1059.003",
+        "T1190",
+        "T1021.001"
+      ],
+      "phase": "B",
+      "round_number": 4,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_502aa82a",
+      "author_group": "appsec",
+      "author_persona": "offensive",
+      "title": "High Likelihood of Common Web Application Vulnerabilities on WEB-01",
+      "description": "Beyond the known infrastructure-level Apache vulnerability (CVE-2021-41773), the web application hosted on WEB-01 is highly likely to suffer from common vulnerabilities such as SQL Injection (SQLi), Cross-Site Scripting (XSS), Broken Access Control, Server-Side Request Forgery (SSRF), or other logic flaws. The absence of a WAF means there are no protections against these widespread attack vectors, allowing direct exploitation (T1190). Successful exploitation could lead to unauthorized data access or modification (potentially from DB-01 due to lack of network segmentation), complete compromise of the web server, or further lateral movement within the network.",
+      "affected_assets": [
+        "WEB-01 (the web application hosted on Apache)"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "WEB-01 is a public-facing host in the DMZ, running Apache 2.4.49, with no WAF deployed. The overall security posture indicates a complete lack of security controls (no EDR, SIEM, AV, NDR, WAF, MFA, DLP), making it highly probable that the web application itself lacks secure coding practices. This is distinct from the Apache server vulnerability (CVE-2021-41773) and general API controls."
+      ],
+      "recommendations": [
+        "Conduct a comprehensive web application penetration test and security code review for the application(s) hosted on WEB-01. Implement secure coding guidelines (e.g., OWASP Top 10) and ensure proper input validation, output encoding, and parameterized queries. Deploy a WAF to provide a baseline level of protection against common web attacks."
+      ],
+      "mitre_techniques": [
+        "T1190"
+      ],
+      "phase": "B",
+      "round_number": 5,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_dfe45354",
+      "author_group": "risk",
+      "author_persona": "compliance",
+      "title": "PCI-DSS: Systemic Non-Compliance and Severe Risk if Cardholder Data is Processed",
+      "description": "PCI-DSS: Systemic Non-Compliance and Severe Risk if Cardholder Data is Processed",
+      "affected_assets": [
+        "All hosts (WEB-01",
+        "DB-01",
+        "FW-01",
+        "WIN-01",
+        "MAIL-01)"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "The infrastructure entirely lacks fundamental security controls required by PCI-DSS, including but not limited to"
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "B",
+      "round_number": 5,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_2e177994",
+      "author_group": "appsec",
+      "author_persona": "auditor",
+      "title": "Absence of Explicit JWT Expiry and Revocation Mechanisms",
+      "description": "If the public-facing application on WEB-01 utilizes JSON Web Tokens (JWTs) for API authentication or session management, there is no evidence of explicit expiry dates being enforced or robust revocation mechanisms being in place. Without short-lived tokens and the ability to revoke compromised tokens, an attacker who obtains a valid JWT could maintain persistent unauthorized access, leading to session hijacking, data breaches, or further",
+      "affected_assets": [
+        "WEB-01 (assuming API usage)"
+      ],
+      "severity": "high",
+      "confidence": 0.6,
+      "evidence": [
+        "\"Unspecified and Potentially Weak API Authentication and Authorization Controls\" (previous finding by appsec/auditor), lack of any specified security controls for API design, general absence of EDR/SIEM/WAF for detection."
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "B",
+      "round_number": 6,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_c7fdf667",
+      "author_group": "risk",
+      "author_persona": "ciso",
+      "title": "Critical Lack of Network Segmentation Exposing Database to Internal Compromise",
+      "description": "Critical Lack of Network Segmentation Exposing Database to Internal Compromise",
+      "affected_assets": [
+        "WIN-"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "B",
+      "round_number": 6,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_f571ca36",
+      "author_group": "network_security",
+      "author_persona": "architect",
+      "title": "Single Point of Failure for Network Security and Connectivity (FW-01)",
+      "description": "The infrastructure relies on a single instance of FW-01 for all firewalling and potentially routing functions. Given its critical status, a failure of this single device (due to hardware malfunction, software bug, or successful attack) would result in a complete loss of network connectivity and security enforcement for the entire enterprise. This creates a catastrophic single point of failure that directly impacts business continuity and the overall security posture.",
+      "affected_assets": [
+        "FW-01",
+        "Entire network infrastructure"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "\"Hosts: - FW-01: pfSense 2.5, zone Management, is_critical=true\""
+      ],
+      "recommendations": [
+        "Implement high availability (HA) for the primary perimeter firewall by deploying a redundant pair of FW-01 devices. This ensures that in the event of a failure of one device, the other can seamlessly take over, maintaining network connectivity and security enforcement without interruption."
+      ],
+      "mitre_techniques": [
+        "T1071.001",
+        "T1595",
+        "T1021.001",
+        "T1021.002"
+      ],
+      "phase": "B",
+      "round_number": 7,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_2893a275",
+      "author_group": "endpoint_security",
+      "author_persona": "offensive",
+      "title": "Easy Persistence via Scheduled Tasks on Compromised Windows Server",
+      "description": "Once an attacker gains initial access (e.g., via the exposed RDP or other means), they can establish persistent access on WIN-01 by creating new scheduled tasks or modifying existing ones. These tasks can execute malicious payloads, re-establish Command and Control (C2) channels, or trigger further compromise at specified intervals or events. The complete absence of EDR, SIEM, or even basic AV means these actions will go unnoticed, allowing long-term compromise and control of the host.",
+      "affected_assets": [
+        "WIN-01"
+      ],
+      "severity": "critical",
+      "confidence": 1.0,
+      "evidence": [
+        "WIN-01 is an unpatched Windows Server 2019. The infrastructure explicitly states \"Security controls: none (no EDR, SIEM, AV, NDR, WAF, MFA, DLP)\". This allows an attacker with administrative privileges to easily create and modify scheduled tasks (T1053.005) without detection or prevention."
+      ],
+      "recommendations": [
+        "Implement an EDR solution with behavioral analytics capable of detecting the creation and modification of scheduled tasks. Integrate EDR logs with a SIEM for"
+      ],
+      "mitre_techniques": [
+        "T1053.005"
+      ],
+      "phase": "B",
+      "round_number": 7,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": [
+        {
+          "profile_id": "insider_threat",
+          "action": "ATTACKER_CONFIRM",
+          "comment": "Maintaining access is key to my operations. Scheduled tasks provide a simple and effective way to ensure I can regain control of WIN-01 even if my initial session is terminated.",
+          "confidence_delta": 0.15
+        },
+        {
+          "profile_id": "apt",
+          "action": "ATTACKER_CONFIRM",
+          "comment": "Scheduled tasks are a legitimate, built-in Windows feature, making their",
+          "confidence_delta": 0.15
+        }
+      ]
+    },
+    {
+      "finding_id": "ef_85b008b9",
+      "author_group": "endpoint_security",
+      "author_persona": "admin",
+      "title": "Lack of Least Privilege Enforcement for Local Administrator Accounts",
+      "description": "There is no indication that the principle of least privilege is applied to local administrator accounts on Windows systems (e.g., WIN-01) or root/sudo privileges on Linux systems. Over-privileged accounts significantly increase the attack surface and the potential impact of a successful compromise, making it easier for attackers to escalate privileges (e.g., via LSASS dumps T1003.001) and move laterally across the network.",
+      "affected_assets": [
+        "WIN-01",
+        "and likely other hosts"
+      ],
+      "severity": "high",
+      "confidence": 0.6,
+      "evidence": [
+        "The ADMIN role's initial query \"Who has been granted local admin accounts?\" indicates this is an unaddressed area. The \"Unmitigated Credential Theft Risk via LSASS on Windows Server\" finding further highlights the danger of over-privileged accounts."
+      ],
+      "recommendations": [
+        "Establish a formal, documented patch management policy and process that includes regular vulnerability scanning, patch testing, scheduled deployment, and verification for all operating systems and applications. Prioritize critical systems and public-facing assets, and consider automated patching solutions."
+      ],
+      "mitre_techniques": [
+        "T1003.001"
+      ],
+      "phase": "B",
+      "round_number": 7,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_f6ecfe6d",
+      "author_group": "threat_intel",
+      "author_persona": "apt_analyst",
+      "title": "Extreme Vulnerability to Specific APT Group TTPs Due to Complete Lack of Defensive Controls",
+      "description": "This infrastructure presents an ideal, low-effort target for various APT groups, including financially motivated ones like **Lazarus Group** or state-sponsored groups like **APT28 (Fancy Bear)** seeking initial access or supply chain entry. The complete absence of defensive controls allows these groups to execute their typical TTPs with minimal risk of detection.",
+      "affected_assets": [
+        "Entire Infrastructure (WEB-01",
+        "WIN-01",
+        "DB-01",
+        "MAIL-01",
+        "FW-01)"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "No EDR, SIEM, AV, NDR, WAF, MFA, DLP deployed; WEB-01 unpatched (CVE-2021-41773); WIN-01 unpatched, RDP exposed; No network segmentation between Internal and Database zones."
+      ],
+      "recommendations": [
+        "Implement a multi-layered security approach, prioritizing foundational controls and threat detection capabilities:"
+      ],
+      "mitre_techniques": [
+        "T1566.001",
+        "T1078",
+        "T1071.001",
+        "T1041",
+        "T1048"
+      ],
+      "phase": "B",
+      "round_number": 7,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_82394523",
+      "author_group": "appsec",
+      "author_persona": "offensive",
+      "title": "Direct Database Compromise via RCE on WEB-01 Due to Lack of Segmentation",
+      "description": "The Apache web server on WEB-01 is publicly exposed and vulnerable to CVE-2021-41773, allowing for Remote Code Execution (RCE) without authentication. Once an attacker achieves RCE on WEB-01 (a DMZ host), the absence of network segmentation between the DMZ and the Database zone means the attacker can directly initiate connections to DB-01. This allows for full compromise of the critical MySQL database, including exfiltration, modification, or deletion of all application data, bypassing application-layer authentication and authorization. This represents a direct path from an internet-facing vulnerability to the most critical data asset.",
+      "affected_assets": [
+        "WEB-01",
+        "DB-01"
+      ],
+      "severity": "critical",
+      "confidence": 1.0,
+      "evidence": [],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "B",
+      "round_number": 7,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": [
+        {
+          "profile_id": "ransomware",
+          "action": "ATTACKER_CONFIRM",
+          "comment": "",
+          "confidence_delta": 0.15
+        },
+        {
+          "profile_id": "opportunistic",
+          "action": "ATTACKER_CONFIRM",
+          "comment": "This is a golden ticket for an opportunistic attacker. WEB-01 is unpatched with a known CVE (CVE-2021-41773) that has public exploits. It's internet-facing in the DMZ. Gaining RCE here is trivial with automated tools. The lack of segmentation means I immediately get access to the internal network and the critical database, which is exactly what a script kiddie wants: maximum impact for minimal effort.",
+          "confidence_delta": 0.15
+        }
+      ]
+    },
+    {
+      "finding_id": "ef_5a83c0de",
+      "author_group": "network_security",
+      "author_persona": "defensive",
+      "title": "Complete Absence of Network Intrusion Detection/Prevention System (NIDS/NDR)",
+      "description": "The complete absence of a Network Intrusion Detection/Prevention System (NIDS/NDR) creates a critical and pervasive blind spot across the entire network. Without this fundamental security control, all network-based attack stages will go entirely undetected. Attackers can perform reconnaissance (e.g., T1595 Active Scanning, T1018 Remote System Discovery), establish Command and Control (e.g., T1071.001 Web Protocols C2), and execute lateral movement (e.g., T1021.001 RDP, T1021.002 SMB/Windows Admin Shares) without triggering any network-level alerts. For instance, an attacker exploiting the known RCE (CVE-2021-41773) on WEB-01 could establish persistent C2, conduct internal network scans targeting DB-01 or WIN-01, and attempt to move laterally between compromised hosts, all while remaining completely invisible to network security monitoring. This lack of detection severely hinders incident response capabilities, allows threats to persist and expand unimpeded, and makes threat hunting impossible.",
+      "affected_assets": [
+        "Entire network (DMZ",
+        "Internal",
+        "Database zones)"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "Security controls: none (no EDR, SIEM, AV, NDR, WAF, MFA, DLP)"
+      ],
+      "recommendations": [
+        "Deploy and configure a Network Intrusion Detection/Prevention System (NIDS/NIPS) or Network Detection and Response (NDR) solution. Strategically place sensors at key network choke points, including the internet perimeter (DMZ), between network segments (e.g., DMZ-Internal, Internal-Database), and within critical zones to monitor both north-south and east-west traffic. Configure the system to detect known attack signatures, anomalous traffic patterns, and indicators of compromise (IoCs) related to common C2, reconnaissance, and lateral movement techniques. Prioritize integration with a centralized logging system (e.g., SIEM, once deployed) for alert correlation, historical analysis, and improved situational awareness."
+      ],
+      "mitre_techniques": [
+        "T1595",
+        "T1018",
+        "T1071.001",
+        "T1021.001",
+        "T1021.002"
+      ],
+      "phase": "C",
+      "round_number": 8,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_bc6dd128",
+      "author_group": "network_security",
+      "author_persona": "offensive",
+      "title": "Unpatched Postfix Mail Server (MAIL-01) as an Undetected Entry Point",
+      "description": "The MAIL-01 server runs an outdated Postfix 3.5 version in the DMZ, directly exposed to the internet. From an offensive perspective, this presents a significant target for initial access (T1190 Exploit Public-Facing Application). Given the age of Postfix 3.5 (current stable versions are 3.8.x/3.9.x), it is highly probable that this service contains known, exploitable vulnerabilities. A successful exploit would grant an attacker a foothold within the DMZ. Crucially, the complete absence of any security monitoring solutions (EDR, SIEM, NDR) means that exploitation attempts and subsequent compromise would occur entirely without detection, allowing for unhindered lateral movement into the internal and database zones due to the confirmed lack of network segmentation.",
+      "affected_assets": [
+        "MAIL-01"
+      ],
+      "severity": "high",
+      "confidence": 0.6,
+      "evidence": [
+        "Postfix 3.5, zone DMZ, Ubuntu 22.04. No EDR, SIEM, AV, NDR, or WAF deployed."
+      ],
+      "recommendations": [],
+      "mitre_techniques": [
+        "T1190"
+      ],
+      "phase": "C",
+      "round_number": 8,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_84c85551",
+      "author_group": "appsec",
+      "author_persona": "auditor",
+      "title": "Undetected API Attacks Due to Lack of Security Logging and Monitoring",
+      "description": "Without proper logging of API requests, responses, authentication attempts, authorization failures, and other critical security events, malicious activities targeting APIs (e.g., brute-force attempts, injection attempts, data exfiltration, unauthorized access) will go entirely undetected. This severely hampers incident detection, forensic analysis, and overall incident response capabilities, allowing attackers to operate stealthily and persist in the environment.",
+      "affected_assets": [
+        "WEB-01 (APIs hosted on Apache)"
+      ],
+      "severity": "high",
+      "confidence": 0.6,
+      "evidence": [
+        "The infrastructure explicitly states \"No SIEM\" and \"No security controls.\" This implies a complete absence of mechanisms to collect, analyze, and alert on API-specific security events, directly correlating with OWASP A09:2021 - Security Logging and Monitoring Failures."
+      ],
+      "recommendations": [
+        "Implement comprehensive logging for all API interactions, including request details, user identity, authentication/authorization outcomes, and error conditions. Centralize these logs (even if a full SIEM is not immediately feasible, a basic log aggregation solution should be deployed) and configure alerts for suspicious patterns (e.g., repeated authentication failures, unusual data access patterns, high request volume from a single source, unusual HTTP status codes)."
+      ],
+      "mitre_techniques": [],
+      "phase": "C",
+      "round_number": 8,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_ccef161d",
+      "author_group": "endpoint_security",
+      "author_persona": "offensive",
+      "title": "High Risk of Catastrophic Data Encryption and Business Disruption",
+      "description": "The complete absence of endpoint security controls (EDR, AV) and network visibility (SIEM, NDR) leaves all systems extremely vulnerable to data encryption for impact (MITRE ATT&CK T1486), commonly associated with ransomware. An attacker gaining access to any host, particularly WEB-01 or WIN-01, can easily deploy encryption payloads across the network. The lack of network segmentation between the Internal and Database zones facilitates rapid lateral movement and encryption of critical assets like DB-01. Without a disaster recovery plan or backups (as noted in another finding), this scenario represents an existential threat to business operations, leading to severe data loss and potential financial ruin.",
+      "affected_assets": [
+        "WEB-01",
+        "WIN-01",
+        "DB-01",
+        "MAIL-01 (all hosts with critical data/services)"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [],
+      "recommendations": [],
+      "mitre_techniques": [
+        "T1005",
+        "T1486"
+      ],
+      "phase": "C",
+      "round_number": 8,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_4cd4e142",
+      "author_group": "endpoint_security",
+      "author_persona": "admin",
+      "title": "Lack of Comprehensive Software and Asset Inventory",
+      "description": "A complete and accurate inventory of all installed software, services, libraries, and their versions is crucial for effective security management, including vulnerability assessment, patch management, and license compliance. The current information only lists major applications, indicating a gap in comprehensive software inventory. Without such an inventory, identifying vulnerable software components, tracking end-of-life software, or detecting unauthorized installations becomes extremely difficult, leaving the organization blind to significant portions of its attack surface. The absence of EDR or SIEM further confirms the lack of an automated, up-to-date inventory system.",
+      "affected_assets": [
+        "All hosts (WEB-01",
+        "DB-01",
+        "FW-01",
+        "WIN-01",
+        "MAIL-01)"
+      ],
+      "severity": "high",
+      "confidence": 0.6,
+      "evidence": [],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "C",
+      "round_number": 8,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_b97aa34d",
+      "author_group": "risk",
+      "author_persona": "ciso",
+      "title": "Absence of an Incident Response Program and Capability",
+      "description": "From a CISO perspective, the complete lack of foundational security controls such as EDR and SIEM, coupled with no mention of an Incident Response Plan or team, leaves the organization utterly unprepared to detect, contain, eradicate, or recover from any security incident. Given the numerous critical vulnerabilities (e.g., RCE on WEB-01, exposed RDP on WIN-01) and direct internet exposure, a breach is not a matter of 'if' but 'when'. Without an IR capability, any incident will inevitably result in:",
+      "affected_assets": [
+        "Entire Organization / All Hosts"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "Security controls: none (no EDR, SIEM, AV, NDR, WAF, MFA, DLP). The infrastructure description explicitly states \"No EDR, SIEM\" which are fundamental tools for incident detection and response."
+      ],
+      "recommendations": [
+        "Immediately prioritize the development and implementation of a comprehensive Incident Response Plan, including defined roles, responsibilities, communication protocols, and playbooks. Invest in and deploy foundational incident detection and response technologies (e.g., SIEM for centralized logging and alert correlation, EDR for endpoint visibility and response). Conduct regular tabletop exercises and simulations to test the plan and train personnel. Establish relationships with external IR firms for specialized expertise and surge capacity."
+      ],
+      "mitre_techniques": [],
+      "phase": "C",
+      "round_number": 8,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_faf59811",
+      "author_group": "network_security",
+      "author_persona": "defensive",
+      "title": "Undetected Internal Network Reconnaissance and Lateral Movement",
+      "description": "Without any form of network detection and response (NDR) or even basic network flow monitoring (NetFlow/IPFIX), an attacker who gains initial access (e.g., via the exposed RDP on WIN-01 or RCE on WEB-01 leading to internal pivot) can freely conduct internal network reconnaissance (MITRE ATT&CK T1018 - Remote System Discovery, T1595 - Active Scanning) such as host discovery, port scanning, and vulnerability scanning without any detection. Furthermore, subsequent lateral movement using protocols like RDP (T1021.001) or SMB (T1021.002) between WIN-01 and DB-01, or any other internal host, will also go completely unnoticed. The critical lack of segmentation between the Internal and Database zones means that once WIN-01 is compromised, an attacker has direct, unmonitored access paths to DB-01. This absence of visibility means an attacker can map the internal network, identify targets, and move freely through the environment, potentially reaching the critical DB-01, without triggering any alerts or logs, significantly increasing the dwell time and impact of a breach.",
+      "affected_assets": [
+        "WIN-01",
+        "DB-01",
+        "Internal Network"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "No EDR, SIEM, or NDR deployed; No network segmentation between Internal and Database zones."
+      ],
+      "recommendations": [
+        "Implement a Network Detection and Response (NDR) solution or, at minimum, deploy network flow monitoring (e.g., NetFlow/IPFIX) on FW-01 and internal switches (if present) to collect and analyze internal network traffic for anomalies, host discovery attempts, and lateral movement patterns. Additionally, implement host-based logging and monitoring on internal servers (like WIN-01 and DB-01) to complement network visibility and provide endpoint context."
+      ],
+      "mitre_techniques": [
+        "T1018",
+        "T1595",
+        "T1021.001",
+        "T1021.002"
+      ],
+      "phase": "C",
+      "round_number": 9,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_36fbf792",
+      "author_group": "network_security",
+      "author_persona": "architect",
+      "title": "Uncontained DMZ Compromise Leading to Full Internal Network and Database Access",
+      "description": "The current network architecture places public-facing DMZ hosts (WEB-01, MAIL-01) with direct internet exposure. A successful compromise of any DMZ host, particularly WEB-01 with its known critical CVE (CVE-2021-41773), provides an attacker with an immediate pivot point into the internal network. The complete absence of network segmentation between the DMZ and the Internal zone, combined with the stated lack of segmentation between the Internal zone (where WIN-01 resides) and the critical Database zone (DB-01), creates a direct and unhindered attack path. This architectural flaw means that a single initial compromise in the DMZ can rapidly escalate to full control over critical internal assets, including the highly sensitive DB-01, without further significant network barriers. This represents an unreasonable trust relationship between the internet-facing DMZ and the internal critical infrastructure.",
+      "affected_assets": [
+        "WEB-01",
+        "MAIL-01 (as potential entry points)",
+        "WIN-01",
+        "DB-01 (as ultimate targets)"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [],
+      "recommendations": [
+        "Implement robust, stateful network segmentation between the DMZ, Internal, and Database zones using FW-01. Enforce strict firewall rules based on the principle of least privilege, allowing only absolutely necessary traffic flows. For example, DMZ hosts should only be able to initiate connections to specific, required ports on DB-01 (e.g., MySQL port 3306 for application functionality) and must be blocked from initiating connections to WIN-01 or other internal management systems. Additionally, consider implementing an application-layer proxy or WAF for DMZ traffic to add an extra layer of defense."
+      ],
+      "mitre_techniques": [],
+      "phase": "C",
+      "round_number": 9,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_5548165b",
+      "author_group": "appsec",
+      "author_persona": "offensive",
+      "title": "High Risk of Exploitable API Vulnerabilities Without Dedicated Security Controls",
+      "description": "Given the complete absence of security controls, including a WAF or an API security gateway, and the general unpatched state of WEB-01, it is highly probable that any APIs hosted on this server are vulnerable to exploitation. Common API vulnerabilities such as Broken Authentication, Broken Access Control, Mass Assignment, excessive data exposure, and insecure configuration would be trivial for an attacker to discover and exploit without these protective layers. The lack of monitoring (SIEM/logging) further means that even if an attacker were to exploit an API, it would likely go undetected. This presents a direct and unmitigated path to sensitive data compromise, unauthorized actions, or further system compromise via [T1190] Exploit Public-Facing Application.",
+      "affected_assets": [
+        "WEB-01 (potential API endpoints)"
+      ],
+      "severity": "high",
+      "confidence": 0.6,
+      "evidence": [
+        "\"no WAF deployed\", \"no security controls (EDR, SIEM, AV, NDR, WAF, MFA, DLP)\", and the acknowledged knowledge gap \"[appsec] Area: API — Cannot verify specific API endpoints, logic, or vulnerabilities\"."
+      ],
+      "recommendations": [
+        "Conduct a comprehensive security assessment (penetration test and code review) of all API endpoints on WEB-01. Implement API-specific security gateways or configure the WAF (once deployed) to include API protection rules. Enforce strict authentication, authorization, input validation, and rate limiting on all API endpoints. Implement robust logging and monitoring for all API interactions."
+      ],
+      "mitre_techniques": [
+        "T1190"
+      ],
+      "phase": "C",
+      "round_number": 9,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_9a9c5a13",
+      "author_group": "network_security",
+      "author_persona": "offensive",
+      "title": "Unrestricted Lateral Movement via SMB/Admin Shares on Internal Network",
+      "description": "Once an attacker gains a foothold on WIN-01 (e.g., via RDP compromise, exploiting a vulnerability, or pivoting from a DMZ host), the complete lack of network segmentation between the Internal and Database zones, coupled with no EDR, SIEM, or NDR, allows for unrestricted lateral movement using standard Windows administrative shares (C$, ADMIN$). This enables attackers to easily copy malicious tools, execute commands remotely (e.g., via PsExec), and potentially dump credentials from other internal hosts, including the critical DB",
+      "affected_assets": [
+        "WIN-01",
+        "DB-01 (and any other internal hosts)"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "\"WIN-01: Windows Server 2019, zone Internal, unpatched\", \"No network segmentation between Internal and Database.\", \"Security controls: none (no EDR, SIEM, AV, NDR, WAF, MFA, DLP)\"."
+      ],
+      "recommendations": [
+        "Immediately identify and apply all relevant security patches to Postfix on MAIL-01. Implement robust vulnerability management processes. Deploy NIDS/NDR to detect and prevent exploitation attempts on DMZ services."
+      ],
+      "mitre_techniques": [],
+      "phase": "C",
+      "round_number": 9,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_cc6852cd",
+      "author_group": "appsec",
+      "author_persona": "auditor",
+      "title": "Absence of Multi-Factor Authentication (MFA) for Application Access (OWASP A07)",
+      "description": "The explicit absence of Multi-Factor Authentication (MFA) for any user accounts accessing the web application or API significantly weakens the authentication process. This makes accounts highly susceptible to credential stuffing, brute-force attacks, and phishing, where a single compromised password could grant an attacker full access to user accounts and associated sensitive data. This is a direct violation of secure identification and authentication practices (OWASP A07) and increases the risk of initial access via compromised credentials (T1190).",
+      "affected_assets": [
+        "WEB-01"
+      ],
+      "severity": "high",
+      "confidence": 0.6,
+      "evidence": [
+        "\"Security controls: none (no EDR, SIEM, AV, NDR, WAF, MFA, DLP)\" specifically lists \"no MFA\"."
+      ],
+      "recommendations": [
+        "Implement MFA for all user accounts accessing the application and API, especially for administrative or privileged roles. Encourage or mandate its use to significantly enhance account security."
+      ],
+      "mitre_techniques": [
+        "T1190"
+      ],
+      "phase": "C",
+      "round_number": 9,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_832d539f",
+      "author_group": "endpoint_security",
+      "author_persona": "admin",
+      "title": "Inability to Detect Obfuscated Malware and Fileless Attacks",
+      "description": "The complete absence of any endpoint security solution (AV, EDR) means that the organization has no capability to detect or prevent advanced attack techniques, particularly those involving obfuscated files or information (T1027) or fileless malware. Attackers can easily encode or encrypt payloads to bypass signature-based detection, which would go completely unnoticed, allowing for unhindered execution of malicious activities like credential dumping (T1003.001) or data collection (T1005).",
+      "affected_assets": [
+        "All hosts (WEB-01",
+        "DB-01",
+        "FW-01",
+        "WIN-01",
+        "MAIL-01)"
+      ],
+      "severity": "high",
+      "confidence": 0.6,
+      "evidence": [
+        "\"No EDR, SIEM, AV, NDR, WAF, MFA, DLP deployed.\""
+      ],
+      "recommendations": [
+        "Deploy an Endpoint Detection and Response (EDR) solution across all endpoints. The EDR should include behavioral analysis capabilities to detect obfuscated and fileless malware, memory injection, and other advanced evasion techniques."
+      ],
+      "mitre_techniques": [
+        "T1059.001",
+        "T1059.003",
+        "T1027",
+        "T1003.001",
+        "T1005"
+      ],
+      "phase": "C",
+      "round_number": 9,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_b6c39175",
+      "author_group": "endpoint_security",
+      "author_persona": "defensive",
+      "title": "Absence of Host-Based Protection Against Ransomware and Data Exfiltration",
+      "description": "The complete absence of endpoint security agents means there is no host-based protection against the behavioral patterns indicative of ransomware attacks (T1486 Data Encrypted for Impact) or data exfiltration attempts (T1005 Data from Local System). Malicious encryption of files, deletion of shadow copies, or mass collection and transfer of sensitive data (e.g., from the critical DB-01 or any other host) would go entirely undetected by any endpoint security control. This allows attackers to achieve their impact objectives, such as data destruction or theft, without hindrance or early warning.",
+      "affected_assets": [
+        "WEB-01",
+        "DB-01",
+        "WIN-01",
+        "MAIL-01 (All data-holding hosts)"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "The infrastructure explicitly states: \"No EDR, SIEM, or WAF deployed.\" and \"Security controls: none (no EDR, SIEM, AV, NDR, WAF, MFA, DLP)\". The existing offensive finding \"[CRITICAL] High Risk of Catastrophic Data Encryption and Business Disruption\" further highlights the impact of this specific defensive gap."
+      ],
+      "recommendations": [
+        "Implement an EDR solution with advanced behavioral detection capabilities specifically designed to identify and prevent ransomware activity (e.g., mass file modifications, MBR/boot record manipulation) and suspicious data collection/exfiltration attempts (e.g., large data transfers to unapproved external destinations). Supplement with Data Loss Prevention (DLP) features if available with the chosen EDR, and ensure robust, immutable offline backups are regularly performed and tested."
+      ],
+      "mitre_techniques": [
+        "T1003.001",
+        "T1027",
+        "T1486",
+        "T1059.001",
+        "T1059.003",
+        "T1053.005",
+        "T1005"
+      ],
+      "phase": "C",
+      "round_number": 9,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_990bcd92",
+      "author_group": "threat_intel",
+      "author_persona": "ir_analyst",
+      "title": "Immediate Monitoring of WIN-01 for RDP Compromise and Lateral Movement",
+      "description": "Exposed RDP is a common initial access vector for ransomware and other attacks. Once compromised, attackers will likely attempt to move laterally to the critical DB-01.",
+      "affected_assets": [
+        "WIN-01 (Windows Server 2019)"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "WIN-01 is unpatched and has RDP exposed, making it a prime target for initial access via brute-force or stolen credentials. No segmentation between Internal and Database zones allows lateral movement to DB-01."
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "C",
+      "round_number": 9,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_56e07b81",
+      "author_group": "risk",
+      "author_persona": "ciso",
+      "title": "Absence of a Formal Risk Management Framework and Regular Risk Assessments",
+      "description": "From a CISO's perspective, the most critical underlying issue is the complete absence of a formal risk management framework and regular risk assessments. This means the organization lacks a structured process to identify, analyze, evaluate, and treat security risks. Without this foundational element, the enterprise cannot effectively:",
+      "affected_assets": [
+        "Entire organization",
+        "all assets",
+        "data",
+        "and business processes."
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "The infrastructure description explicitly states \"Security controls: none (no EDR, SIEM, AV, NDR, WAF, MFA, DLP)\". Furthermore, the presence of unpatched systems (WEB-01, WIN-01), exposed critical services (RDP on WIN-01), and complete lack of network segmentation between critical zones (Internal and Database) strongly indicates a reactive, rather than proactive, approach to security. This state is a direct consequence of the absence of a structured and formal risk management program."
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "C",
+      "round_number": 9,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_8e97d259",
+      "author_group": "network_security",
+      "author_persona": "defensive",
+      "title": "Undetected Command and Control (C2) Communication Post-Compromise",
+      "description": "The complete absence of Network Intrusion Detection/Prevention Systems (NIDS/NDR), Security Information and Event Management (SIEM), and Web Application Firewalls (WAF) creates a critical blind spot for detecting Command and Control (C2) traffic (MITRE ATT&CK T1071.001). Attackers, once having gained initial access (e.g., via CVE-2021-41773 on WEB-01 or exposed RDP on WIN-01), will establish C2 channels, often disguised as legitimate web traffic or other common protocols, to maintain persistence, exfiltrate data, and issue further commands. Without any network traffic analysis, SSL/TLS inspection, or centralized log correlation, this crucial phase of an attack will go completely unnoticed, allowing attackers to operate undetected for extended periods within the network.",
+      "affected_assets": [
+        "All hosts (WEB-01",
+        "DB-01",
+        "FW-01",
+        "WIN-01",
+        "MAIL-01)"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "\"No EDR, SIEM, or WAF deployed.\" \"Security controls: none (no EDR, SIEM, AV, NDR, WAF, MFA, DLP)\""
+      ],
+      "recommendations": [
+        "Implement a Network Detection and Response (NDR) solution capable of deep packet inspection and behavioral analysis, including SSL/TLS decryption for relevant traffic. Integrate network flow logs (e.g., NetFlow/IPFIX from FW-01) and host logs into a SIEM for centralized monitoring and correlation to detect anomalous outbound connections or suspicious internal communication patterns indicative of C2. Deploy a WAF for public-facing applications (WEB-01, MAIL-01) to provide an additional layer of C2 detection for web-based C2."
+      ],
+      "mitre_techniques": [
+        "T1071.001"
+      ],
+      "phase": "C",
+      "round_number": 10,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_6ff2f068",
+      "author_group": "endpoint_security",
+      "author_persona": "offensive",
+      "title": "Easy Credential Dumping from Windows Server (LSASS)",
+      "description": "Upon successful compromise of WIN-01, an attacker can easily dump the Local Security Authority Subsystem Service (LSASS) memory. LSASS stores sensitive authentication data, including plaintext passwords, NTLM hashes, and Kerberos tickets for all users who have logged into the machine. Given the complete absence of endpoint security controls (EDR, AV, SIEM), this activity will go completely undetected. Extracting these credentials provides an attacker with a direct path to privilege escalation on WIN-01 and significantly facilitates lateral movement within the Internal and Database zones, especially if shared administrative credentials are in use for services or other critical systems like DB-01.",
+      "affected_assets": [
+        "WIN-01"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "WIN-01 is a Windows Server 2019 located in the Internal zone, unpatched, and has no EDR, SIEM, or AV deployed."
+      ],
+      "recommendations": [],
+      "mitre_techniques": [
+        "T1003.001"
+      ],
+      "phase": "C",
+      "round_number": 10,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_7dd287af",
+      "author_group": "appsec",
+      "author_persona": "auditor",
+      "title": "High Risk of Broken Object-Level and Function-Level Authorization (OWASP API A1 & A5)",
+      "description": "Without dedicated application security design reviews or penetration testing, it is highly probable that APIs hosted on WEB-01 are vulnerable to Broken Object-Level Authorization (BOLA - OWASP API A1) and/or Broken Function-Level Authorization (BFLA - OWASP API A5). BOLA allows an attacker to access sensitive data belonging to other users by simply changing an object ID in an API request. BFLA permits unauthorized users to access privileged functions (e.g., administrative endpoints) by discovering and calling them directly. These are extremely common and critical API vulnerabilities that can lead to widespread data breaches or complete system compromise.",
+      "affected_assets": [
+        "WEB-01 (API application logic)"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "\"Security controls: none (no EDR, SIEM, AV, NDR, WAF, MFA, DLP)\". The absence of any mention of application security review processes or tools strongly implies that authorization logic within APIs is not rigorously designed or tested."
+      ],
+      "recommendations": [
+        "Conduct a comprehensive application security audit and penetration test specifically targeting authorization mechanisms within all API endpoints. Implement strict, fine-grained authorization checks at every API endpoint to ensure that users can only access resources and functions they are explicitly permitted to, based on their role and ownership. Adopt a \"deny by default\" authorization policy."
+      ],
+      "mitre_techniques": [],
+      "phase": "C",
+      "round_number": 10,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_3031af31",
+      "author_group": "endpoint_security",
+      "author_persona": "admin",
+      "title": "Inadequate Security Hardening and Default Configurations on WIN-01",
+      "description": "The direct exposure of Remote Desktop Protocol (RDP) on an unpatched Windows Server 2019 within the internal network demonstrates a severe lack of basic security hardening and likely reliance on default, insecure configurations. This significantly broadens the attack surface, making WIN-01 an easy target for brute-force attacks, credential stuffing, and exploitation of unpatched RDP vulnerabilities. This vulnerability can lead to immediate administrative access and serve as a launchpad for lateral movement across the entire internal network.",
+      "affected_assets": [
+        "WIN-01"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "\"WIN-01: Windows Server 2019, zone Internal, unpatched, RDP exposed\""
+      ],
+      "recommendations": [
+        "Immediately restrict RDP access on WIN-01 to a limited set of administrative IPs or enforce access solely via a secure VPN. Disable RDP for non-administrative accounts. Apply a comprehensive security baseline (e.g., CIS Benchmarks for Windows Server) to harden the operating system, disable unnecessary services, and enforce strong password policies. Address the unpatched status as a matter of urgency."
+      ],
+      "mitre_techniques": [],
+      "phase": "C",
+      "round_number": 10,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_df9e3ef3",
+      "author_group": "threat_intel",
+      "author_persona": "apt_analyst",
+      "title": "High Likelihood of APT28 (Fancy Bear) Compromise via Exploitation of Public-Facing Vulnerabilities and Undetected Lateral Movement",
+      "description": "APT28 (Fancy Bear) is a highly sophisticated threat actor known for exploiting publicly exposed vulnerabilities for initial access and leveraging unmonitored environments for lateral movement, persistence, and data exfiltration. The unpatched WEB-01 (Apache 2.4.49, CVE-2021-41773 - Apache HTTP Server Path Traversal and File Disclosure) provides a critical entry point for Remote Code Execution (RCE) directly from the internet. Additionally, the exposed RDP on the unpatched WIN-01 server offers another direct vector for initial access via brute-force or credential stuffing, potentially leveraging previously compromised credentials.",
+      "affected_assets": [
+        "WEB-01",
+        "WIN-01",
+        "DB-01",
+        "Entire internal network"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "WEB-01 unpatched with CVE-2021-41773, WIN-01 with exposed RDP and unpatched, complete absence of EDR/SIEM/WAF/NDR, no network segmentation between Internal and Database zones."
+      ],
+      "recommendations": [],
+      "mitre_techniques": [
+        "T1078",
+        "T1071.001",
+        "T1041",
+        "T1048"
+      ],
+      "phase": "C",
+      "round_number": 10,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    }
+  ],
+  "attacker_findings": [],
+  "consensus_vulns": [],
+  "gap_registry": [
+    {
+      "gap_id": "gap_d0916085",
+      "author_group": "network_security",
+      "author_persona": "offensive",
+      "analyzed": "WEB-01",
+      "gap_text": "Cannot verify the specific Apache configuration or the presence of other web applications that might introduce additional vulnerabilities or mitigations. Cannot assess the impact of RCE on adjacent systems without further network topology details.",
+      "round_number": 1,
+      "routed": true,
+      "routed_to": [
+        "threat_intel",
+        "network_security"
+      ]
+    },
+    {
+      "gap_id": "gap_999aad72",
+      "author_group": "appsec",
+      "author_persona": "defensive",
+      "analyzed": "WEB-01 (Apache service)",
+      "gap_text": "Cannot assess specific application input validation/output encoding vulnerabilities without access to application code or dynamic analysis. Cannot confirm `mod_cgi` status on WEB-01.",
+      "round_number": 1,
+      "routed": true,
+      "routed_to": [
+        "network_security",
+        "appsec",
+        "endpoint_security",
+        "threat_intel",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_70441871",
+      "author_group": "appsec",
+      "author_persona": "defensive",
+      "analyzed": "Security controls (WAF)",
+      "gap_text": "None — fully assessed (absence of WAF).",
+      "round_number": 1,
+      "routed": true,
+      "routed_to": [
+        "appsec",
+        "network_security"
+      ]
+    },
+    {
+      "gap_id": "gap_4aba2539",
+      "author_group": "appsec",
+      "author_persona": "offensive",
+      "analyzed": "WEB-01",
+      "gap_text": "Cannot assess the specific web application hosted on Apache 2.4.49 (e.g., for SQL injection, XSS) — no application details provided.",
+      "round_number": 1,
+      "routed": true,
+      "routed_to": [
+        "network_security",
+        "appsec",
+        "endpoint_security",
+        "threat_intel",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_449aa552",
+      "author_group": "appsec",
+      "author_persona": "offensive",
+      "analyzed": "DB-01",
+      "gap_text": "Cannot assess application-layer vulnerabilities related to the database (e.g., SQL injection potential from a web app) — no web application details provided.",
+      "round_number": 1,
+      "routed": true,
+      "routed_to": [
+        "network_security",
+        "appsec",
+        "endpoint_security",
+        "threat_intel",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_08c0906c",
+      "author_group": "appsec",
+      "author_persona": "offensive",
+      "analyzed": "FW-01",
+      "gap_text": "Cannot assess potential web interface vulnerabilities for pfSense — no details on its web interface exposure or version-specific CVEs provided.",
+      "round_number": 1,
+      "routed": true,
+      "routed_to": [
+        "network_security"
+      ]
+    },
+    {
+      "gap_id": "gap_d51ec66c",
+      "author_group": "appsec",
+      "author_persona": "offensive",
+      "analyzed": "WIN-01",
+      "gap_text": "Cannot assess application-specific vulnerabilities — WIN-01 is a Windows Server, not explicitly hosting a web application relevant to my AppSec scope. RDP exposure is a system/network vulnerability.",
+      "round_number": 1,
+      "routed": true,
+      "routed_to": [
+        "network_security",
+        "appsec",
+        "endpoint_security",
+        "threat_intel",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_aaeb697d",
+      "author_group": "appsec",
+      "author_persona": "offensive",
+      "analyzed": "MAIL-01",
+      "gap_text": "Cannot assess web application vulnerabilities — Postfix is an MTA, and no webmail interface (e.g., Roundcube, OWA) is mentioned or implied.",
+      "round_number": 1,
+      "routed": true,
+      "routed_to": [
+        "network_security",
+        "appsec"
+      ]
+    },
+    {
+      "gap_id": "gap_0d294eff",
+      "author_group": "appsec",
+      "author_persona": "offensive",
+      "analyzed": "Security Controls (EDR, SIEM, WAF)",
+      "gap_text": "None — fully assessed as absent.",
+      "round_number": 1,
+      "routed": true,
+      "routed_to": [
+        "network_security",
+        "appsec",
+        "endpoint_security",
+        "threat_intel",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_0520688c",
+      "author_group": "network_security",
+      "author_persona": "architect",
+      "analyzed": "WEB-01's Apache version and known CVE-2021-41773.",
+      "gap_text": "Cannot verify the specific Apache configuration (e.g., `mod_cgi` status, document root permissions) that would confirm exploitability of CVE-2021-41773 beyond the presence of the vulnerable version.",
+      "round_number": 1,
+      "routed": true,
+      "routed_to": [
+        "network_security",
+        "appsec",
+        "endpoint_security",
+        "threat_intel",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_e5ef180e",
+      "author_group": "network_security",
+      "author_persona": "architect",
+      "analyzed": "Network segmentation between Internal and Database zones, and the criticality of DB-01.",
+      "gap_text": "Cannot assess the specific business requirements for connectivity between the Internal and Database zones, which would inform the detailed firewall rule creation.",
+      "round_number": 1,
+      "routed": true,
+      "routed_to": [
+        "network_security"
+      ]
+    },
+    {
+      "gap_id": "gap_34a5ea82",
+      "author_group": "endpoint_security",
+      "author_persona": "defensive",
+      "analyzed": "WEB-01, DB-01, FW-01, WIN-01, MAIL-01 (all hosts regarding EDR/AV presence)",
+      "gap_text": "None — fully assessed the presence/absence of EDR/AV.",
+      "round_number": 1,
+      "routed": true,
+      "routed_to": [
+        "network_security",
+        "appsec",
+        "endpoint_security",
+        "threat_intel",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_8d44343c",
+      "author_group": "endpoint_security",
+      "author_persona": "defensive",
+      "analyzed": "EDR/AV solution",
+      "gap_text": "Cannot evaluate specific features, configuration, or update status — no EDR/AV deployed.",
+      "round_number": 1,
+      "routed": true,
+      "routed_to": [
+        "network_security",
+        "appsec",
+        "endpoint_security",
+        "threat_intel",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_84cfba70",
+      "author_group": "endpoint_security",
+      "author_persona": "offensive",
+      "analyzed": "WIN-01",
+      "gap_text": "Cannot verify specific RDP vulnerabilities or account credentials for initial access. My analysis assumes initial access has been achieved.",
+      "round_number": 1,
+      "routed": true,
+      "routed_to": [
+        "network_security",
+        "appsec",
+        "endpoint_security",
+        "threat_intel",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_72468938",
+      "author_group": "endpoint_security",
+      "author_persona": "offensive",
+      "analyzed": "WEB-01",
+      "gap_text": "Cannot verify the specific impact or ease of exploitation of CVE-2021-41773. My analysis assumes RCE has been achieved.",
+      "round_number": 1,
+      "routed": true,
+      "routed_to": [
+        "network_security",
+        "appsec",
+        "endpoint_security",
+        "threat_intel",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_ea0468a3",
+      "author_group": "endpoint_security",
+      "author_persona": "offensive",
+      "analyzed": "Overall Infrastructure",
+      "gap_text": "Cannot verify the existence of specific internal network routes or implicit trust relationships between hosts, which might enable additional lateral movement paths.",
+      "round_number": 1,
+      "routed": true,
+      "routed_to": [
+        "network_security",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_7844bcd9",
+      "author_group": "appsec",
+      "author_persona": "auditor",
+      "analyzed": "WEB-01",
+      "gap_text": "Cannot fully assess specific API design details (JWT expiry, rate limiting, specific authentication/authorization mechanisms) as no application code or API documentation was provided.",
+      "round_number": 1,
+      "routed": true,
+      "routed_to": [
+        "appsec",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_1e317bb5",
+      "author_group": "appsec",
+      "author_persona": "auditor",
+      "analyzed": "DB-01",
+      "gap_text": "Cannot assess application-specific database access controls or potential for SQL injection without application code details.",
+      "round_number": 1,
+      "routed": true,
+      "routed_to": [
+        "network_security",
+        "appsec",
+        "endpoint_security",
+        "threat_intel",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_5fe9cd1d",
+      "author_group": "appsec",
+      "author_persona": "auditor",
+      "analyzed": "FW-01, WIN-01, MAIL-01",
+      "gap_text": "Not directly within the scope of Application Security Design audit for public-facing APIs.",
+      "round_number": 1,
+      "routed": true,
+      "routed_to": [
+        "network_security",
+        "appsec",
+        "endpoint_security",
+        "threat_intel",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_3ec927b9",
+      "author_group": "appsec",
+      "author_persona": "auditor",
+      "analyzed": "Security controls (WAF, SIEM, EDR, MFA)",
+      "gap_text": "None — fully assessed their absence and impact on AppSec.",
+      "round_number": 1,
+      "routed": true,
+      "routed_to": [
+        "network_security",
+        "appsec",
+        "endpoint_security",
+        "threat_intel",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_e802b52c",
+      "author_group": "appsec",
+      "author_persona": "auditor",
+      "analyzed": "Network segmentation",
+      "gap_text": "Cannot assess specific application-level impacts of network segmentation failure without application architecture details.",
+      "round_number": 1,
+      "routed": true,
+      "routed_to": [
+        "network_security"
+      ]
+    },
+    {
+      "gap_id": "gap_cb094fb9",
+      "author_group": "endpoint_security",
+      "author_persona": "admin",
+      "analyzed": "WEB-01 (Patch Management, Hardening Baseline)",
+      "gap_text": "Cannot verify full software inventory (beyond Apache) or specific local admin account configurations.",
+      "round_number": 1,
+      "routed": true,
+      "routed_to": [
+        "endpoint_security",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_4c7def45",
+      "author_group": "endpoint_security",
+      "author_persona": "admin",
+      "analyzed": "WIN-01 (Patch Management, Hardening Baseline)",
+      "gap_text": "Cannot verify full software inventory or specific local admin account configurations.",
+      "round_number": 1,
+      "routed": true,
+      "routed_to": [
+        "endpoint_security",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_0e4a684e",
+      "author_group": "endpoint_security",
+      "author_persona": "admin",
+      "analyzed": "DB-01 (Patch Management)",
+      "gap_text": "Cannot verify hardening baseline, local admin account configuration, or full software inventory beyond MySQL.",
+      "round_number": 1,
+      "routed": true,
+      "routed_to": [
+        "endpoint_security",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_b23d2795",
+      "author_group": "endpoint_security",
+      "author_persona": "admin",
+      "analyzed": "FW-01 (Patch Management)",
+      "gap_text": "Cannot verify current patch status, hardening baseline, local admin account configuration, or full software inventory for the pfSense appliance.",
+      "round_number": 1,
+      "routed": true,
+      "routed_to": [
+        "network_security",
+        "endpoint_security",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_a7ab2ccf",
+      "author_group": "endpoint_security",
+      "author_persona": "admin",
+      "analyzed": "MAIL-01 (Patch Management)",
+      "gap_text": "Cannot verify current patch status, hardening baseline, local admin account configuration, or full software inventory beyond Postfix.",
+      "round_number": 1,
+      "routed": true,
+      "routed_to": [
+        "network_security",
+        "appsec",
+        "endpoint_security",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_568fb0bf",
+      "author_group": "endpoint_security",
+      "author_persona": "admin",
+      "analyzed": "General Endpoint Hygiene (Local Admin Accounts, Software Inventory, Hardening Baselines)",
+      "gap_text": "Lack of detailed information on specific configurations for each host prevents a full assessment of local admin accounts, comprehensive software inventory for all installed applications, and the complete application of hardening baselines. No tools (EDR, SIEM) are available to gather this information.",
+      "round_number": 1,
+      "routed": true,
+      "routed_to": [
+        "threat_intel",
+        "risk",
+        "endpoint_security"
+      ]
+    },
+    {
+      "gap_id": "gap_17daef8c",
+      "author_group": "risk",
+      "author_persona": "compliance",
+      "analyzed": "WEB-01",
+      "gap_text": "Cannot verify if personal or cardholder data is processed or stored on WEB-01 — no data mapping provided.",
+      "round_number": 1,
+      "routed": true,
+      "routed_to": [
+        "network_security",
+        "appsec",
+        "endpoint_security",
+        "threat_intel",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_c7b9f517",
+      "author_group": "risk",
+      "author_persona": "compliance",
+      "analyzed": "WIN-01",
+      "gap_text": "Cannot assess specific vulnerabilities beyond \"unpatched\" — no vulnerability scan results or specific CVEs provided for WIN-01.",
+      "round_number": 1,
+      "routed": true,
+      "routed_to": [
+        "endpoint_security"
+      ]
+    },
+    {
+      "gap_id": "gap_a4a8e971",
+      "author_group": "risk",
+      "author_persona": "compliance",
+      "analyzed": "Network Segmentation",
+      "gap_text": "Cannot verify specific firewall rules on FW-01 — no configuration details provided.",
+      "round_number": 1,
+      "routed": true,
+      "routed_to": [
+        "network_security",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_9c53f95b",
+      "author_group": "threat_intel",
+      "author_persona": "ir_analyst",
+      "analyzed": "WEB-01 (Apache logs)",
+      "gap_text": "No automated log aggregation, SIEM, or WAF to facilitate real-time monitoring or alerting. Manual review is labor-intensive and delayed. No process monitoring or file integrity monitoring tools deployed.",
+      "round_number": 1,
+      "routed": true,
+      "routed_to": [
+        "threat_intel",
+        "risk",
+        "network_security",
+        "appsec"
+      ]
+    },
+    {
+      "gap_id": "gap_585226b6",
+      "author_group": "threat_intel",
+      "author_persona": "ir_analyst",
+      "analyzed": "WIN-01 (Windows Event Logs)",
+      "gap_text": "No centralized log collection or SIEM for real-time alerting on RDP activity. Manual review is time-consuming and prone to missing events. No MFA to protect RDP.",
+      "round_number": 1,
+      "routed": true,
+      "routed_to": [
+        "threat_intel",
+        "risk",
+        "network_security",
+        "appsec"
+      ]
+    },
+    {
+      "gap_id": "gap_9abeb593",
+      "author_group": "threat_intel",
+      "author_persona": "ir_analyst",
+      "analyzed": "FW-01 (Firewall logs)",
+      "gap_text": "No NDR, SIEM, or automated analysis for network traffic. Manual review of firewall logs is tedious and makes it difficult to spot subtle anomalies. No traffic shaping or anomaly detection.",
+      "round_number": 1,
+      "routed": true,
+      "routed_to": [
+        "threat_intel",
+        "risk",
+        "network_security"
+      ]
+    },
+    {
+      "gap_id": "gap_5f105587",
+      "author_group": "threat_intel",
+      "author_persona": "ir_analyst",
+      "analyzed": "WEB-01, DB-01, MAIL-01 (Linux system logs)",
+      "gap_text": "No centralized log collection for Linux hosts. Manual review is impractical for real-time threat detection. No process monitoring or file integrity monitoring.",
+      "round_number": 1,
+      "routed": true,
+      "routed_to": [
+        "threat_intel",
+        "network_security"
+      ]
+    },
+    {
+      "gap_id": "gap_011ab2b8",
+      "author_group": "appsec",
+      "author_persona": "defensive",
+      "analyzed": "WEB-01 (web application layer)",
+      "gap_text": "Cannot assess specific application code for input validation and output encoding flaws — no access to application source code, specific application details, or security test results are provided.",
+      "round_number": 2,
+      "routed": true,
+      "routed_to": [
+        "network_security",
+        "appsec",
+        "endpoint_security",
+        "threat_intel",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_df30fe06",
+      "author_group": "appsec",
+      "author_persona": "defensive",
+      "analyzed": "DB-01 (interaction with web application)",
+      "gap_text": "Cannot verify specific application queries or stored procedures for SQL Injection vulnerabilities — no application code or database schema details provided.",
+      "round_number": 2,
+      "routed": true,
+      "routed_to": [
+        "network_security",
+        "appsec",
+        "endpoint_security",
+        "threat_intel",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_491fea33",
+      "author_group": "appsec",
+      "author_persona": "offensive",
+      "analyzed": "WEB-01 (web application layer)",
+      "gap_text": "Cannot identify specific application-level vulnerabilities (e.g., specific SQLi vectors, XSS points, SSRF targets) — no access to application code, functionality details, or live environment for dynamic testing.",
+      "round_number": 2,
+      "routed": true,
+      "routed_to": [
+        "network_security",
+        "appsec",
+        "endpoint_security",
+        "threat_intel",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_84444942",
+      "author_group": "endpoint_security",
+      "author_persona": "defensive",
+      "analyzed": "All hosts (WEB-01, DB-01, FW-01, WIN-01, MAIL-01) in relation to EDR/AV deployment and capabilities.",
+      "gap_text": "Cannot verify specific EDR/AV configurations or agent health on any host, as no such systems are deployed. Cannot assess specific attack paths that would be mitigated by EDR/AV, as this is a defensive role focused on the absence of controls.",
+      "round_number": 2,
+      "routed": true,
+      "routed_to": [
+        "network_security",
+        "appsec",
+        "endpoint_security",
+        "threat_intel",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_c2e949d2",
+      "author_group": "appsec",
+      "author_persona": "auditor",
+      "analyzed": "API Security Design",
+      "gap_text": "Cannot confirm the existence of APIs on WEB-01 or their specific implementation details (e.g., specific endpoints, application language).",
+      "round_number": 2,
+      "routed": true,
+      "routed_to": [
+        "network_security",
+        "appsec",
+        "endpoint_security",
+        "threat_intel",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_52792285",
+      "author_group": "appsec",
+      "author_persona": "auditor",
+      "analyzed": "API Security Design",
+      "gap_text": "Cannot verify if APIs exist, or if they use JWTs, or the specific implementation details of any authentication/session management mechanisms.",
+      "round_number": 2,
+      "routed": true,
+      "routed_to": [
+        "appsec",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_6a7b25f6",
+      "author_group": "appsec",
+      "author_persona": "auditor",
+      "analyzed": "API Security Design",
+      "gap_text": "Cannot verify the specific authentication and authorization mechanisms used by any potential APIs, nor their implementation details without source code access or API documentation.",
+      "round_number": 2,
+      "routed": true,
+      "routed_to": [
+        "appsec",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_3e24f7cc",
+      "author_group": "appsec",
+      "author_persona": "auditor",
+      "analyzed": "API Security Design",
+      "gap_text": "Cannot assess specific OWASP Top 10 vulnerabilities related to code (e.g., A03: Injection, A08: Software and Data Integrity Failures, A10: SSRF) without access to application code or API documentation.",
+      "round_number": 2,
+      "routed": true,
+      "routed_to": [
+        "network_security",
+        "appsec",
+        "endpoint_security",
+        "threat_intel",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_dc509d47",
+      "author_group": "appsec",
+      "author_persona": "auditor",
+      "analyzed": "WEB-01",
+      "gap_text": "Cannot confirm if any APIs are actually deployed on WEB-01. Assuming their existence for design assessment based on general web server purpose.",
+      "round_number": 2,
+      "routed": true,
+      "routed_to": [
+        "network_security",
+        "appsec",
+        "endpoint_security",
+        "threat_intel",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_936efc2c",
+      "author_group": "endpoint_security",
+      "author_persona": "offensive",
+      "analyzed": "WEB-01, WIN-01, DB-01, MAIL-01",
+      "gap_text": "Cannot verify specific user accounts, installed software (beyond stated), or custom configurations (e.g., sudoers file, local group policies, specific kernel versions for exploits) that might influence privilege escalation or credential harvesting. Cannot verify the existence of specific exploit payloads or their effectiveness without direct access and testing.",
+      "round_number": 2,
+      "routed": true,
+      "routed_to": [
+        "endpoint_security",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_8f80715f",
+      "author_group": "endpoint_security",
+      "author_persona": "offensive",
+      "analyzed": "Network Segmentation",
+      "gap_text": "Cannot",
+      "round_number": 2,
+      "routed": true,
+      "routed_to": [
+        "network_security",
+        "appsec",
+        "endpoint_security",
+        "threat_intel",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_131f1ed5",
+      "author_group": "endpoint_security",
+      "author_persona": "admin",
+      "analyzed": "WEB-01, DB-01, FW-01, WIN-01, MAIL-01 (all hosts for general endpoint hygiene)",
+      "gap_text": "Cannot verify specific local admin accounts or user groups — no user/group details provided. Cannot verify specific software inventory beyond major services — no detailed inventory list provided. Cannot verify specific hardening configurations — no configuration files or audit reports provided.",
+      "round_number": 2,
+      "routed": true,
+      "routed_to": [
+        "endpoint_security",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_784a6eeb",
+      "author_group": "threat_intel",
+      "author_persona": "apt_analyst",
+      "analyzed": "APT Group Targeting",
+      "gap_text": "Cannot determine the specific industry sector or geopolitical relevance of the small enterprise, which would allow for more precise identification of state-sponsored APT groups (e.g., if target is government contractor, APT28/29 more likely; if financial, Lazarus/FIN7 more likely).",
+      "round_number": 2,
+      "routed": true,
+      "routed_to": [
+        "network_security",
+        "appsec",
+        "endpoint_security",
+        "threat_intel",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_7c0784d0",
+      "author_group": "threat_intel",
+      "author_persona": "apt_analyst",
+      "analyzed": "APT TTPs",
+      "gap_text": "Cannot assess if employees are susceptible to spearphishing (T1566.001) due to lack of human intelligence or organizational culture details.",
+      "round_number": 2,
+      "routed": true,
+      "routed_to": [
+        "network_security",
+        "appsec",
+        "endpoint_security",
+        "threat_intel",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_61e59815",
+      "author_group": "threat_intel",
+      "author_persona": "apt_analyst",
+      "analyzed": "Infrastructure Weaknesses",
+      "gap_text": "None — fully assessed within the scope of identifying attractiveness to APTs and alignment with their TTPs.",
+      "round_number": 2,
+      "routed": true,
+      "routed_to": [
+        "network_security",
+        "appsec",
+        "endpoint_security",
+        "threat_intel",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_e4733484",
+      "author_group": "risk",
+      "author_persona": "ciso",
+      "analyzed": "Enterprise-wide (Vulnerability Management Program, Incident Response Program, Data Classification)",
+      "gap_text": "Cannot verify specific contents or categories of data on any host — no data classification or data mapping provided.",
+      "round_number": 2,
+      "routed": true,
+      "routed_to": [
+        "network_security",
+        "appsec",
+        "endpoint_security",
+        "threat_intel",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_7a659879",
+      "author_group": "risk",
+      "author_persona": "ciso",
+      "analyzed": "FW-01",
+      "gap_text": "Cannot verify specific firewall rules or access controls for management interface — no configuration details provided.",
+      "round_number": 2,
+      "routed": true,
+      "routed_to": [
+        "network_security"
+      ]
+    },
+    {
+      "gap_id": "gap_980cf02b",
+      "author_group": "risk",
+      "author_persona": "ciso",
+      "analyzed": "WIN-01",
+      "gap_text": "Cannot assess specific vulnerabilities beyond \"unpatched\" for WIN-01 and \"RDP exposed\" — no vulnerability scan results or specific CVEs provided.",
+      "round_number": 2,
+      "routed": true,
+      "routed_to": [
+        "endpoint_security"
+      ]
+    },
+    {
+      "gap_id": "gap_688dd41f",
+      "author_group": "network_security",
+      "author_persona": "architect",
+      "analyzed": "FW-01",
+      "gap_text": "Cannot assess specific firewall rules (inbound/outbound, inter-zone policies) or interface assignments to zones, which are crucial for understanding traffic flow and enforcement.",
+      "round_number": 3,
+      "routed": true,
+      "routed_to": [
+        "network_security"
+      ]
+    },
+    {
+      "gap_id": "gap_3dfe2b39",
+      "author_group": "network_security",
+      "author_persona": "architect",
+      "analyzed": "Network Architecture (General)",
+      "gap_text": "Cannot verify the physical or logical network topology beyond zone names, specifically how \"Direct internet exposure on DMZ hosts\" is achieved and whether FW-01 is indeed the perimeter firewall for all traffic.",
+      "round_number": 3,
+      "routed": true,
+      "routed_to": [
+        "threat_intel",
+        "network_security",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_12835720",
+      "author_group": "network_security",
+      "author_persona": "architect",
+      "analyzed": "Management Zone",
+      "gap_text": "Cannot assess the specific security controls or hosts within the \"Management\" zone beyond FW-01, or how access to this zone is restricted.",
+      "round_number": 3,
+      "routed": true,
+      "routed_to": [
+        "network_security",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_e08b073c",
+      "author_group": "appsec",
+      "author_persona": "defensive",
+      "analyzed": "WAF",
+      "gap_text": "None — fully assessed (absence confirmed).",
+      "round_number": 3,
+      "routed": true,
+      "routed_to": [
+        "network_security",
+        "appsec",
+        "endpoint_security",
+        "threat_intel",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_3b57b572",
+      "author_group": "appsec",
+      "author_persona": "defensive",
+      "analyzed": "WEB-01 (application layer)",
+      "gap_text": "Cannot assess specific application code for input validation and output encoding implementation details — no access to source code or application penetration test results.",
+      "round_number": 3,
+      "routed": true,
+      "routed_to": [
+        "network_security",
+        "appsec",
+        "endpoint_security",
+        "threat_intel",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_036aedeb",
+      "author_group": "endpoint_security",
+      "author_persona": "defensive",
+      "analyzed": "EDR/AV deployment status (overall)",
+      "gap_text": "Cannot assess specific user accounts or their local administrative privileges on WIN-01.",
+      "round_number": 3,
+      "routed": true,
+      "routed_to": [
+        "endpoint_security",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_f77d40e9",
+      "author_group": "appsec",
+      "author_persona": "auditor",
+      "analyzed": "WEB-01 (API security design)",
+      "gap_text": "Cannot verify specific API endpoints, authentication mechanisms (e.g., JWT vs. session cookies, OAuth flows), or their configurations (e.g., JWT expiry, scope validation, authorization logic) due to lack of application code access or detailed API design documentation.",
+      "round_number": 3,
+      "routed": true,
+      "routed_to": [
+        "threat_intel",
+        "network_security",
+        "appsec",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_99dfcda8",
+      "author_group": "endpoint_security",
+      "author_persona": "offensive",
+      "analyzed": "WIN-01",
+      "gap_text": "Cannot verify specific user accounts or privileged groups on WIN-01.",
+      "round_number": 3,
+      "routed": true,
+      "routed_to": [
+        "endpoint_security",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_e8f72fd5",
+      "author_group": "endpoint_security",
+      "author_persona": "offensive",
+      "analyzed": "WIN-01",
+      "gap_text": "Cannot verify specific existing scheduled tasks or their configurations on WIN-01.",
+      "round_number": 3,
+      "routed": true,
+      "routed_to": [
+        "network_security",
+        "appsec",
+        "endpoint_security",
+        "threat_intel",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_68a13e31",
+      "author_group": "endpoint_security",
+      "author_persona": "offensive",
+      "analyzed": "WIN-01",
+      "gap_text": "Cannot verify specific PowerShell execution policies or logging configurations on WIN-01.",
+      "round_number": 3,
+      "routed": true,
+      "routed_to": [
+        "threat_intel",
+        "network_security"
+      ]
+    },
+    {
+      "gap_id": "gap_d7c296b6",
+      "author_group": "endpoint_security",
+      "author_persona": "admin",
+      "analyzed": "WEB-01, WIN-01, MAIL-01, FW-01, DB-01",
+      "gap_text": "Cannot verify the existence or adherence to a formal patch management policy document — no policy details provided.",
+      "round_number": 3,
+      "routed": true,
+      "routed_to": [
+        "endpoint_security"
+      ]
+    },
+    {
+      "gap_id": "gap_7522a4f7",
+      "author_group": "endpoint_security",
+      "author_persona": "admin",
+      "analyzed": "WEB-01, DB-01, FW-01, WIN-01, MAIL-01",
+      "gap_text": "Cannot verify specific local admin accounts or user groups, nor the processes for their management — no user/group details or policy documents provided.",
+      "round_number": 3,
+      "routed": true,
+      "routed_to": [
+        "endpoint_security",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_a2f62873",
+      "author_group": "endpoint_security",
+      "author_persona": "admin",
+      "analyzed": "All hosts (WEB-01, DB-01, FW-01, WIN-01, MAIL-01)",
+      "gap_text": "Cannot verify backup schedules, storage locations, air-gapping status, RTO/RPO, or the existence of a disaster recovery plan — no documentation or operational details provided.",
+      "round_number": 3,
+      "routed": true,
+      "routed_to": [
+        "endpoint_security",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_dead215d",
+      "author_group": "threat_intel",
+      "author_persona": "apt_analyst",
+      "analyzed": "WEB-01, WIN-01, MAIL-01, Network architecture, Security controls (EDR, AV, SIEM, WAF)",
+      "gap_text": "Cannot definitively identify the *specific* APT group most likely to target this infrastructure without knowledge of the enterprise's industry, intellectual property, or geopolitical context. Cannot assess the effectiveness of the MAIL-01 server or user susceptibility to spearphishing (T1566.001) beyond the absence of security controls, as no user training or email gateway details are provided.",
+      "round_number": 3,
+      "routed": true,
+      "routed_to": [
+        "network_security",
+        "appsec"
+      ]
+    },
+    {
+      "gap_id": "gap_34d88f02",
+      "author_group": "appsec",
+      "author_persona": "defensive",
+      "analyzed": "WEB-01",
+      "gap_text": "Cannot verify specific application code, detailed Apache configuration files (e.g., `httpd.conf`, `.htaccess`), or installed modules beyond the version number.",
+      "round_number": 4,
+      "routed": true,
+      "routed_to": [
+        "network_security",
+        "appsec",
+        "endpoint_security",
+        "threat_intel",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_86429e23",
+      "author_group": "appsec",
+      "author_persona": "defensive",
+      "analyzed": "DB-01",
+      "gap_text": "Cannot verify specific database schema, stored procedures, or the application's database interaction methods (e.g., ORM usage, parameterized queries).",
+      "round_number": 4,
+      "routed": true,
+      "routed_to": [
+        "network_security",
+        "appsec",
+        "endpoint_security",
+        "threat_intel",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_394bc730",
+      "author_group": "appsec",
+      "author_persona": "defensive",
+      "analyzed": "MAIL-01",
+      "gap_text": "Cannot verify mail server configuration for secure defaults or specific application interaction with mail services.",
+      "round_number": 4,
+      "routed": true,
+      "routed_to": [
+        "network_security",
+        "appsec",
+        "endpoint_security",
+        "threat_intel",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_4c54586d",
+      "author_group": "network_security",
+      "author_persona": "architect",
+      "analyzed": "FW-01",
+      "gap_text": "Cannot verify specific firewall rule sets, network address translation (NAT) configurations, or VPN configurations.",
+      "round_number": 4,
+      "routed": true,
+      "routed_to": [
+        "network_security"
+      ]
+    },
+    {
+      "gap_id": "gap_9fcb0132",
+      "author_group": "network_security",
+      "author_persona": "architect",
+      "analyzed": "Network Segmentation",
+      "gap_text": "Cannot verify specific VLAN implementations, subnetting schemes, or routing configurations between zones beyond the general statements provided.",
+      "round_number": 4,
+      "routed": true,
+      "routed_to": [
+        "network_security"
+      ]
+    },
+    {
+      "gap_id": "gap_0a4ef892",
+      "author_group": "network_security",
+      "author_persona": "architect",
+      "analyzed": "Management Zone",
+      "gap_text": "Cannot verify detailed access controls or network policies applied to the Management Zone, including ingress/egress filtering.",
+      "round_number": 4,
+      "routed": true,
+      "routed_to": [
+        "network_security",
+        "appsec",
+        "endpoint_security",
+        "threat_intel",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_37d1de75",
+      "author_group": "appsec",
+      "author_persona": "offensive",
+      "analyzed": "WEB-01 (Apache configuration)",
+      "gap_text": "Cannot verify specific Apache modules (e.g., `mod_cgi`) or directory permissions on WEB-01 to definitively confirm the exact RCE vector for CVE-2021-41773, though path traversal is confirmed and RCE is a high probability given the \"unpatched\" status.",
+      "round_number": 4,
+      "routed": true,
+      "routed_to": [
+        "endpoint_security"
+      ]
+    },
+    {
+      "gap_id": "gap_5ec5c6f8",
+      "author_group": "appsec",
+      "author_persona": "offensive",
+      "analyzed": "APIs (on WEB-01)",
+      "gap_text": "Cannot verify specific API endpoints, their data schemas, or the exact authentication/authorization logic used by the applications hosted on WEB-01.",
+      "round_number": 4,
+      "routed": true,
+      "routed_to": [
+        "threat_intel",
+        "network_security",
+        "appsec",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_2cbb0d1b",
+      "author_group": "appsec",
+      "author_persona": "offensive",
+      "analyzed": "Network Segmentation",
+      "gap_text": "Cannot verify specific firewall rules or ACLs between the DMZ, Internal, and Database zones to confirm the exact extent of \"no network segmentation.\" The description \"No network segmentation between Internal and Database\" is clear, but the DMZ's interaction with Internal/Database could use more detail.",
+      "round_number": 4,
+      "routed": true,
+      "routed_to": [
+        "network_security"
+      ]
+    },
+    {
+      "gap_id": "gap_7c9e6689",
+      "author_group": "threat_intel",
+      "author_persona": "apt_analyst",
+      "analyzed": "WEB-01",
+      "gap_text": "Cannot verify specific web application content or user accounts.",
+      "round_number": 4,
+      "routed": true,
+      "routed_to": [
+        "network_security",
+        "appsec",
+        "endpoint_security",
+        "threat_intel",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_b44689a4",
+      "author_group": "threat_intel",
+      "author_persona": "apt_analyst",
+      "analyzed": "WIN-01",
+      "gap_text": "Cannot verify specific RDP configurations (e.g., network level authentication, port number if non-standard).",
+      "round_number": 4,
+      "routed": true,
+      "routed_to": [
+        "appsec",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_35568c7f",
+      "author_group": "threat_intel",
+      "author_persona": "apt_analyst",
+      "analyzed": "APT Groups (APT28, Lazarus)",
+      "gap_text": "Cannot definitively identify the *specific* APT group",
+      "round_number": 4,
+      "routed": true,
+      "routed_to": [
+        "network_security",
+        "appsec",
+        "endpoint_security",
+        "threat_intel",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_51e28bbf",
+      "author_group": "appsec",
+      "author_persona": "offensive",
+      "analyzed": "WEB-01 (Web application)",
+      "gap_text": "Cannot verify specific application code, endpoints, or data processed by the web application. This limits the ability to pinpoint specific SQLi, XSS, or other logic flaws without a full penetration test.",
+      "round_number": 5,
+      "routed": true,
+      "routed_to": [
+        "threat_intel",
+        "network_security"
+      ]
+    },
+    {
+      "gap_id": "gap_e2c7db8e",
+      "author_group": "appsec",
+      "author_persona": "offensive",
+      "analyzed": "DB-01",
+      "gap_text": "Cannot verify specific database schemas, user accounts, or data stored, which would be crucial for assessing the impact of a potential SQL Injection.",
+      "round_number": 5,
+      "routed": true,
+      "routed_to": [
+        "network_security",
+        "appsec",
+        "endpoint_security",
+        "threat_intel",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_26c4eedb",
+      "author_group": "appsec",
+      "author_persona": "offensive",
+      "analyzed": "MAIL-01",
+      "gap_text": "Cannot verify the specific mail application (beyond Postfix) or its configuration for potential mail-related application vulnerabilities (e.g., email header injection in a web app that sends emails).",
+      "round_number": 5,
+      "routed": true,
+      "routed_to": [
+        "network_security",
+        "appsec"
+      ]
+    },
+    {
+      "gap_id": "gap_e8355129",
+      "author_group": "endpoint_security",
+      "author_persona": "admin",
+      "analyzed": "WIN-01",
+      "gap_text": "Cannot verify specific local administrator accounts, their assignment, or the current state of least privilege enforcement on the system.",
+      "round_number": 5,
+      "routed": true,
+      "routed_to": [
+        "endpoint_security",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_9cc0b58f",
+      "author_group": "endpoint_security",
+      "author_persona": "admin",
+      "analyzed": "All Hosts (WEB-01, DB-01, FW-01, WIN-01, MAIL-01)",
+      "gap_text": "Cannot verify the existence or application of specific hardening baselines or security configurations beyond general patch status.",
+      "round_number": 5,
+      "routed": true,
+      "routed_to": [
+        "endpoint_security"
+      ]
+    },
+    {
+      "gap_id": "gap_83e44c36",
+      "author_group": "endpoint_security",
+      "author_persona": "admin",
+      "analyzed": "Patch Management",
+      "gap_text": "Cannot verify the formal patch management process (e.g., update server, deployment schedule, verification steps) for any host. Only specific patch statuses are known.",
+      "round_number": 5,
+      "routed": true,
+      "routed_to": [
+        "endpoint_security"
+      ]
+    },
+    {
+      "gap_id": "gap_46740f5f",
+      "author_group": "endpoint_security",
+      "author_persona": "offensive",
+      "analyzed": "WIN-01",
+      "gap_text": "None — fully assessed from an offensive endpoint perspective regarding LSASS.",
+      "round_number": 5,
+      "routed": true,
+      "routed_to": [
+        "network_security",
+        "appsec",
+        "endpoint_security",
+        "threat_intel",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_9ab6b9db",
+      "author_group": "appsec",
+      "author_persona": "offensive",
+      "analyzed": "WEB-01 (Web Application)",
+      "gap_text": "Cannot verify specific application code, endpoints, or the exact nature of data processed by the web application.",
+      "round_number": 6,
+      "routed": true,
+      "routed_to": [
+        "network_security",
+        "appsec",
+        "endpoint_security",
+        "threat_intel",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_932ca8fd",
+      "author_group": "appsec",
+      "author_persona": "offensive",
+      "analyzed": "DB-01",
+      "gap_text": "Cannot verify specific database schemas, user accounts, or the type/sensitivity of data stored within DB-01.",
+      "round_number": 6,
+      "routed": true,
+      "routed_to": [
+        "network_security",
+        "appsec",
+        "endpoint_security",
+        "threat_intel",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_e8519f2b",
+      "author_group": "appsec",
+      "author_persona": "offensive",
+      "analyzed": "Network Segmentation",
+      "gap_text": "Cannot verify specific firewall rules between the DMZ and Database zones, beyond the logical necessity for the web application to connect to the database.",
+      "round_number": 6,
+      "routed": true,
+      "routed_to": [
+        "threat_intel",
+        "network_security"
+      ]
+    },
+    {
+      "gap_id": "gap_46960c44",
+      "author_group": "endpoint_security",
+      "author_persona": "admin",
+      "analyzed": "WEB-01, WIN-01, DB-01, MAIL-01, FW-01 (All hosts)",
+      "gap_text": "Cannot verify the existence or application of specific hardening baselines or detailed security configurations beyond general OS versions.",
+      "round_number": 6,
+      "routed": true,
+      "routed_to": [
+        "network_security",
+        "appsec",
+        "endpoint_security",
+        "threat_intel",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_57933ffc",
+      "author_group": "endpoint_security",
+      "author_persona": "admin",
+      "analyzed": "Patch Management",
+      "gap_text": "Cannot verify the formal patch management process (e.g., update server, deployment schedule, verification procedures) beyond the current patch status of a few hosts.",
+      "round_number": 6,
+      "routed": true,
+      "routed_to": [
+        "endpoint_security"
+      ]
+    },
+    {
+      "gap_id": "gap_62d728bb",
+      "author_group": "endpoint_security",
+      "author_persona": "admin",
+      "analyzed": "WIN-01",
+      "gap_text": "Cannot verify specific local administrator accounts, their assignment, or the current state of least privilege enforcement.",
+      "round_number": 6,
+      "routed": true,
+      "routed_to": [
+        "endpoint_security",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_2faffded",
+      "author_group": "threat_intel",
+      "author_persona": "apt_analyst",
+      "analyzed": "WEB-01, DB-01, WIN-01, Network Segmentation, EDR, SIEM",
+      "gap_text": "Cannot verify the presence or absence of specific sensitive data types (e.g., intellectual property, PII) beyond `is_critical=true` for DB-01, which would further refine APT motivation (e.g., espionage vs. financial gain).",
+      "round_number": 6,
+      "routed": true,
+      "routed_to": [
+        "network_security",
+        "appsec",
+        "endpoint_security",
+        "threat_intel",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_155fb0b0",
+      "author_group": "endpoint_security",
+      "author_persona": "defensive",
+      "analyzed": "Antivirus (AV)",
+      "gap_text": "Cannot assess AV status, update frequency, or detection capabilities as no AV solution is deployed.",
+      "round_number": 6,
+      "routed": true,
+      "routed_to": [
+        "network_security",
+        "appsec",
+        "endpoint_security",
+        "threat_intel",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_fa749504",
+      "author_group": "endpoint_security",
+      "author_persona": "defensive",
+      "analyzed": "Endpoint Detection and Response (EDR)",
+      "gap_text": "Cannot assess EDR visibility, behavioral detection, script monitoring (T1059.001, T1059.003), scheduled task monitoring (T1053.005), LSASS protection (T1003.001), or data collection/impact detection (T1005, T1486) as no EDR solution is deployed.",
+      "round_number": 6,
+      "routed": true,
+      "routed_to": [
+        "network_security",
+        "appsec",
+        "endpoint_security",
+        "threat_intel",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_87b7d953",
+      "author_group": "endpoint_security",
+      "author_persona": "defensive",
+      "analyzed": "Script Execution Monitoring",
+      "gap_text": "Cannot verify if script execution (e.g., PowerShell on WIN-01, cmd.exe on WIN-01, Bash on Linux hosts) is logged, restricted (e.g., PowerShell Constrained Language Mode, AMSI), or monitored on any host due to the absence of EDR/SIEM.",
+      "round_number": 6,
+      "routed": true,
+      "routed_to": [
+        "threat_intel",
+        "risk",
+        "network_security"
+      ]
+    },
+    {
+      "gap_id": "gap_ae34301e",
+      "author_group": "endpoint_security",
+      "author_persona": "defensive",
+      "analyzed": "Scheduled Task Monitoring",
+      "gap_text": "Cannot verify if the creation or modification of scheduled tasks (T1053.005) is audited or alerted on any host (WEB-01, DB-01, WIN-01, MAIL-01) due to the absence of EDR/SIEM.",
+      "round_number": 6,
+      "routed": true,
+      "routed_to": [
+        "threat_intel",
+        "risk",
+        "network_security",
+        "appsec"
+      ]
+    },
+    {
+      "gap_id": "gap_7602b704",
+      "author_group": "endpoint_security",
+      "author_persona": "defensive",
+      "analyzed": "File Integrity Monitoring",
+      "gap_text": "Cannot verify if critical system files or sensitive data directories (T1005) are monitored for unauthorized changes on any host due to the absence of EDR/SIEM.",
+      "round_number": 6,
+      "routed": true,
+      "routed_to": [
+        "threat_intel",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_ec57a104",
+      "author_group": "endpoint_security",
+      "author_persona": "defensive",
+      "analyzed": "Patch Management",
+      "gap_text": "Cannot verify the existence or effectiveness of a formal patch management process for any host, specifically for OS, applications (Apache, MySQL, Postfix), or firmware (pfSense), beyond the stated \"unpatched\" status of WEB-01 and WIN-01.",
+      "round_number": 6,
+      "routed": true,
+      "routed_to": [
+        "network_security",
+        "appsec",
+        "endpoint_security"
+      ]
+    },
+    {
+      "gap_id": "gap_54dfba6a",
+      "author_group": "network_security",
+      "author_persona": "architect",
+      "analyzed": "Network Topology",
+      "gap_text": "Cannot verify specific subnet ranges, VLAN configurations, or detailed routing protocols.",
+      "round_number": 7,
+      "routed": true,
+      "routed_to": [
+        "network_security"
+      ]
+    },
+    {
+      "gap_id": "gap_83e744d2",
+      "author_group": "network_security",
+      "author_persona": "architect",
+      "analyzed": "FW-01",
+      "gap_text": "Cannot assess actual firewall rule sets, specific management interface exposure, or logging configurations.",
+      "round_number": 7,
+      "routed": true,
+      "routed_to": [
+        "threat_intel",
+        "network_security"
+      ]
+    },
+    {
+      "gap_id": "gap_e624e24b",
+      "author_group": "network_security",
+      "author_persona": "architect",
+      "analyzed": "Internal Network Devices",
+      "gap_text": "No information provided on switches, internal routers, or any other internal network segmentation enforcement points.",
+      "round_number": 7,
+      "routed": true,
+      "routed_to": [
+        "network_security"
+      ]
+    },
+    {
+      "gap_id": "gap_808a7107",
+      "author_group": "network_security",
+      "author_persona": "architect",
+      "analyzed": "Internet Gateway",
+      "gap_text": "Cannot verify details of ISP connectivity, redundant internet links, or any upstream DDoS protection services.",
+      "round_number": 7,
+      "routed": true,
+      "routed_to": [
+        "network_security",
+        "appsec",
+        "endpoint_security",
+        "threat_intel",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_10427adb",
+      "author_group": "threat_intel",
+      "author_persona": "apt_analyst",
+      "analyzed": "WEB-01, DB-01, FW-01, WIN-01, MAIL-01, EDR, SIEM, AV, NDR, WAF, MFA, DLP, Network Segmentation.",
+      "gap_text": "Cannot verify if",
+      "round_number": 7,
+      "routed": true,
+      "routed_to": [
+        "network_security",
+        "appsec",
+        "endpoint_security",
+        "threat_intel",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_13238052",
+      "author_group": "appsec",
+      "author_persona": "offensive",
+      "analyzed": "WEB-01 (Apache)",
+      "gap_text": "Cannot assess specific web application code vulnerabilities (e.g., SQL injection, Cross-Site Scripting, Server-Side Request Forgery, Insecure Direct Object References) beyond general likelihood, as the actual web application running on Apache is not detailed.",
+      "round_number": 7,
+      "routed": true,
+      "routed_to": [
+        "network_security",
+        "appsec",
+        "endpoint_security",
+        "threat_intel",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_698cf0d7",
+      "author_group": "appsec",
+      "author_persona": "offensive",
+      "analyzed": "API",
+      "gap_text": "Cannot verify specific API endpoints, logic, or vulnerabilities (e.g., broken authentication, rate limiting bypasses, excessive data exposure) as no API details or documentation are provided.",
+      "round_number": 7,
+      "routed": true,
+      "routed_to": [
+        "threat_intel",
+        "network_security",
+        "appsec",
+        "risk"
+      ]
+    },
+    {
+      "gap_id": "gap_b7e89dac",
+      "author_group": "appsec",
+      "author_persona": "offensive",
+      "analyzed": "Authentication/Authorization mechanisms",
+      "gap_text": "Cannot assess the robustness of application-level authentication and authorization mechanisms (e.g., session management, JWT implementation, access control policies) as no application details are provided.",
+      "round_number": 7,
+      "routed": true,
+      "routed_to": [
+        "appsec",
+        "risk"
+      ]
+    }
+  ],
+  "agent_config": {},
+  "error": null
+}

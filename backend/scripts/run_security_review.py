@@ -519,11 +519,18 @@ def run_review(
         session_state.attacker_findings,
     )
     gaps = engine.get_coverage_gaps(consensus_vulns)
+    unvalidated_gaps = engine.enforce_control_coverage(
+        consensus_vulns, session_state.expert_findings
+    )
 
     logger.info(f"  Consensus vulnerabilities: {len(consensus_vulns)}")
     logger.info(f"    Critical : {gaps['critical_count']}")
     logger.info(f"    High     : {gaps['high_count']}")
     logger.info(f"    Silent groups: {gaps['silent_domain_groups'] or 'none'}")
+    if unvalidated_gaps:
+        logger.info(f"  Unvalidated control gaps (Solution D): {len(unvalidated_gaps)}")
+        for g in unvalidated_gaps:
+            logger.info(f"    [{g['severity'].upper()}] {g['control']}: {g['title']} ({g['source_count']} raw findings)")
 
     # ── Generate report ───────────────────────────────────────────────────────
     logger.info("\n[Step 4/4] Generating vulnerability report (ReACT agent)...")
@@ -548,6 +555,18 @@ def run_review(
         f.write(f"**Generated**: {report_result.get('generated_at', '')}\n\n")
         f.write("---\n\n")
         f.write(report_result.get("report", ""))
+        # Append unvalidated control gaps section
+        ucg = report_result.get("unvalidated_control_gaps", [])
+        if ucg:
+            f.write("\n\n---\n\n## Unvalidated Control Gaps\n\n")
+            f.write("> Single-domain findings not cross-validated by consensus. "
+                    "Listed for completeness — lower confidence than consensus items.\n\n")
+            for g in ucg:
+                f.write(f"### [{g['severity'].upper()}] {g['control']}: {g['title']}\n\n")
+                f.write(f"{g['description'][:400]}\n\n")
+                f.write(f"- **Source count**: {g['source_count']} raw findings\n")
+                f.write(f"- **Reported by**: {g['author_group']}\n")
+                f.write(f"- **Note**: {g['note']}\n\n")
 
     logger.info(f"\n{'='*60}")
     logger.info("REVIEW COMPLETED")

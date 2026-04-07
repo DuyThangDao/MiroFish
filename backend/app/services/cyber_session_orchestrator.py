@@ -412,7 +412,7 @@ class CyberSessionOrchestrator:
             confidence=self._initial_confidence_for_severity(finding_raw["severity"]),
             evidence=finding_raw["evidence"],
             recommendations=finding_raw["recommendations"],
-            mitre_techniques=[],
+            mitre_techniques=finding_raw.get("mitre_techniques", []),
             phase=finding_raw["phase"],
             round_number=round_num,
         )
@@ -524,13 +524,24 @@ class CyberSessionOrchestrator:
         """
         Build text summary của các findings đã có để inject vào tiếp theo.
         Giới hạn độ dài để không overflow context window.
+
+        Includes Published Registry (Solution A for Weakness #4):
+        agents see unique titles already reported → instructed to CHALLENGE
+        or EXPAND rather than re-report the same finding.
         """
+        from .cyber_oasis_env import build_published_registry
         lines = []
 
+        # Published Registry — shown first so agents read it before anything else
+        registry = build_published_registry(session_state.expert_findings, max_entries=20)
+        if registry:
+            lines.append(registry)
+            lines.append("")  # blank line separator
+
         if session_state.expert_findings:
-            lines.append(f"=== EXPERT FINDINGS ({len(session_state.expert_findings)}) ===")
-            # Chỉ show 10 findings gần nhất để giữ context ngắn
-            recent = session_state.expert_findings[-10:]
+            lines.append(f"=== RECENT FINDINGS (last 6) ===")
+            # Reduced from 10 to 6 — registry already covers all unique titles
+            recent = session_state.expert_findings[-6:]
             for f in recent:
                 corr_count = len(f.get("attacker_corroborations", []))
                 lines.append(

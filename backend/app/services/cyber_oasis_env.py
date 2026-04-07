@@ -222,6 +222,47 @@ def build_gap_context_for_agent(
     return "\n".join(lines)
 
 
+def build_published_registry(
+    expert_findings: List[Dict[str, Any]],
+    max_entries: int = 20,
+) -> str:
+    """
+    Published Registry — inject into agent context so agents know what has
+    already been reported and avoid duplicating.
+
+    Shows unique finding titles grouped by domain, capped at max_entries to
+    prevent context overflow. Agents are instructed to CHALLENGE or EXPAND
+    existing findings rather than re-report them.
+
+    Returns empty string if no findings yet (round 1).
+    """
+    if not expert_findings:
+        return ""
+
+    # Deduplicate by title (case-insensitive) keeping first occurrence
+    seen: set = set()
+    unique: List[Dict[str, Any]] = []
+    for f in expert_findings:
+        key = f.get("title", "").lower().strip()
+        if key and key not in seen:
+            seen.add(key)
+            unique.append(f)
+
+    # Cap to avoid context overflow — take most recent unique findings
+    capped = unique[-max_entries:] if len(unique) > max_entries else unique
+
+    lines = [
+        f"=== PUBLISHED FINDINGS REGISTRY ({len(unique)} unique findings reported so far) ===",
+        "Do NOT duplicate these. If you agree → CHALLENGE or add evidence.",
+        "If you have new information → write a NEW [FINDING] with distinct title.",
+    ]
+    for f in capped:
+        reporters = f"{f.get('author_group','?')}/{f.get('author_persona','?')}"
+        lines.append(f"  • [{f.get('severity','?').upper()}] {f.get('title','?')} — by {reporters}")
+
+    return "\n".join(lines)
+
+
 def get_phase_for_round(round_num: int) -> str:
     """Trả về phase letter (A/B/C) cho round number."""
     if round_num <= 3:
@@ -322,6 +363,7 @@ def parse_expert_finding_from_text(
     evidence = []
     detail = ""
     recommendation = []
+    mitre_techniques = []
     phase = get_phase_for_round(round_num)
 
     for i, line in enumerate(lines):
@@ -340,12 +382,19 @@ def parse_expert_finding_from_text(
             evidence = [evidence_raw] if evidence_raw else []
         elif stripped.lower().startswith("detail:"):
             detail = stripped.split(":", 1)[1].strip()
-        elif stripped.lower().startswith("recommendation:"):
+        elif stripped.lower().startswith("mitre:"):
+            mitre_raw = stripped.split(":", 1)[1].strip()
+            mitre_techniques = re.findall(r'T\d{4}(?:\.\d{3})?', mitre_raw)
+        elif stripped.lower().startswith("recommendation:") or stripped.lower().startswith("recommend:"):
             rec_raw = stripped.split(":", 1)[1].strip()
             recommendation = [rec_raw] if rec_raw else []
 
     if not title:
         return None
+
+    # Fallback: if no MITRE: field found, scan full finding text for inline T-numbers
+    if not mitre_techniques:
+        mitre_techniques = list(dict.fromkeys(re.findall(r'\bT\d{4}(?:\.\d{3})?\b', text)))
 
     return {
         "author_group": agent_profile.domain_group,
@@ -356,6 +405,7 @@ def parse_expert_finding_from_text(
         "evidence": evidence,
         "description": detail or title,
         "recommendations": recommendation,
+        "mitre_techniques": mitre_techniques,
         "phase": phase,
         "round_number": round_num,
     }
