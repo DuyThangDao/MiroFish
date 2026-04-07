@@ -4,6 +4,9 @@ Thumbs.db
 
 # 环境变量（保护敏感信息）
 .env
+# Google Cloud service account keys
+*-service-account*.json
+vertex-ai.json
 .env.local
 .env.*.local
 .env.development

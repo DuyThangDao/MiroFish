@@ -386,7 +386,7 @@ def run_review(
         for attempt in range(max_attempts):
             rate_limiter.acquire()
             try:
-                response = llm.chat(messages, temperature=0.7, max_tokens=1500)
+                response = llm.chat(messages, temperature=0.7, max_tokens=4096)
                 post = {
                     "round_num": round_num, "phase": phase,
                     "agent_id": profile.agent_id, "agent_display": profile.display_name,
@@ -416,18 +416,27 @@ def run_review(
 
         phase  = get_phase_for_round(round_num)
         active = env_builder.get_active_agents_for_phase(profiles, phase)
-        phase_instr = env_builder.build_phase_instruction(phase, round_num)
 
         logger.info(f"  Round {round_num:2d}/{rounds} [Phase {phase}] — {len(active)} active agents")
 
         prior_ctx = orchestrator._build_prior_context(session_state)
+
+        def _make_instr(profile):
+            """Per-agent phase instruction with gap context injected if relevant."""
+            from app.services.cyber_oasis_env import build_gap_context_for_agent
+            gap_ctx = ""
+            if profile.tier == 1 and phase in ("A", "B"):
+                gap_ctx = build_gap_context_for_agent(
+                    session_state.pending_gaps(), profile.domain_group
+                )
+            return env_builder.build_phase_instruction(phase, round_num, gap_context=gap_ctx)
 
         if max_workers > 1:
             # Parallel: collect results then process in order
             round_results = []
             with ThreadPoolExecutor(max_workers=max_workers) as pool:
                 futures = {
-                    pool.submit(_call_agent, p, phase_instr, prior_ctx, round_num, phase): p
+                    pool.submit(_call_agent, p, _make_instr(p), prior_ctx, round_num, phase): p
                     for p in active
                     if not _shutdown_requested
                 }
@@ -445,22 +454,30 @@ def run_review(
                 feed_posts.append(post)
                 if profile.tier == 1:
                     orchestrator._process_expert_response(response, profile, round_num, session_state)
+                    if phase in ("A", "B"):
+                        orchestrator._process_gap_declarations(response, profile, round_num, session_state)
                 else:
                     orchestrator._process_attacker_response(response, profile, round_num, session_state)
+            if phase in ("A", "B"):
+                orchestrator._mark_gaps_as_routed(session_state)
         else:
             # Sequential
             for profile in active:
                 if _shutdown_requested:
                     break
                 try:
-                    profile, post, response = _call_agent(profile, phase_instr, prior_ctx, round_num, phase)
+                    profile, post, response = _call_agent(profile, _make_instr(profile), prior_ctx, round_num, phase)
                     feed_posts.append(post)
                     if profile.tier == 1:
                         orchestrator._process_expert_response(response, profile, round_num, session_state)
+                        if phase in ("A", "B"):
+                            orchestrator._process_gap_declarations(response, profile, round_num, session_state)
                     else:
                         orchestrator._process_attacker_response(response, profile, round_num, session_state)
                 except Exception as e:
                     logger.warning(f"    Agent {profile.agent_id}: {e}")
+            if phase in ("A", "B"):
+                orchestrator._mark_gaps_as_routed(session_state)
 
         session_state.current_round = round_num
         session_state.current_phase = phase

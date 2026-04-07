@@ -9,6 +9,8 @@ Phase B (rounds 4–7):  Domain experts challenge nhau cross-group, attacker age
 Phase C (rounds 8–10): Attacker profiles phát biểu — confirm/dismiss/add/escalate findings
 """
 
+import re
+import uuid
 import json
 from typing import Dict, List, Any, Optional
 from dataclasses import dataclass, field
@@ -18,6 +20,21 @@ from .cyber_expert_profile_generator import CyberAgentProfile
 
 logger = get_logger("mirofish.cyber_oasis_env")
 
+
+# ─── GAP Output Format ────────────────────────────────────────────────────────
+
+# Appended to Phase A and B instructions — agents must follow this format
+GAP_FORMAT_INSTRUCTION = """
+REQUIRED — end every post with one or more GAP declarations:
+ANALYZED: <host name or control, e.g. FW-01 or SIEM>
+GAP: <what you cannot verify and why, OR "None — fully assessed">
+
+Example:
+ANALYZED: SIEM
+GAP: Cannot evaluate alerting rules — no SIEM deployed.
+ANALYZED: FW-01
+GAP: Cannot assess admin interface — no management access details provided.
+"""
 
 # ─── Phase definitions ────────────────────────────────────────────────────────
 
@@ -30,7 +47,8 @@ PHASE_CONFIG = {
         "instruction_addition": (
             "In this phase, discuss PRIMARILY with experts in your own domain. "
             "Focus on your domain expertise. "
-            "Propose findings and validate them with peers in your group."
+            "Propose findings and validate them with peers in your group.\n"
+            + GAP_FORMAT_INSTRUCTION
         ),
     },
     "B": {
@@ -42,7 +60,8 @@ PHASE_CONFIG = {
             "In this phase, READ and CHALLENGE findings from other domain groups. "
             "Ask: is this finding accurate? Is the severity overestimated? "
             "Is there missing context from your perspective? "
-            "Also add new findings if you notice another domain group has missed something."
+            "Also add new findings if you notice another domain group has missed something.\n"
+            + GAP_FORMAT_INSTRUCTION
         ),
     },
     "C": {
@@ -54,11 +73,153 @@ PHASE_CONFIG = {
             "In this phase, ATTACKER PROFILES are activated. "
             "Domain expert agents: respond if an attacker challenges your finding. "
             "Attacker agents: read all findings and challenge them from an attacker's perspective."
+            # Note: GAP format NOT required for attacker agents — they use ATTACKER_* action format
         ),
     },
 }
 
 TOTAL_ROUNDS = 10
+
+
+# ─── GAP Routing Table ────────────────────────────────────────────────────────
+
+# Maps keywords in GAP text → domain groups best positioned to investigate
+GAP_ROUTING_TABLE: Dict[str, List[str]] = {
+    "siem":           ["threat_intel", "risk"],
+    "log":            ["threat_intel", "network_security"],
+    "alert":          ["threat_intel", "network_security"],
+    "mfa":            ["risk", "appsec"],
+    "multi-factor":   ["risk", "appsec"],
+    "dlp":            ["risk", "endpoint_security"],
+    "data loss":      ["risk", "endpoint_security"],
+    "waf":            ["appsec", "network_security"],
+    "web application firewall": ["appsec"],
+    "backup":         ["endpoint_security", "risk"],
+    "fw-01":          ["network_security", "risk"],
+    "pfsense":        ["network_security"],
+    "firewall rule":  ["network_security"],
+    "management access": ["network_security", "risk"],
+    "mail-01":        ["network_security", "appsec"],
+    "postfix":        ["network_security", "appsec"],
+    "smtp":           ["network_security", "appsec"],
+    "patch":          ["endpoint_security"],
+    "privilege":      ["endpoint_security", "risk"],
+    "admin":          ["endpoint_security", "risk"],
+    "authentication": ["appsec", "risk"],
+    "authorization":  ["appsec"],
+    "compliance":     ["risk"],
+    "regulation":     ["risk"],
+    "network segment": ["network_security"],
+    "vlan":           ["network_security"],
+    "trust":          ["network_security", "risk"],
+}
+
+
+def route_gap(gap_text: str) -> List[str]:
+    """
+    Determine which domain groups should investigate a GAP declaration.
+    Returns list of domain group names. Falls back to all groups if no keyword matches.
+    """
+    gap_lower = gap_text.lower()
+    matched: List[str] = []
+    for keyword, groups in GAP_ROUTING_TABLE.items():
+        if keyword in gap_lower:
+            for g in groups:
+                if g not in matched:
+                    matched.append(g)
+    # If no keyword matched, broadcast to all groups
+    return matched or ["network_security", "appsec", "endpoint_security", "threat_intel", "risk"]
+
+
+def parse_gap_declarations(
+    text: str,
+    author_group: str,
+    author_persona: str,
+    round_num: int,
+) -> List[Dict[str, Any]]:
+    """
+    Parse ANALYZED + GAP declaration blocks from an agent post.
+
+    Expected format (one or more per post):
+      ANALYZED: <host or control>
+      GAP: <description>
+
+    Returns list of GapDeclaration-compatible dicts.
+    Skips declarations where gap_text is empty or explicitly "none".
+    """
+    gaps = []
+    # Split on ANALYZED: to find each declaration block
+    blocks = re.split(r'(?i)\bANALYZED\s*:', text)
+    for block in blocks[1:]:  # skip text before first ANALYZED:
+        lines = block.strip().splitlines()
+        analyzed = lines[0].strip() if lines else "unknown"
+
+        gap_text = ""
+        collecting = False
+        for line in lines[1:]:
+            stripped = line.strip()
+            if re.match(r'(?i)^GAP\s*:', stripped):
+                gap_text = stripped.split(":", 1)[1].strip()
+                collecting = True
+            elif collecting:
+                # Continuation lines (indented or starts with e.g.)
+                if stripped.startswith("e.g.") or (line.startswith("  ") and stripped):
+                    gap_text += " " + stripped
+                else:
+                    break  # Next field or block
+
+        # Skip trivial / null gaps
+        if not gap_text:
+            continue
+        gap_lower = gap_text.lower().strip(" .")
+        if gap_lower in ("none", "none identified", "none — fully assessed within domain scope",
+                         "n/a", "not applicable", "fully assessed"):
+            continue
+
+        gaps.append({
+            "gap_id":        f"gap_{uuid.uuid4().hex[:8]}",
+            "author_group":  author_group,
+            "author_persona": author_persona,
+            "analyzed":      analyzed,
+            "gap_text":      gap_text,
+            "round_number":  round_num,
+            "routed":        False,
+            "routed_to":     route_gap(gap_text),
+        })
+
+    return gaps
+
+
+def build_gap_context_for_agent(
+    pending_gaps: List[Dict[str, Any]],
+    agent_domain_group: str,
+) -> str:
+    """
+    Filter pending GAP declarations relevant to this agent's domain group
+    and format as injection text for the next round's prompt.
+
+    Returns empty string if no relevant gaps.
+    """
+    relevant = [
+        g for g in pending_gaps
+        if agent_domain_group in g.get("routed_to", [])
+    ]
+    if not relevant:
+        return ""
+
+    lines = [
+        "=== UNRESOLVED GAPS — Previous rounds identified areas needing YOUR domain expertise ===",
+        "These gaps were declared by other experts who could not verify these areas.",
+        "Please investigate and generate a [FINDING] or [NO_FINDING] for each:",
+    ]
+    for g in relevant:
+        lines.append(
+            f"\n  [GAP from {g['author_group']}/{g['author_persona']}, Round {g['round_number']}]"
+            f"\n  Area: {g['analyzed']}"
+            f"\n  Why unresolved: {g['gap_text']}"
+        )
+    lines.append("")
+    return "\n".join(lines)
 
 
 def get_phase_for_round(round_num: int) -> str:
@@ -294,13 +455,29 @@ class CyberOasisEnvBuilder:
         """Trả về agents trong cùng domain group (dùng cho Phase A focus)."""
         return [p for p in profiles if p.domain_group == domain_group]
 
-    def build_phase_instruction(self, phase: str, round_num: int) -> str:
-        """System instruction inject vào đầu mỗi round."""
+    def build_phase_instruction(
+        self,
+        phase: str,
+        round_num: int,
+        gap_context: str = "",
+    ) -> str:
+        """
+        Build system instruction injected at the start of each round.
+
+        Args:
+            phase: "A" | "B" | "C"
+            round_num: current round number
+            gap_context: formatted GAP declarations routed to this specific agent
+                         (empty string = no relevant gaps for this agent)
+        """
         phase_cfg = PHASE_CONFIG.get(phase, {})
-        return (
+        instruction = (
             f"=== Phase {phase}: {phase_cfg.get('name', '')} | Round {round_num}/{TOTAL_ROUNDS} ===\n"
             f"{phase_cfg.get('instruction_addition', '')}"
         )
+        if gap_context:
+            instruction = gap_context + "\n" + instruction
+        return instruction
 
     # ─── Private ──────────────────────────────────────────────────────────────
 
@@ -327,12 +504,31 @@ Phase C (Rounds 8-10): Attacker perspective — attacker profiles provide real-w
 3. Prioritize findings by severity and exploitability
 4. Provide actionable recommendations
 
-Use format:
+=== FINDING FORMAT (Phases A and B) ===
 [FINDING] Title
 Severity: critical|high|medium|low
 Affected: host/service name
 Evidence: specific evidence from infrastructure
+MITRE: T#### (at least one ATT&CK technique ID)
 Detail: detailed explanation
 Recommendation: concrete action
+
+[NO_FINDING] <area analyzed> — <brief reason it appears secure or out of scope>
+
+=== GAP DECLARATION FORMAT (mandatory in Phases A and B) ===
+After every post, declare what you could NOT verify:
+
+ANALYZED: <host name or control category>
+GAP: <what you could not assess and why>
+
+Example:
+  ANALYZED: FW-01
+  GAP: Cannot assess pfSense admin interface exposure — no information about management network access in the description.
+
+  ANALYZED: SIEM
+  GAP: Cannot evaluate detection coverage — no SIEM is deployed.
+
+GAP declarations route unresolved areas to the domain group best positioned to investigate.
+If fully assessed: write "GAP: None — fully assessed."
 
 Start with your domain's perspective. Be specific — reference actual hosts, CVEs, and services."""

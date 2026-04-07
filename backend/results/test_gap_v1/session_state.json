@@ -1,0 +1,2444 @@
+{
+  "session_id": "script_20260407_041909",
+  "graph_id": "scenario_sme_no_tools",
+  "current_phase": "done",
+  "current_round": 10,
+  "total_rounds": 10,
+  "expert_findings": [
+    {
+      "finding_id": "ef_9f5aa088",
+      "author_group": "appsec",
+      "author_persona": "offensive",
+      "title": "Remote Code Execution via Apache Path Traversal (CVE-2021-41773)",
+      "description": "The Apache HTTP Server 2.4.49 on WEB-01 is vulnerable to CVE-2021-41773, a path traversal vulnerability that can lead to remote code execution (RCE). This vulnerability allows an attacker to map URLs",
+      "affected_assets": [
+        "WEB-01 (Apache 2.4.49)"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "\"WEB-01: Apache 2.4.49, zone DMZ, Ubuntu 20.04, unpatched, CVE-2021-41773\""
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "A",
+      "round_number": 1,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_cf1186c8",
+      "author_group": "network_security",
+      "author_persona": "architect",
+      "title": "Unpatched Public-Facing Web Server with Critical Vulnerability",
+      "description": "Unpatched Public-Facing Web Server with Critical Vulnerability",
+      "affected_assets": [
+        "WEB-01 (Apache 2.4.49)"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "WEB-01 is in the DMZ, directly exposed to the internet, and is unpatched"
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "A",
+      "round_number": 1,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_46962c51",
+      "author_group": "appsec",
+      "author_persona": "defensive",
+      "title": "Absence of Web Application Firewall (WAF) for Public-Facing Application",
+      "description": "There is no Web Application Firewall (WAF) deployed in front of the public-facing WEB-01 server. A WAF provides a critical layer of defense against common web application attacks (e.g., SQL injection, Cross-Site",
+      "affected_assets": [
+        "WEB-01 (All public-facing applications)"
+      ],
+      "severity": "high",
+      "confidence": 0.6,
+      "evidence": [
+        "\"No WAF deployed\" in security controls."
+      ],
+      "recommendations": [
+        "Immediately patch Apache HTTP Server on WEB-01 to version 2.4.50 or later. Prioritize this action due to the severity and public exposure of the vulnerability."
+      ],
+      "mitre_techniques": [],
+      "phase": "A",
+      "round_number": 1,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_e683aafe",
+      "author_group": "network_security",
+      "author_persona": "defensive",
+      "title": "Critical Public-Facing Application Vulnerability",
+      "description": "Critical Public-Facing Application Vulnerability",
+      "affected_assets": [
+        "WEB-01 (Apache 2.4.49)"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "WEB-01 is unpatched with CVE-2021-41773 and is"
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "A",
+      "round_number": 1,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_7586aeaa",
+      "author_group": "network_security",
+      "author_persona": "offensive",
+      "title": "Exploit Public-Facing Apache Server (CVE-2021-41773)",
+      "description": "Exploit Public-Facing Apache Server (CVE-2021-41773)",
+      "affected_assets": [
+        "WEB-01 (Apache 2.4.49)"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "WEB-01 is in the DMZ zone,"
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "A",
+      "round_number": 1,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_1888f248",
+      "author_group": "endpoint_security",
+      "author_persona": "offensive",
+      "title": "Initial Access via Apache 2.4.49 RCE (CVE-2021-41773)",
+      "description": "Initial Access via Apache 2.4.49 RCE (CVE-2021-41773)",
+      "affected_assets": [
+        "WEB-01 (Apache 2.4.49)"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "WEB-01 is"
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "A",
+      "round_number": 1,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_0cb637d0",
+      "author_group": "endpoint_security",
+      "author_persona": "defensive",
+      "title": "Pervasive Lack of Endpoint Detection and Response (EDR) & Antivirus (AV)",
+      "description": "Pervasive Lack of Endpoint Detection and Response (EDR) & Antivirus (AV)",
+      "affected_assets": [
+        "All hosts (WEB-01",
+        "DB-01",
+        "WIN-01",
+        "MAIL-01)"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "\"Security controls"
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "A",
+      "round_number": 1,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_fc5988cd",
+      "author_group": "appsec",
+      "author_persona": "auditor",
+      "title": "Critical Public-Facing Application Vulnerability (Apache Path Traversal/RCE)",
+      "description": "Critical Public-Facing Application Vulnerability (Apache Path Traversal/RCE)",
+      "affected_assets": [
+        "WEB-01"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "Apache 2.4.49, unpatched, CVE-2021-41773"
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "A",
+      "round_number": 1,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_f502fc90",
+      "author_group": "endpoint_security",
+      "author_persona": "admin",
+      "title": "Critical Apache Path Traversal Vulnerability (CVE-2021-41773)",
+      "description": "Critical Apache Path Traversal Vulnerability (CVE-2021-41773)",
+      "affected_assets": [
+        "WEB-01 (Apache 2.4.49)"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "WEB-01 is described as \"un"
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "A",
+      "round_number": 1,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_d1228e44",
+      "author_group": "risk",
+      "author_persona": "compliance",
+      "title": "Critical Vulnerabilities on Public-Facing and Internal Systems",
+      "description": "Critical Vulnerabilities on Public-Facing and Internal Systems",
+      "affected_assets": [
+        "WEB-01",
+        "WIN-01"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "WEB-01 is running Apache 2.4.49, unpatched, with CVE-202"
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "A",
+      "round_number": 1,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_dad9404c",
+      "author_group": "risk",
+      "author_persona": "ciso",
+      "title": "Critical RCE Vulnerability on Internet-Facing Web Server",
+      "description": "Critical RCE Vulnerability on Internet-Facing Web Server",
+      "affected_assets": [
+        "WEB-01 (Apache 2.4.49)"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "WEB-01 is located in the DMZ, runs unpatched Apache 2.4.4"
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "A",
+      "round_number": 1,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_431a51de",
+      "author_group": "network_security",
+      "author_persona": "defensive",
+      "title": "Pervasive Lack of Network Intrusion Detection and Response (NDR)",
+      "description": "Pervasive Lack of Network Intrusion Detection and Response (NDR)",
+      "affected_assets": [
+        "All hosts (WEB-01",
+        "DB-01",
+        "FW-01",
+        "WIN-01",
+        "MAIL-01)"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "A",
+      "round_number": 2,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_01d482b4",
+      "author_group": "network_security",
+      "author_persona": "architect",
+      "title": "Critical Lack of Network Segmentation between Internal and Database Zones",
+      "description": "The absence of network segmentation between the Internal and Database zones creates an unreasonable trust",
+      "affected_assets": [
+        "DB-01",
+        "WIN-01"
+      ],
+      "severity": "critical",
+      "confidence": 1.0,
+      "evidence": [
+        "\"No network segmentation between Internal and Database.\""
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "A",
+      "round_number": 2,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": [
+        {
+          "profile_id": "apt",
+          "action": "ATTACKER_CONFIRM",
+          "comment": "Direct access to crown jewels (DB-01) from internal systems (WIN-01) simplifies lateral movement, reduces the attack surface for internal pivoting, and minimizes the risk of",
+          "confidence_delta": 0.15
+        },
+        {
+          "profile_id": "insider_threat",
+          "action": "ATTACKER_CONFIRM",
+          "comment": "This is a critical finding for an insider. My legitimate access to the internal network immediately grants me direct access to critical data on DB-01. This significantly simplifies data ex",
+          "confidence_delta": 0.15
+        },
+        {
+          "profile_id": "ransomware",
+          "action": "ATTACKER_CONFIRM",
+          "comment": "This significantly accelerates lateral movement from the Internal zone to the critical Database zone, allowing for rapid data exfiltration from DB-01 and broader encryption. Speed is key for maximum",
+          "confidence_delta": 0.15
+        },
+        {
+          "profile_id": "supply_chain",
+          "action": "ATTACKER_CONFIRM",
+          "comment": "This significantly simplifies lateral movement once I have gained initial access to the internal network via the compromised third-party. My goal is to pivot through the trusted third-party; once inside,",
+          "confidence_delta": 0.15
+        }
+      ]
+    },
+    {
+      "finding_id": "ef_c30d7e48",
+      "author_group": "network_security",
+      "author_persona": "offensive",
+      "title": "Exposed and Unpatched RDP on Internal Host",
+      "description": "Exposed and Unpatched RDP on Internal Host",
+      "affected_assets": [
+        "WIN-01"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "\"WIN-01: Windows Server 2019, zone Internal, unpatched, RDP exposed\" and \"Security controls: none (no E"
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "A",
+      "round_number": 2,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_bb48ddbf",
+      "author_group": "appsec",
+      "author_persona": "offensive",
+      "title": "Exploit Public-Facing Apache 2.4.49 via CVE-2021-41773 (Path Traversal/RCE)",
+      "description": "Exploit Public-Facing Apache 2.4.49 via CVE-2021-41773 (Path Traversal/RCE)",
+      "affected_assets": [
+        "WEB-01"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "WEB-01: Apache"
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "A",
+      "round_number": 2,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_b762c8a0",
+      "author_group": "appsec",
+      "author_persona": "defensive",
+      "title": "Unassessed Application-Level Vulnerabilities due to Lack of Visibility and Controls",
+      "description": "Unassessed Application-Level Vulnerabilities due to Lack of Visibility and Controls",
+      "affected_assets": [
+        "WEB-01"
+      ],
+      "severity": "high",
+      "confidence": 0.6,
+      "evidence": [
+        "\"No EDR, SIEM, AV, NDR, WAF, MFA, DLP deployed.\" The infrastructure description does not provide"
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "A",
+      "round_number": 2,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_38890840",
+      "author_group": "endpoint_security",
+      "author_persona": "offensive",
+      "title": "Credential Collection from WEB-01 Leading to DB-01 Compromise (T1005)",
+      "description": "Credential Collection from WEB-01 Leading to DB-01 Compromise (T1005)",
+      "affected_assets": [
+        "WEB-01",
+        "DB-01"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "WEB-01 (Apache 2.4.4"
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "A",
+      "round_number": 2,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_782f918b",
+      "author_group": "threat_intel",
+      "author_persona": "apt_analyst",
+      "title": "High Likelihood of APT Initial Access and Persistence via Public-Facing Vulnerabilities",
+      "description": "High Likelihood of APT Initial Access and Persistence via Public-Facing Vulnerabilities",
+      "affected_assets": [
+        "WEB-01",
+        "WIN-01",
+        "Entire Internal Network"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "WEB-01 (Apache 2.4.49, unpatched, CVE"
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "A",
+      "round_number": 2,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_ea0d2ef8",
+      "author_group": "endpoint_security",
+      "author_persona": "defensive",
+      "title": "Pervasive Lack of EDR and AV Across All General-Purpose Hosts",
+      "description": "Pervasive Lack of EDR and AV Across All General-Purpose Hosts",
+      "affected_assets": [
+        "WEB-01",
+        "DB-01",
+        "WIN-01",
+        "MAIL-01"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "\"Security controls: none (no EDR,"
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "A",
+      "round_number": 2,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_df856e5c",
+      "author_group": "endpoint_security",
+      "author_persona": "admin",
+      "title": "Unpatched Windows Server with RDP Exposure",
+      "description": "The Windows Server 2019 host (WIN-01",
+      "affected_assets": [
+        "WIN-01"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "Windows Server 2019, zone Internal, unpatched, RDP exposed"
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "A",
+      "round_number": 2,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_bc3123bd",
+      "author_group": "appsec",
+      "author_persona": "auditor",
+      "title": "Lack of Visibility into API Security Design",
+      "description": "Lack of Visibility into API Security Design",
+      "affected_assets": [
+        "Any potential APIs hosted on WEB-01"
+      ],
+      "severity": "high",
+      "confidence": 0.6,
+      "evidence": [
+        "The infrastructure description explicitly states \"WEB-01: Apache 2.4.49\" but provides no details regarding specific applications or APIs,"
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "A",
+      "round_number": 2,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_1e99a3e7",
+      "author_group": "risk",
+      "author_persona": "ciso",
+      "title": "Pervasive Lack of Foundational Security Controls",
+      "description": "Pervasive Lack of Foundational Security Controls",
+      "affected_assets": [
+        "Entire infrastructure (WEB-01",
+        "DB-01",
+        "FW-01",
+        "WIN-01",
+        "MAIL-01)"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "\"Security controls: none (no"
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "A",
+      "round_number": 2,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_0329239e",
+      "author_group": "risk",
+      "author_persona": "compliance",
+      "title": "Non-Compliance with Patch Management and Vulnerability Management Policies",
+      "description": "Non-Compliance with Patch Management and Vulnerability Management Policies",
+      "affected_assets": [
+        "WEB-01",
+        "WIN-01",
+        "Entire Infrastructure"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "WEB-01 is running Apache 2.4.49 (unpatched) with CVE"
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "A",
+      "round_number": 2,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_322ed2b9",
+      "author_group": "appsec",
+      "author_persona": "defensive",
+      "title": "Lack of Web Application Firewall (WAF) for Public-Facing Application",
+      "description": "The public-facing Apache web server (WEB-01), which is known to",
+      "affected_assets": [
+        "WEB-01"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "\"No WAF deployed.\""
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "A",
+      "round_number": 3,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_1009f289",
+      "author_group": "network_security",
+      "author_persona": "offensive",
+      "title": "Lack of Network Segmentation Facilitates Lateral Movement",
+      "description": "The absence of network segmentation between the Internal and Database zones",
+      "affected_assets": [
+        "WIN-01",
+        "DB-01",
+        "Internal and Database zones"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "\"No network segmentation between Internal and Database.\""
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "A",
+      "round_number": 3,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_5197f7ea",
+      "author_group": "appsec",
+      "author_persona": "offensive",
+      "title": "Lack of Web Application Firewall (WAF) Exposes Potential Web Applications to Common Attacks",
+      "description": "Lack of Web Application Firewall (WAF) Exposes Potential Web Applications to Common Attacks",
+      "affected_assets": [
+        "WEB-01 (and any potential web applications hosted on it)"
+      ],
+      "severity": "high",
+      "confidence": 0.6,
+      "evidence": [
+        "\"Security controls: none (no EDR, SIEM, AV"
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "A",
+      "round_number": 3,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_086e0346",
+      "author_group": "endpoint_security",
+      "author_persona": "offensive",
+      "title": "Credential Dumping via LSASS Memory on WIN-01 (T1003.001)",
+      "description": "Credential Dumping via LSASS Memory on WIN-01 (T1003.001)",
+      "affected_assets": [
+        "WIN-01"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "Windows Server 2019, unpatched, RDP exposed, and critically"
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "A",
+      "round_number": 3,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_9c6717b3",
+      "author_group": "network_security",
+      "author_persona": "defensive",
+      "title": "Lack of Network Segmentation Between Internal and Database Zones",
+      "description": "This is a critical architectural flaw.",
+      "affected_assets": [
+        "Network (Internal and Database zones)",
+        "DB-01",
+        "WIN-01"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "\"No network segmentation between Internal and Database.\""
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "A",
+      "round_number": 3,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_ae8fa5ca",
+      "author_group": "network_security",
+      "author_persona": "architect",
+      "title": "Critical Lack of Network Segmentation for Database Zone",
+      "description": "The critical database server (DB-01) resides in a \"",
+      "affected_assets": [
+        "DB-01",
+        "Internal Zone",
+        "Database Zone"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "\"No network segmentation between Internal and Database.\""
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "A",
+      "round_number": 3,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_e64d53db",
+      "author_group": "appsec",
+      "author_persona": "auditor",
+      "title": "High Likelihood of OWASP Top 10 Vulnerabilities Due to Missing API Security Controls",
+      "description": "High Likelihood of OWASP Top 10 Vulnerabilities Due to Missing API Security Controls",
+      "affected_assets": [
+        "Any API exposed via WEB-01"
+      ],
+      "severity": "high",
+      "confidence": 0.6,
+      "evidence": [
+        "No WAF deployed; No SIEM deployed; WEB-01 is Apache 2.4"
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "A",
+      "round_number": 3,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_d9280ea3",
+      "author_group": "threat_intel",
+      "author_persona": "apt_analyst",
+      "title": "High Likelihood of APT28 (Fancy Bear) Initial Access via Public-Facing Exploits and RDP",
+      "description": "High Likelihood of APT28 (Fancy Bear) Initial Access via Public-Facing Exploits and RDP",
+      "affected_assets": [
+        "WEB-01",
+        "WIN-01",
+        "MAIL-01"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "A",
+      "round_number": 3,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_c242cd42",
+      "author_group": "endpoint_security",
+      "author_persona": "defensive",
+      "title": "Unmonitored Script Execution on Windows Server",
+      "description": "The Windows Server",
+      "affected_assets": [
+        "WIN-01"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "\"Security controls: none (no EDR, SIEM, AV, NDR, WAF, MFA, DLP)\""
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "A",
+      "round_number": 3,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_8ac83471",
+      "author_group": "endpoint_security",
+      "author_persona": "admin",
+      "title": "Pervasive Gaps in Patch Management Across Multiple Hosts",
+      "description": "Pervasive Gaps in Patch Management Across Multiple Hosts",
+      "affected_assets": [
+        "WEB-01",
+        "WIN-01",
+        "MAIL-01",
+        "FW-01"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "WEB-01 is explicitly listed as \"unpatched\" with \"Apache"
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "A",
+      "round_number": 3,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_530dd23a",
+      "author_group": "risk",
+      "author_persona": "ciso",
+      "title": "Unmitigated Data Exfiltration Risk and Severe Regulatory Non-Compliance",
+      "description": "Unmitigated Data Exfiltration Risk and Severe Regulatory Non-Compliance",
+      "affected_assets": [
+        "DB-01",
+        "WEB-01",
+        "WIN-01",
+        "MAIL-01",
+        "Entire Enterprise"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "A",
+      "round_number": 3,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_f4ed1446",
+      "author_group": "risk",
+      "author_persona": "compliance",
+      "title": "Pervasive Non-Compliance with Data Protection Regulations (GDPR)",
+      "description": "Pervasive Non-Compliance with Data Protection Regulations (GDPR)",
+      "affected_assets": [],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "A",
+      "round_number": 3,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_ab6f502b",
+      "author_group": "network_security",
+      "author_persona": "offensive",
+      "title": "Public-Facing Apache RCE (CVE-2021-41773) on WEB-01",
+      "description": "Public-Facing Apache RCE (CVE-2021-41773) on WEB-01",
+      "affected_assets": [
+        "WEB-01 (Apache 2.4.49)"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "WEB-01"
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "B",
+      "round_number": 4,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_85f683fd",
+      "author_group": "appsec",
+      "author_persona": "defensive",
+      "title": "Critical Web Server Vulnerability (CVE-2021-41773) on Public-Facing Host (T1190)",
+      "description": "Critical Web Server Vulnerability (CVE-2021-41773) on Public-Facing Host (T1190)",
+      "affected_assets": [
+        "WEB-01 (Apache 2.4.49)"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "B",
+      "round_number": 4,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_9a50de16",
+      "author_group": "network_security",
+      "author_persona": "defensive",
+      "title": "Unpatched Public-Facing Web Server with Known Critical Vulnerability (CVE-2021-41773)",
+      "description": "Unpatched Public-Facing Web Server with Known Critical Vulnerability (CVE-2021-41773)",
+      "affected_assets": [
+        "WEB-01 (Apache 2.4.49)"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "WEB-01"
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "B",
+      "round_number": 4,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_7ff5b644",
+      "author_group": "appsec",
+      "author_persona": "offensive",
+      "title": "Critical Remote Code Execution on WEB-01 via Apache HTTP Server Path Traversal (CVE-2021-41773)",
+      "description": "Critical Remote Code Execution on WEB-01 via Apache HTTP Server Path Traversal (CVE-2021-41773)",
+      "affected_assets": [
+        "WEB-01 (Apache 2.4.49)"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "WEB-"
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "B",
+      "round_number": 4,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_1599cf8b",
+      "author_group": "network_security",
+      "author_persona": "architect",
+      "title": "Direct RDP Exposure on Internal Host (WIN-01)",
+      "description": "The Windows",
+      "affected_assets": [
+        "WIN-01"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "WIN-01: Windows Server 2019, zone Internal, unpatched, RDP exposed"
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "B",
+      "round_number": 4,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_20799f81",
+      "author_group": "appsec",
+      "author_persona": "auditor",
+      "title": "Lack of API Rate Limiting Exposes to Brute-Force and DoS Attacks",
+      "description": "Lack of API Rate Limiting Exposes to Brute-Force and DoS Attacks",
+      "affected_assets": [
+        "WEB-01 (Apache hosts potential APIs)"
+      ],
+      "severity": "high",
+      "confidence": 0.6,
+      "evidence": [
+        "\"Security controls: none (no EDR, SIEM, AV, NDR,"
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "B",
+      "round_number": 4,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_3696c165",
+      "author_group": "endpoint_security",
+      "author_persona": "defensive",
+      "title": "Complete Absence of EDR Solution Across All Endpoints",
+      "description": "Complete Absence of EDR Solution Across All Endpoints",
+      "affected_assets": [
+        "WEB-01"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "B",
+      "round_number": 4,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_c7a4f33a",
+      "author_group": "threat_intel",
+      "author_persona": "apt_analyst",
+      "title": "Unrestricted Lateral Movement and Persistence via Stolen Credentials (T1078)",
+      "description": "Unrestricted Lateral Movement and Persistence via Stolen Credentials (T1078)",
+      "affected_assets": [
+        "WIN-01",
+        "DB-01"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "WIN-01 is an unpatched Windows Server 2019 with RDP exposed,"
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "B",
+      "round_number": 4,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_2973d410",
+      "author_group": "risk",
+      "author_persona": "compliance",
+      "title": "Pervasive Non-Compliance with GDPR, ISO 27001, and PCI-DSS (if applicable)",
+      "description": "Pervasive Non-Compliance with GDPR, ISO 27001, and PCI-DSS (if applicable)",
+      "affected_assets": [
+        "Entire Infrastructure"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "\"Security controls: none (no EDR, SIEM, AV,"
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "B",
+      "round_number": 4,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_eec20f0e",
+      "author_group": "network_security",
+      "author_persona": "defensive",
+      "title": "Pervasive Blind Spot in Network Intrusion Detection",
+      "description": "Pervasive Blind Spot in Network Intrusion Detection",
+      "affected_assets": [
+        "All hosts (WEB-01",
+        "DB-01",
+        "FW-01",
+        "WIN-01",
+        "MAIL-01)"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "\"No EDR, SI"
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "B",
+      "round_number": 5,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_e0cca0c6",
+      "author_group": "network_security",
+      "author_persona": "architect",
+      "title": "Lack of Network Segmentation Between Internal and Database Zones",
+      "description": "The absence of network segmentation",
+      "affected_assets": [
+        "Internal Zone",
+        "Database Zone (DB-01",
+        "WIN-01 potentially)"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "\"No network segmentation between Internal and Database.\""
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "B",
+      "round_number": 5,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_51715bdb",
+      "author_group": "appsec",
+      "author_persona": "defensive",
+      "title": "Complete Absence of Web Application Firewall (WAF)",
+      "description": "The infrastructure explicitly states that no WAF is deployed. For a",
+      "affected_assets": [
+        "WEB-01"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "\"No EDR, SIEM, or WAF deployed.\""
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "B",
+      "round_number": 5,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_fe40e6f0",
+      "author_group": "network_security",
+      "author_persona": "offensive",
+      "title": "Direct RDP Exposure on Internal Host WIN-01 as Initial Access Vector (T1133)",
+      "description": "Direct RDP Exposure on Internal Host WIN-01 as Initial Access Vector (T1133)",
+      "affected_assets": [
+        "WIN-01 (Windows Server 2019)"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "\"WIN-01: Windows Server 20"
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "B",
+      "round_number": 5,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_6c78b515",
+      "author_group": "endpoint_security",
+      "author_persona": "admin",
+      "title": "Pervasive Lack of Patch Management Strategy Leading to Critical Vulnerabilities",
+      "description": "Pervasive Lack of Patch Management Strategy Leading to Critical Vulnerabilities",
+      "affected_assets": [
+        "WEB-01",
+        "WIN-01"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "WEB-01 is unpatched with Apache 2.4.49, vulnerable to CVE-20"
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "B",
+      "round_number": 5,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_abaa61f2",
+      "author_group": "endpoint_security",
+      "author_persona": "offensive",
+      "title": "Unrestricted Privilege Escalation on Compromised Linux Hosts (WEB-01, DB-01, MAIL-01)",
+      "description": "Unrestricted Privilege Escalation on Compromised Linux Hosts (WEB-01, DB-01, MAIL-01)",
+      "affected_assets": [
+        "WEB-01",
+        "DB-01",
+        "MAIL-01"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "Ubuntu 20."
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "B",
+      "round_number": 5,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_183b4732",
+      "author_group": "appsec",
+      "author_persona": "auditor",
+      "title": "Pervasive Lack of Application Security Logging and Monitoring (OWASP A09)",
+      "description": "Pervasive Lack of Application Security Logging and Monitoring (OWASP A09)",
+      "affected_assets": [
+        "All applications (implied on WEB-01",
+        "MAIL-01)"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "Security controls: none (no EDR, SI"
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "B",
+      "round_number": 5,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_d1c04a15",
+      "author_group": "endpoint_security",
+      "author_persona": "defensive",
+      "title": "Complete Absence of Antivirus (AV) Protection Across All Endpoints",
+      "description": "Complete Absence of Antivirus (AV) Protection Across All Endpoints",
+      "affected_assets": [
+        "All hosts (WEB-01",
+        "DB-01",
+        "FW-01",
+        "WIN-01",
+        "MAIL-01)"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "\"Security controls: none"
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "B",
+      "round_number": 5,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_fe33932a",
+      "author_group": "risk",
+      "author_persona": "compliance",
+      "title": "Pervasive Lack of Fundamental Security Controls Violates GDPR Article 32",
+      "description": "Pervasive Lack of Fundamental Security Controls Violates GDPR Article 32",
+      "affected_assets": [
+        "All hosts (WEB-01",
+        "DB-01",
+        "FW-01",
+        "WIN-01",
+        "MAIL-01)"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "B",
+      "round_number": 5,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_b585c683",
+      "author_group": "risk",
+      "author_persona": "ciso",
+      "title": "Comprehensive Data Breach Risk from Public-Facing RCE, Lack of Segmentation, and Absence of Monitoring",
+      "description": "Comprehensive Data Breach Risk from Public-Facing RCE, Lack of Segmentation, and Absence of Monitoring",
+      "affected_assets": [
+        "Entire enterprise (WEB-01",
+        "DB-01",
+        "WIN-01",
+        "MAIL-01)"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "B",
+      "round_number": 5,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_1d91c0f3",
+      "author_group": "network_security",
+      "author_persona": "architect",
+      "title": "Direct Exposure of Internal and Database Zones to Potential DMZ Compromise",
+      "description": "Direct Exposure of Internal and Database Zones to Potential DMZ Compromise",
+      "affected_assets": [
+        "DB-01",
+        "WIN-01"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "\"Direct internet exposure on DMZ hosts.\", \"WEB-01: unpatched, CVE-20"
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "B",
+      "round_number": 6,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_39f42dd1",
+      "author_group": "network_security",
+      "author_persona": "defensive",
+      "title": "Unmonitored Network Reconnaissance and Discovery (T1595, T1018)",
+      "description": "Unmonitored Network Reconnaissance and Discovery (T1595, T1018)",
+      "affected_assets": [
+        "All hosts (WEB-01",
+        "DB-01",
+        "FW-01",
+        "WIN-01",
+        "MAIL-0"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "B",
+      "round_number": 6,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_744eecd9",
+      "author_group": "appsec",
+      "author_persona": "defensive",
+      "title": "Critical RCE Vulnerability on Public-Facing Web Server (T1190)",
+      "description": "Critical RCE Vulnerability on Public-Facing Web Server (T1190)",
+      "affected_assets": [
+        "WEB-01 (Apache 2.4.49)"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "WEB-01 is running Apache 2.4.49"
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "B",
+      "round_number": 6,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_97d692f5",
+      "author_group": "appsec",
+      "author_persona": "offensive",
+      "title": "Direct Remote Code Execution (RCE) Vulnerability via Apache CVE-2021-41773",
+      "description": "Direct Remote Code Execution (RCE) Vulnerability via Apache CVE-2021-41773",
+      "affected_assets": [
+        "WEB-01 (Apache 2.4.49)"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "WEB-01 is running"
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "B",
+      "round_number": 6,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_f8b9d520",
+      "author_group": "network_security",
+      "author_persona": "offensive",
+      "title": "Direct Remote Code Execution (RCE) via Apache CVE-2021-41773 on WEB-01",
+      "description": "Direct Remote Code Execution (RCE) via Apache CVE-2021-41773 on WEB-01",
+      "affected_assets": [
+        "WEB-01 (Apache 2.4.49)"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "WEB-01"
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "B",
+      "round_number": 6,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_c3fd45ef",
+      "author_group": "appsec",
+      "author_persona": "auditor",
+      "title": "Critical Remote Code Execution (RCE) Vulnerability on Public-Facing Web Server (OWASP A06, T1190)",
+      "description": "Critical Remote Code Execution (RCE) Vulnerability on Public-Facing Web Server (OWASP A06, T1190)",
+      "affected_assets": [
+        "WEB-01 (Apache 2.4.49)"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "B",
+      "round_number": 6,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_b2087414",
+      "author_group": "endpoint_security",
+      "author_persona": "admin",
+      "title": "Uncontrolled Local Administrator Privileges and Lack of Least Privilege Principle",
+      "description": "Uncontrolled Local Administrator Privileges and Lack of Least Privilege Principle",
+      "affected_assets": [],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "B",
+      "round_number": 6,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_3c2ceb73",
+      "author_group": "endpoint_security",
+      "author_persona": "offensive",
+      "title": "Unrestricted Credential Dumping on WIN-01 Due to Absence of AV (T1003.001)",
+      "description": "Unrestricted Credential Dumping on WIN-01 Due to Absence of AV (T1003.001)",
+      "affected_assets": [
+        "WIN-01"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "Windows Server 2019, unpatched, no AV deployed, no"
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "B",
+      "round_number": 6,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_09d23d0c",
+      "author_group": "endpoint_security",
+      "author_persona": "defensive",
+      "title": "Complete Absence of EDR Protection Across All Endpoints",
+      "description": "Complete Absence of EDR Protection Across All Endpoints",
+      "affected_assets": [
+        "WEB-01",
+        "DB-01",
+        "FW-01",
+        "WIN-01",
+        "MAIL-01"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "Infrastructure description explicitly states: \"No EDR... deployed"
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "B",
+      "round_number": 6,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_9c9db707",
+      "author_group": "risk",
+      "author_persona": "ciso",
+      "title": "Unmitigated Risk of Ransomware and Data Exfiltration due to Lack of Foundational Controls",
+      "description": "Unmitigated Risk of Ransomware and Data Exfiltration due to Lack of Foundational Controls",
+      "affected_assets": [
+        "All hosts (WEB-01",
+        "DB-01",
+        "FW-01",
+        "WIN-01",
+        "MAIL-01)"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "B",
+      "round_number": 6,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_af711bec",
+      "author_group": "risk",
+      "author_persona": "compliance",
+      "title": "Pervasive Violations of ISO 27001 Controls Due to Absence of ISMS",
+      "description": "Pervasive Violations of ISO 27001 Controls Due to Absence of ISMS",
+      "affected_assets": [
+        "All hosts and services"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "\"No EDR, SIEM, WAF deployed.\", \"Security controls: none (no E"
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "B",
+      "round_number": 6,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_4ef76bac",
+      "author_group": "network_security",
+      "author_persona": "offensive",
+      "title": "Exposed Remote Desktop Protocol (RDP) on Internal Host (T1133)",
+      "description": "Exposed Remote Desktop Protocol (RDP) on Internal Host (T1133)",
+      "affected_assets": [
+        "WIN-01"
+      ],
+      "severity": "high",
+      "confidence": 0.6,
+      "evidence": [
+        "\"WIN-01: Windows Server 2019, zone Internal, unpatched, RDP"
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "B",
+      "round_number": 7,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_24772005",
+      "author_group": "appsec",
+      "author_persona": "offensive",
+      "title": "Direct Remote Code Execution (RCE) via Apache CVE-2021-41773 on WEB-01",
+      "description": "Direct Remote Code Execution (RCE) via Apache CVE-2021-41773 on WEB-01",
+      "affected_assets": [
+        "WEB-01 (Apache 2.4.49)"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "Apache 2"
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "B",
+      "round_number": 7,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_d70d9dac",
+      "author_group": "network_security",
+      "author_persona": "architect",
+      "title": "Lack of Network Segmentation Between Internal and Database Zones",
+      "description": "The absence of network segmentation between the Internal and Database",
+      "affected_assets": [
+        "Internal and Database zones (WIN-01",
+        "DB-01)"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "\"No network segmentation between Internal and Database.\""
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "B",
+      "round_number": 7,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_974b79f2",
+      "author_group": "network_security",
+      "author_persona": "defensive",
+      "title": "Pervasive Lack of Network Segmentation and Micro-segmentation",
+      "description": "The complete absence of network segmentation between the Internal and Database zones",
+      "affected_assets": [
+        "Network",
+        "Internal",
+        "Database zones"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "\"No network segmentation between Internal and Database.\""
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "B",
+      "round_number": 7,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_a27fed34",
+      "author_group": "appsec",
+      "author_persona": "defensive",
+      "title": "Absence of Web Application Firewall (WAF) Exposing Public-Facing Server to Web Exploits",
+      "description": "The public-facing web",
+      "affected_assets": [
+        "WEB-01"
+      ],
+      "severity": "critical",
+      "confidence": 0.85,
+      "evidence": [
+        "\"No EDR, SIEM, or WAF deployed.\""
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "B",
+      "round_number": 7,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": [
+        {
+          "profile_id": "opportunistic",
+          "action": "ATTACKER_CONFIRM",
+          "comment": "No WAF means my automated web vulnerability scanners and public web exploits for things like Apache will work better. Less hassle for me.",
+          "confidence_delta": 0.15
+        }
+      ]
+    },
+    {
+      "finding_id": "ef_8270c1a0",
+      "author_group": "appsec",
+      "author_persona": "auditor",
+      "title": "Absence of Web Application Firewall (WAF)",
+      "description": "The public-facing web",
+      "affected_assets": [
+        "WEB-01"
+      ],
+      "severity": "high",
+      "confidence": 0.6,
+      "evidence": [
+        "Security controls: none (no EDR, SIEM, AV, NDR, WAF, MFA, DLP)"
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "B",
+      "round_number": 7,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_9a7dd4bf",
+      "author_group": "endpoint_security",
+      "author_persona": "offensive",
+      "title": "Ease of Establishing Undetected Persistence on Compromised Endpoints (T1053.005)",
+      "description": "Ease of Establishing Undetected Persistence on Compromised Endpoints (T1053.005)",
+      "affected_assets": [
+        "WEB-01",
+        "WIN-01",
+        "DB-01",
+        "MAIL-01"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "No EDR"
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "B",
+      "round_number": 7,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_92b80ffe",
+      "author_group": "endpoint_security",
+      "author_persona": "admin",
+      "title": "Unpatched Systems and Lack of Patch Management Strategy",
+      "description": "Unpatched Systems and Lack of Patch Management Strategy",
+      "affected_assets": [
+        "WEB-01",
+        "WIN-01"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "WEB-01: Apache 2.4.49, unpatched, CVE-2021-4"
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "B",
+      "round_number": 7,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_6fd2ee51",
+      "author_group": "threat_intel",
+      "author_persona": "apt_analyst",
+      "title": "High Likelihood of APT Group Targeting and Undetected Exploitation by Fancy Bear (APT28)",
+      "description": "High Likelihood of APT Group Targeting and Undetected Exploitation by Fancy Bear (APT28)",
+      "affected_assets": [
+        "WEB-01",
+        "WIN-01",
+        "DB-01",
+        "MAIL-01",
+        "Entire network"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "B",
+      "round_number": 7,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_c8233168",
+      "author_group": "threat_intel",
+      "author_persona": "ir_analyst",
+      "title": "Immediate Monitoring Criticality Due to Lack of Foundational Security Controls",
+      "description": "Immediate Monitoring Criticality Due to Lack of Foundational Security Controls",
+      "affected_assets": [
+        "All hosts (WEB-01",
+        "DB-01",
+        "FW-01",
+        "WIN-01",
+        "MAIL-01)"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "\"No EDR"
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "B",
+      "round_number": 7,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_75398687",
+      "author_group": "risk",
+      "author_persona": "ciso",
+      "title": "Direct Exposure of Unpatched RDP on Internal Server",
+      "description": "The direct exposure of Remote Desktop Protocol (RDP) on",
+      "affected_assets": [
+        "WIN-01"
+      ],
+      "severity": "critical",
+      "confidence": 1.0,
+      "evidence": [
+        "Windows Server 2019, zone Internal, unpatched, RDP exposed"
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "B",
+      "round_number": 7,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": [
+        {
+          "profile_id": "opportunistic",
+          "action": "ATTACKER_CONFIRM",
+          "comment": "RDP is exposed and unpatched, making it a prime target for brute-forcing common credentials or using public exploits if any exist for the specific unpatched version. Automated",
+          "confidence_delta": 0.15
+        },
+        {
+          "profile_id": "apt",
+          "action": "ATTACKER_CONFIRM",
+          "comment": "While brute-forcing RDP can be noisy, the \"unpatched\" aspect implies potential vulnerabilities that could allow for stealthier initial access or privilege escalation. More importantly,",
+          "confidence_delta": 0.15
+        },
+        {
+          "profile_id": "insider_threat",
+          "action": "ATTACKER_CONFIRM",
+          "comment": "As an insider, I already have internal network access. This RDP exposure on WIN-01 provides a direct, unmonitored path to a critical internal server. The",
+          "confidence_delta": 0.15
+        },
+        {
+          "profile_id": "ransomware",
+          "action": "ATTACKER_CONFIRM",
+          "comment": "This is a direct, fast entry point into the internal network. No complex exploits needed, just brute force or stolen credentials. From WIN-01, we can immediately begin lateral",
+          "confidence_delta": 0.15
+        },
+        {
+          "profile_id": "supply_chain",
+          "action": "ATTACKER_CONFIRM",
+          "comment": "While this is a direct attack vector, if a trusted third-party vendor (e.g., IT managed services, software vendor) utilizes RDP for remote administration of WIN",
+          "confidence_delta": 0.15
+        }
+      ]
+    },
+    {
+      "finding_id": "ef_e6f448a1",
+      "author_group": "risk",
+      "author_persona": "compliance",
+      "title": "Pervasive Non-Compliance with GDPR Article 32 (Security of Processing)",
+      "description": "Pervasive Non-Compliance with GDPR Article 32 (Security of Processing)",
+      "affected_assets": [
+        "All systems processing personal data (e.g.",
+        "DB-01",
+        "WEB-01",
+        "MAIL-01 if storing PII)"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "B",
+      "round_number": 7,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_d42e7c16",
+      "author_group": "appsec",
+      "author_persona": "offensive",
+      "title": "Critical Remote Code Execution (RCE) via Unpatched Apache HTTP Server (CVE-2021-41773)",
+      "description": "Critical Remote Code Execution (RCE) via Unpatched Apache HTTP Server (CVE-2021-41773)",
+      "affected_assets": [
+        "WEB-01 (Apache 2.4.49)"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "WEB-01: Apache 2.4.49, zone DMZ, Ubuntu 20.04, unpatched, CVE-2021-417"
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "C",
+      "round_number": 8,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_75e5da75",
+      "author_group": "network_security",
+      "author_persona": "architect",
+      "title": "Direct Internet Exposure of Unpatched Web Server with Critical Vulnerability",
+      "description": "Direct Internet Exposure of Unpatched Web Server with Critical Vulnerability",
+      "affected_assets": [
+        "WEB-01 (Apache 2.4.49)"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "\"WEB-01: Apache 2.4.49, zone DM"
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "C",
+      "round_number": 8,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_6c51884f",
+      "author_group": "network_security",
+      "author_persona": "defensive",
+      "title": "Undetected Network Reconnaissance and Scanning Activities",
+      "description": "Undetected Network Reconnaissance and Scanning Activities",
+      "affected_assets": [
+        "All hosts (WEB-0"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "C",
+      "round_number": 8,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_39d73ad4",
+      "author_group": "endpoint_security",
+      "author_persona": "defensive",
+      "title": "Complete Absence of Endpoint Detection and Response (EDR)",
+      "description": "Complete Absence of Endpoint Detection and Response (EDR)",
+      "affected_assets": [
+        "All hosts (WEB-01",
+        "DB-01",
+        "FW-01",
+        "WIN-01",
+        "MAIL-01)"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "Security controls: none (no E"
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "C",
+      "round_number": 8,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_58c661e7",
+      "author_group": "endpoint_security",
+      "author_persona": "offensive",
+      "title": "Ease of Credential Dumping from Windows Server (T1003.001)",
+      "description": "Ease of Credential Dumping from Windows Server (T1003.001)",
+      "affected_assets": [
+        "WIN-01"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "WIN-01: Windows Server 2019, zone Internal, unpatched, RDP exposed"
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "C",
+      "round_number": 8,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_c5fc7d8f",
+      "author_group": "appsec",
+      "author_persona": "auditor",
+      "title": "Critical Public-Facing Application Vulnerability (CVE-2021-41773)",
+      "description": "Critical Public-Facing Application Vulnerability (CVE-2021-41773)",
+      "affected_assets": [
+        "WEB-01 (Apache 2.4.49)"
+      ],
+      "severity": "critical",
+      "confidence": 1.0,
+      "evidence": [
+        "WEB-01 is running Apache 2.4"
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "C",
+      "round_number": 8,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": [
+        {
+          "profile_id": "opportunistic",
+          "action": "ATTACKER_CONFIRM",
+          "comment": "This is a direct, easy win! A public-facing server with an unpatched CVE and public exploits available",
+          "confidence_delta": 0.15
+        },
+        {
+          "profile_id": "apt",
+          "action": "ATTACKER_CONFIRM",
+          "comment": "This is the ideal initial access vector. A public-facing, unpatched RCE vulnerability on WEB-01 allows",
+          "confidence_delta": 0.15
+        },
+        {
+          "profile_id": "ransomware",
+          "action": "ATTACKER_CONFIRM",
+          "comment": "This is our primary initial access vector. Unpatched RCE on a DMZ host directly exposed to the internet means immediate,",
+          "confidence_delta": 0.15
+        },
+        {
+          "profile_id": "insider_threat",
+          "action": "ATTACKER_CONFIRM",
+          "comment": "As an insider, I might have low-level access to the WEB-01 host (e.g., for",
+          "confidence_delta": 0.15
+        },
+        {
+          "profile_id": "supply_chain",
+          "action": "ATTACKER_CONFIRM",
+          "comment": "While this is a public-facing vulnerability, if the compromised third-party is a vendor responsible for managing, updating, or",
+          "confidence_delta": 0.15
+        }
+      ]
+    },
+    {
+      "finding_id": "ef_7138e73a",
+      "author_group": "endpoint_security",
+      "author_persona": "admin",
+      "title": "Lack of Least Privilege and Uncontrolled Local Administrator Accounts",
+      "description": "Lack of Least Privilege and Uncontrolled Local Administrator Accounts",
+      "affected_assets": [
+        "All hosts (WIN-01",
+        "WEB-01",
+        "DB-01",
+        "MAIL-01)"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "The general absence of security controls, including EDR"
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "C",
+      "round_number": 8,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_0e469f38",
+      "author_group": "risk",
+      "author_persona": "ciso",
+      "title": "Imminent Risk of Catastrophic Business Disruption and Data Breach Due to Systemic Security Failures",
+      "description": "Imminent Risk of Catastrophic Business Disruption and Data Breach Due to Systemic Security Failures",
+      "affected_assets": [
+        "All hosts (WEB-01",
+        "DB-01",
+        "FW-01",
+        "WIN-01",
+        "MAIL-0"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "C",
+      "round_number": 8,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_6a10d208",
+      "author_group": "network_security",
+      "author_persona": "defensive",
+      "title": "Complete Absence of Network Intrusion Detection/Prevention System (NIDS/NIPS)",
+      "description": "Complete Absence of Network Intrusion Detection/Prevention System (NIDS/NIPS)",
+      "affected_assets": [
+        "Network perimeter",
+        "all hosts"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "\"Security controls: none (no EDR, SIEM, AV, NDR, WAF, MFA"
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "C",
+      "round_number": 9,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_0563f96d",
+      "author_group": "network_security",
+      "author_persona": "architect",
+      "title": "Lack of Network Segmentation Between Internal and Database Zones",
+      "description": "The absence of network segmentation between the Internal and",
+      "affected_assets": [
+        "WIN-01 (Internal)",
+        "DB-01 (Database)"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "\"No network segmentation between Internal and Database.\""
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "C",
+      "round_number": 9,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_64535dc9",
+      "author_group": "appsec",
+      "author_persona": "defensive",
+      "title": "Complete Absence of Web Application Firewall (WAF) for Public-Facing Applications",
+      "description": "The enterprise lacks any Web Application Firewall (WAF) deployment. This is a critical security gap for public-facing applications, especially given that WEB-01, running an unpatched Apache 2.4.49, is directly exposed to the",
+      "affected_assets": [
+        "WEB-01 (Apache 2.4.49)"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "\"No EDR, SIEM, or WAF deployed.\""
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "C",
+      "round_number": 9,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_784357c7",
+      "author_group": "endpoint_security",
+      "author_persona": "offensive",
+      "title": "Unhindered Post-Exploitation and Lateral Movement from Compromised WEB-01",
+      "description": "Unhindered Post-Exploitation and Lateral Movement from Compromised WEB-01",
+      "affected_assets": [
+        "WEB-01 (Ubuntu 20.04)",
+        "DB-01 (MySQL 8.0)",
+        "WIN-01"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "C",
+      "round_number": 9,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_c0365840",
+      "author_group": "appsec",
+      "author_persona": "auditor",
+      "title": "Absence of API Security Controls (Rate Limiting, JWT Expiry)",
+      "description": "Absence of API Security Controls (Rate Limiting, JWT Expiry)",
+      "affected_assets": [
+        "WEB-01"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "\"Security controls: none (no EDR, SIEM, AV, NDR, WAF, MFA, DLP)\""
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "C",
+      "round_number": 9,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_2d1163c4",
+      "author_group": "endpoint_security",
+      "author_persona": "defensive",
+      "title": "Complete Absence of Antivirus and Script Execution Monitoring",
+      "description": "Complete Absence of Antivirus and Script Execution Monitoring",
+      "affected_assets": [
+        "WEB-01",
+        "DB-01",
+        "WIN-01",
+        "MAIL-01"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "\"Security controls: none (no EDR, SIEM, AV, NDR"
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "C",
+      "round_number": 9,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_7ee0b3c3",
+      "author_group": "endpoint_security",
+      "author_persona": "admin",
+      "title": "Absence of Endpoint Hardening Baseline and Configuration Management",
+      "description": "Absence of Endpoint Hardening Baseline and Configuration Management",
+      "affected_assets": [
+        "All hosts (WEB-01",
+        "DB-01",
+        "FW-01",
+        "WIN-01",
+        "MAIL-01)"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "C",
+      "round_number": 9,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_ac23a13d",
+      "author_group": "network_security",
+      "author_persona": "defensive",
+      "title": "Unmonitored Lateral Movement and Internal Reconnaissance",
+      "description": "Unmonitored Lateral Movement and Internal Reconnaissance",
+      "affected_assets": [
+        "WIN-01",
+        "DB-01",
+        "Internal Network"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "\"No EDR, SIEM, or WAF deployed.\", \"No network segmentation between Internal and Database.\""
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "C",
+      "round_number": 10,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_11ce842e",
+      "author_group": "network_security",
+      "author_persona": "architect",
+      "title": "Unrestricted Lateral Movement Potential from DMZ to Internal Network",
+      "description": "Unrestricted Lateral Movement Potential from DMZ to Internal Network",
+      "affected_assets": [
+        "WEB-01",
+        "WIN-01",
+        "DB-01"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "\"Direct internet exposure on DMZ hosts.\" and \"No network segmentation between Internal and Database.\""
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "C",
+      "round_number": 10,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_78c76cc2",
+      "author_group": "appsec",
+      "author_persona": "defensive",
+      "title": "Pervasive Lack of Secure Coding Practices (Input Validation & Output Encoding)",
+      "description": "Pervasive Lack of Secure Coding Practices (Input Validation & Output Encoding)",
+      "affected_assets": [
+        "WEB-01 (Application(s) hosted on Apache)"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "C",
+      "round_number": 10,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_a5c5245d",
+      "author_group": "threat_intel",
+      "author_persona": "apt_analyst",
+      "title": "High Likelihood of Targeting by APT28 (Fancy Bear)",
+      "description": "High Likelihood of Targeting by APT28 (Fancy Bear)",
+      "affected_assets": [
+        "WEB-01",
+        "WIN-01",
+        "DB-01",
+        "MAIL-01",
+        "FW-01 (entire infrastructure)"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "C",
+      "round_number": 10,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_925ed14d",
+      "author_group": "endpoint_security",
+      "author_persona": "admin",
+      "title": "Systemic Failure in Patch Management Across Critical Endpoints",
+      "description": "Systemic Failure in Patch Management Across Critical Endpoints",
+      "affected_assets": [
+        "WEB-01",
+        "WIN-01"
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "WEB-01 is explicitly listed as \"unpatched\" and affected by \"CVE-2021-41"
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "C",
+      "round_number": 10,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    },
+    {
+      "finding_id": "ef_47e8e086",
+      "author_group": "risk",
+      "author_persona": "ciso",
+      "title": "Severe Regulatory Non-Compliance and High Risk of Catastrophic Fines and Reputational Damage",
+      "description": "Severe Regulatory Non-Compliance and High Risk of Catastrophic Fines and Reputational Damage",
+      "affected_assets": [
+        "Entire Organization",
+        "specifically WEB-01",
+        "DB-01",
+        "WIN-01",
+        "and any data processed."
+      ],
+      "severity": "critical",
+      "confidence": 0.7,
+      "evidence": [
+        "\"No E"
+      ],
+      "recommendations": [],
+      "mitre_techniques": [],
+      "phase": "C",
+      "round_number": 10,
+      "challenged_by": [],
+      "validated_by": [],
+      "cross_group_validated": false,
+      "attacker_corroborations": []
+    }
+  ],
+  "attacker_findings": [],
+  "consensus_vulns": [],
+  "gap_registry": [],
+  "agent_config": {},
+  "error": null
+}

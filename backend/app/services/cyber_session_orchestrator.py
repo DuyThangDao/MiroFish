@@ -29,8 +29,10 @@ from .cyber_expert_profile_generator import CyberAgentProfile, CyberExpertProfil
 from .cyber_oasis_env import (
     CyberOasisConfig, CyberOasisEnvBuilder,
     AttackerAction, parse_expert_finding_from_text,
+    parse_gap_declarations, build_gap_context_for_agent,
     get_phase_for_round, TOTAL_ROUNDS,
 )
+from ..models.cyber_models import GapDeclaration
 
 logger = get_logger("mirofish.cyber_orchestrator")
 
@@ -296,16 +298,28 @@ class CyberSessionOrchestrator:
         config: CyberOasisConfig,
     ):
         """
-        Chạy 1 round: gọi LLM cho từng active agent → parse findings.
+        Chạy 1 round: gọi LLM cho từng active agent → parse findings + GAP declarations.
+
+        GAP declarations từ round này sẽ được route và inject vào round tiếp theo,
+        cho phép experts nhận diện điểm mù của nhau và lấp đầy coverage gaps.
         """
         active_profiles = self.env_builder.get_active_agents_for_phase(profiles, phase)
-        phase_instruction = self.env_builder.build_phase_instruction(phase, round_num)
-
-        # Build conversation context từ findings đã có
         prior_context = self._build_prior_context(session_state)
 
         for profile in active_profiles:
             try:
+                # Build per-agent gap context: chỉ inject gaps routed đến domain group này
+                gap_context = ""
+                if profile.tier == 1 and phase in ("A", "B"):
+                    gap_context = build_gap_context_for_agent(
+                        pending_gaps=session_state.pending_gaps(),
+                        agent_domain_group=profile.domain_group,
+                    )
+
+                phase_instruction = self.env_builder.build_phase_instruction(
+                    phase, round_num, gap_context=gap_context
+                )
+
                 response = self._call_agent(
                     profile=profile,
                     phase=phase,
@@ -326,15 +340,23 @@ class CyberSessionOrchestrator:
                     "persona": profile.persona,
                     "content": response,
                     "timestamp": datetime.now().isoformat(),
+                    "gap_context_injected": bool(gap_context),
                 })
 
                 if profile.tier == 1:
                     self._process_expert_response(response, profile, round_num, session_state)
+                    # Parse và register GAP declarations (Phases A và B only)
+                    if phase in ("A", "B"):
+                        self._process_gap_declarations(response, profile, round_num, session_state)
                 else:
                     self._process_attacker_response(response, profile, round_num, session_state)
 
             except Exception as e:
                 logger.warning(f"Agent {profile.agent_id} round {round_num} error: {e}")
+
+        # After all agents in round complete: mark injected gaps as routed
+        if phase in ("A", "B"):
+            self._mark_gaps_as_routed(session_state)
 
     def _call_agent(
         self,
@@ -438,6 +460,39 @@ class CyberSessionOrchestrator:
                 session_state=session_state,
             )
 
+    def _process_gap_declarations(
+        self,
+        text: str,
+        profile: CyberAgentProfile,
+        round_num: int,
+        session_state: CyberSessionState,
+    ):
+        """
+        Parse GAP declarations từ expert agent post và lưu vào session state.
+        Gaps sẽ được route đến domain groups phù hợp trong round tiếp theo.
+        """
+        gaps = parse_gap_declarations(
+            text=text,
+            author_group=profile.domain_group,
+            author_persona=profile.persona,
+            round_num=round_num,
+        )
+        for gap in gaps:
+            session_state.gap_registry.append(gap)
+            logger.debug(
+                f"GAP declared by {profile.agent_id} | area='{gap['analyzed']}' "
+                f"→ routed to {gap['routed_to']}"
+            )
+
+    def _mark_gaps_as_routed(self, session_state: CyberSessionState):
+        """
+        Sau khi tất cả agents trong round đã được xử lý, đánh dấu các pending gaps
+        là đã được inject (routed=True). Chúng sẽ không xuất hiện trong round tiếp theo.
+        """
+        for gap in session_state.gap_registry:
+            if not gap.get("routed", False):
+                gap["routed"] = True
+
     def _attach_corroboration(
         self,
         action: Dict[str, Any],
@@ -491,6 +546,17 @@ class CyberSessionOrchestrator:
                 lines.append(
                     f"[ATTACKER:{f.get('attacker_profile','?')}] "
                     f"{f.get('title','Untitled')} (base confidence: {f.get('base_confidence', 0.6):.2f})"
+                )
+
+        # Show gap registry summary (all rounds) so agents understand coverage state
+        all_gaps = session_state.gap_registry
+        if all_gaps:
+            lines.append(f"\n=== DECLARED KNOWLEDGE GAPS ({len(all_gaps)} total) ===")
+            lines.append("Areas experts could not verify — still open for investigation:")
+            for g in all_gaps[-8:]:  # show last 8 to avoid overflow
+                lines.append(
+                    f"  [{g.get('author_group','?')}] Area: {g.get('analyzed','?')} — "
+                    f"{g.get('gap_text','')[:100]}"
                 )
 
         return "\n".join(lines) if lines else "No findings yet — be the first to identify vulnerabilities."

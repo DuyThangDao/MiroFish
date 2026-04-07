@@ -31,6 +31,8 @@ class Config:
     LLM_API_KEY = os.environ.get('LLM_API_KEY')
     LLM_BASE_URL = os.environ.get('LLM_BASE_URL', 'https://api.openai.com/v1')
     LLM_MODEL_NAME = os.environ.get('LLM_MODEL_NAME', 'gpt-4o-mini')
+    # Vertex AI: đường dẫn tới service account JSON (nếu set thì bỏ qua LLM_API_KEY)
+    LLM_VERTEX_AI_KEY_FILE = os.environ.get('LLM_VERTEX_AI_KEY_FILE')
     
     # Zep配置
     ZEP_API_KEY = os.environ.get('ZEP_API_KEY')
@@ -67,8 +69,8 @@ class Config:
     def validate(cls):
         """验证必要配置"""
         errors = []
-        if not cls.LLM_API_KEY:
-            errors.append("LLM_API_KEY 未配置")
+        if not cls.LLM_API_KEY and not cls.LLM_VERTEX_AI_KEY_FILE:
+            errors.append("LLM_API_KEY 未配置 (hoặc set LLM_VERTEX_AI_KEY_FILE cho Vertex AI)")
         if not cls.ZEP_API_KEY:
             errors.append("ZEP_API_KEY 未配置")
         return errors

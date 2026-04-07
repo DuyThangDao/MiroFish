@@ -165,6 +165,30 @@ class ConsensusVulnerability:
     needs_review:          bool = False  # True nếu confidence thấp (0.35–0.50)
 
 
+# ─── GAP Declaration (Delphi-inspired) ───────────────────────────────────────
+
+@dataclass
+class GapDeclaration:
+    """
+    Khai báo giới hạn tri thức từ 1 expert agent.
+
+    Khi agent không thể verify một khía cạnh của hạ tầng (ví dụ: không có SIEM
+    nên IR analyst không thể đánh giá alerting rules), agent khai báo GAP thay vì
+    bỏ qua. Hệ thống dùng GAP declarations để route sang domain group phù hợp.
+
+    Inspired by Delphi method: structured elicitation yêu cầu experts khai báo
+    explicit cả giới hạn của mình, không chỉ những gì họ biết.
+    """
+    gap_id:         str
+    author_group:   str     # domain group của agent khai báo
+    author_persona: str
+    analyzed:       str     # host/control được phân tích (e.g., "FW-01", "SIEM", "ALL")
+    gap_text:       str     # mô tả cụ thể về điều không verify được
+    round_number:   int
+    routed:         bool = False   # đã inject vào round tiếp theo chưa
+    routed_to:      List[str] = field(default_factory=list)  # domain groups được route tới
+
+
 # ─── Session State ─────────────────────────────────────────────────────────────
 
 @dataclass
@@ -179,9 +203,10 @@ class CyberSessionState:
     current_round:    int = 0
     total_rounds:     int = 10      # 3 (A) + 4 (B) + 3 (C)
 
-    expert_findings:  List[Dict[str, Any]] = field(default_factory=list)   # ExpertFinding serialized
+    expert_findings:   List[Dict[str, Any]] = field(default_factory=list)   # ExpertFinding serialized
     attacker_findings: List[Dict[str, Any]] = field(default_factory=list)  # AttackerFinding serialized
-    consensus_vulns:  List[Dict[str, Any]] = field(default_factory=list)   # ConsensusVulnerability serialized
+    consensus_vulns:   List[Dict[str, Any]] = field(default_factory=list)   # ConsensusVulnerability serialized
+    gap_registry:      List[Dict[str, Any]] = field(default_factory=list)   # GapDeclaration serialized
 
     agent_config:     Dict[str, Any] = field(default_factory=dict)   # từ CyberExpertProfileGenerator
     error:            Optional[str] = None
@@ -189,3 +214,7 @@ class CyberSessionState:
     def phase_label(self) -> str:
         labels = {"A": "Intra-group analysis", "B": "Cross-group challenge", "C": "Attacker challenge"}
         return labels.get(self.current_phase, self.current_phase)
+
+    def pending_gaps(self) -> List[Dict[str, Any]]:
+        """Trả về các GAP declarations chưa được route (chưa inject vào round tiếp theo)."""
+        return [g for g in self.gap_registry if not g.get("routed", False)]
