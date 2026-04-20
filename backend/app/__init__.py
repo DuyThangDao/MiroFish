@@ -65,10 +65,12 @@ def create_app(config_class=Config):
     # 注册蓝图
     from .api import graph_bp, simulation_bp, report_bp
     from .api.cyber import cyber_bp
+    from .api.contract import contract_bp
     app.register_blueprint(graph_bp, url_prefix='/api/graph')
     app.register_blueprint(simulation_bp, url_prefix='/api/simulation')
     app.register_blueprint(report_bp, url_prefix='/api/report')
     app.register_blueprint(cyber_bp, url_prefix='/api/cyber')
+    app.register_blueprint(contract_bp, url_prefix='/api/contract')
     
     # 健康检查
     @app.route('/health')

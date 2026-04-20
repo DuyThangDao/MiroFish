@@ -32,6 +32,29 @@ from ..utils.logger import get_logger
 
 logger = get_logger("mirofish.consensus_engine")
 
+# ─── Contract audit domain config ─────────────────────────────────────────────
+
+CONTRACT_DOMAIN_GROUPS = {
+    "appsec", "blockchain", "cryptography", "defi",
+    "governance", "smart_contract_economics", "supply_chain",
+}
+
+# SWC keyword anchors for semantic clustering in contract audit mode.
+# Same data as SWCRegistry.get_severity_anchor_keywords() — duplicated here
+# to avoid circular imports and keep ConsensusEngine import-free from swc_registry.
+SWC_ANCHOR_KEYWORDS: Dict[str, List[str]] = {
+    "reentrancy":     ["reentrancy", "re-entrancy", "reentrant", "SWC-107", "CEI"],
+    "overflow":       ["overflow", "underflow", "arithmetic", "SafeMath", "SWC-101"],
+    "access_control": ["access control", "onlyOwner", "authorization", "SWC-105", "SWC-115", "privilege"],
+    "oracle":         ["oracle", "price manipulation", "TWAP", "Chainlink", "flash loan price"],
+    "flash_loan":     ["flash loan", "flashloan", "FLASH_LOAN", "flash attack"],
+    "governance":     ["governance", "voting", "proposal", "timelock", "GOVERNANCE_FLASH"],
+    "randomness":     ["randomness", "PRNG", "entropy", "VRF", "SWC-120"],
+    "selfdestruct":   ["selfdestruct", "suicide", "SWC-106"],
+    "delegatecall":   ["delegatecall", "delegate call", "SWC-112", "proxy"],
+    "signature":      ["signature", "ecrecover", "replay", "SWC-121", "SWC-122"],
+}
+
 # ─── Weights ──────────────────────────────────────────────────────────────────
 WEIGHT_INTRA  = 0.30   # Layer 1
 WEIGHT_CROSS  = 0.45   # Layer 2
@@ -69,6 +92,7 @@ class ConsensusEngine:
         expert_findings_raw: List[Dict[str, Any]],
         attacker_findings_raw: List[Dict[str, Any]],
         domain_group_count: int = 5,
+        mode: str = "network_security",
     ) -> List[ConsensusVulnerability]:
         """
         Run full consensus pipeline.
@@ -76,18 +100,19 @@ class ConsensusEngine:
         Args:
             expert_findings_raw: serialized ExpertFinding dicts từ session
             attacker_findings_raw: serialized AttackerFinding dicts từ session
-            domain_group_count: số domain groups (default 5)
+            domain_group_count: số domain groups (default 5; use 7 for contract_audit)
+            mode: "network_security" | "contract_audit"
 
         Returns:
             Sorted list ConsensusVulnerability (highest confidence first)
         """
         # ── Step 1: Cluster expert findings ──────────────────────────────────
-        clusters = self._cluster_findings(expert_findings_raw)
+        clusters = self._cluster_findings(expert_findings_raw, mode=mode)
 
         # ── Step 2–4: Score each cluster ─────────────────────────────────────
         vulns: List[ConsensusVulnerability] = []
         for cluster in clusters:
-            vuln = self._score_cluster(cluster, domain_group_count)
+            vuln = self._score_cluster(cluster, domain_group_count, mode=mode)
             if vuln:
                 vulns.append(vuln)
 
@@ -114,19 +139,38 @@ class ConsensusEngine:
 
     # ─── Clustering ───────────────────────────────────────────────────────────
 
-    def _build_anchors(self, findings: List[Dict[str, Any]]) -> Set[str]:
+    def _build_anchors(self, findings: List[Dict[str, Any]], mode: str = "network_security") -> Set[str]:
         """
         B-dynamic: derive semantic anchors from existing data — no hardcoding.
 
-        Sources:
+        Network security mode:
           1. SecurityControls field names (edr, siem, waf, …) — stable, scenario-independent
           2. Host IDs from affected_assets in findings — scenario-specific, auto-extracted
+
+        Contract audit mode:
+          1. SWC keyword terms (reentrancy, overflow, oracle, …) — from SWC_ANCHOR_KEYWORDS
+          2. Function names from affected_functions in findings — contract-specific
         """
+        if mode == "contract_audit":
+            # 1. SWC semantic keywords as anchors
+            anchors: Set[str] = set()
+            for keywords in SWC_ANCHOR_KEYWORDS.values():
+                for kw in keywords:
+                    anchors.add(kw.lower())
+
+            # 2. Function names mentioned in findings
+            for f in findings:
+                for func in f.get("affected_functions", []):
+                    token = func.lower().rstrip("()").strip()
+                    if token:
+                        anchors.add(token)
+            return anchors
+
         from ..models.cyber_models import SecurityControls
         from dataclasses import fields as dc_fields
 
         # 1. Standard security controls
-        anchors: Set[str] = {f.name for f in dc_fields(SecurityControls)}
+        anchors = {f.name for f in dc_fields(SecurityControls)}
 
         # 2. Host IDs mentioned in any finding's affected_assets
         for f in findings:
@@ -173,7 +217,7 @@ class ConsensusEngine:
         )
 
     def _cluster_findings(
-        self, findings: List[Dict[str, Any]]
+        self, findings: List[Dict[str, Any]], mode: str = "network_security"
     ) -> List[List[Dict[str, Any]]]:
         """
         Cluster findings theo tiêu đề tương đồng.
@@ -187,7 +231,7 @@ class ConsensusEngine:
         if not findings:
             return []
 
-        anchors = self._build_anchors(findings)
+        anchors = self._build_anchors(findings, mode=mode)
         clusters: List[List[Dict]] = []
         assigned: Set[int] = set()
 
@@ -229,10 +273,16 @@ class ConsensusEngine:
 
     # ─── Scoring ──────────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _get_author_group(finding: Dict[str, Any]) -> str:
+        """Get author group field — supports both network_security (author_group) and contract_audit (author_domain)."""
+        return finding.get("author_domain") or finding.get("author_group", "unknown")
+
     def _score_cluster(
         self,
         cluster: List[Dict[str, Any]],
         domain_group_count: int,
+        mode: str = "network_security",
     ) -> Optional[ConsensusVulnerability]:
         """Score 1 cluster → ConsensusVulnerability."""
         if not cluster:
@@ -245,7 +295,7 @@ class ConsensusEngine:
         # % agents trong cùng group đồng ý (có ít nhất 1 đại diện cùng nhóm)
         group_counts: Dict[str, int] = defaultdict(int)
         for f in cluster:
-            group_counts[f.get("author_group", "unknown")] += 1
+            group_counts[self._get_author_group(f)] += 1
 
         # Giả sử mỗi group có 2-3 agents; intra score = tỉ lệ groups có >1 member trong cluster
         groups_with_multiple = sum(1 for cnt in group_counts.values() if cnt >= 2)
@@ -293,12 +343,17 @@ class ConsensusEngine:
         all_mitre: List[str] = []
 
         for f in cluster:
-            all_assets.extend(f.get("affected_assets", []))
-            all_evidence.extend(f.get("evidence", []))
-            all_recs.extend(f.get("recommendations", []))
+            # affected_functions (contract) or affected_assets (network)
+            all_assets.extend(f.get("affected_functions") or f.get("affected_assets") or [])
+            all_evidence.extend(f.get("evidence") or [])
+            all_recs.extend(f.get("recommendations") or f.get("patch_suggestion") or [])
             if f.get("finding_id"):
                 all_source_ids.append(f["finding_id"])
-            all_mitre.extend(f.get("mitre_techniques", []))
+            # swc_id (contract) or mitre_techniques (network)
+            all_mitre.extend(f.get("mitre_techniques") or [])
+            swc_id = f.get("swc_id")
+            if swc_id and swc_id not in all_mitre:
+                all_mitre.append(swc_id)
 
         # Deduplicate
         all_assets  = list(dict.fromkeys(all_assets))
@@ -466,9 +521,64 @@ class ConsensusEngine:
                 "description":   best.get("description", ""),
                 "severity":      best.get("severity", "medium"),
                 "affected_assets": best.get("affected_assets", []),
-                "author_group":  best.get("author_group", ""),
+                "author_group":  self._get_author_group(best),
                 "source_count":  len(candidates),   # how many raw findings agreed
                 "note":          "Single-domain finding — not cross-validated by consensus",
+            })
+
+        return unvalidated
+
+    def enforce_swc_coverage(
+        self,
+        consensus_vulns: List[ConsensusVulnerability],
+        expert_findings_raw: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """
+        Contract audit mode: after ConsensusEngine runs, collect any SWC category
+        that is absent from consensus output but has at least 1 raw finding.
+
+        Analogous to enforce_control_coverage() for network security mode.
+        Returns unvalidated_swc_gaps list for the audit report.
+        """
+        unvalidated: List[Dict[str, Any]] = []
+
+        for category, keywords in SWC_ANCHOR_KEYWORDS.items():
+            # Check if category already covered in consensus
+            in_consensus = any(
+                any(
+                    self._anchor_in_text(kw.lower(), v.title.lower())
+                    or self._anchor_in_text(kw.lower(), v.description.lower())
+                    for kw in keywords
+                )
+                for v in consensus_vulns
+            )
+            if in_consensus:
+                continue
+
+            # Find raw findings that mention any keyword in this category
+            candidates = [
+                f for f in expert_findings_raw
+                if any(
+                    self._anchor_in_text(kw.lower(), f.get("title", "").lower())
+                    or self._anchor_in_text(kw.lower(), f.get("description", "").lower())
+                    or kw == f.get("swc_id", "")
+                    for kw in keywords
+                )
+            ]
+            if not candidates:
+                continue
+
+            best = max(candidates, key=lambda f: f.get("confidence", 0.0))
+            unvalidated.append({
+                "swc_category":      category,
+                "swc_id":            best.get("swc_id", ""),
+                "title":             best.get("title", f"Potential {category} issue"),
+                "description":       best.get("description", ""),
+                "severity":          best.get("severity", "medium"),
+                "affected_functions": best.get("affected_functions", []),
+                "author_domain":     self._get_author_group(best),
+                "source_count":      len(candidates),
+                "note":              "Single-domain finding — not cross-validated by consensus",
             })
 
         return unvalidated
@@ -476,7 +586,9 @@ class ConsensusEngine:
     # ─── Utility ──────────────────────────────────────────────────────────────
 
     def get_coverage_gaps(
-        self, vulns: List[ConsensusVulnerability]
+        self,
+        vulns: List[ConsensusVulnerability],
+        mode: str = "network_security",
     ) -> Dict[str, Any]:
         """
         Tổng hợp gap analysis:
@@ -484,7 +596,11 @@ class ConsensusEngine:
           - Findings chỉ có 1 group (low cross-group validation)
           - Attacker-only findings (bị expert bỏ sót)
         """
-        all_groups = {"network_security", "appsec", "endpoint_security", "threat_intel", "risk"}
+        if mode == "contract_audit":
+            all_groups = CONTRACT_DOMAIN_GROUPS
+        else:
+            all_groups = {"network_security", "appsec", "endpoint_security", "threat_intel", "risk"}
+
         groups_with_findings = set()
         for v in vulns:
             groups_with_findings.update(v.supporting_groups)

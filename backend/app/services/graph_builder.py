@@ -186,15 +186,32 @@ class GraphBuilderService:
     
     def create_graph(self, name: str) -> str:
         """创建Zep图谱（公开方法）"""
+        import time as _time
         graph_id = f"mirofish_{uuid.uuid4().hex[:16]}"
-        
-        self.client.graph.create(
-            graph_id=graph_id,
-            name=name,
-            description="MiroFish Social Simulation Graph"
-        )
-        
-        return graph_id
+
+        for attempt in range(6):
+            try:
+                self.client.graph.create(
+                    graph_id=graph_id,
+                    name=name,
+                    description="MiroFish Social Simulation Graph"
+                )
+                return graph_id
+            except Exception as e:
+                is_zep_429 = ("429" in str(e) or "rate limit" in str(e).lower())
+                if is_zep_429 and attempt < 5:
+                    # respect retry-after header if present, else exponential backoff
+                    import re as _re
+                    m = _re.search(r"retry-after['\": ]+(\d+)", str(e).lower())
+                    wait = int(m.group(1)) + 1 if m else min(15 * (2 ** attempt), 120)
+                    import logging as _log
+                    _log.getLogger("mirofish.graph_builder").warning(
+                        f"Zep 429 on create_graph (attempt {attempt+1}/6), waiting {wait}s"
+                    )
+                    _time.sleep(wait)
+                else:
+                    raise
+        return graph_id  # unreachable
     
     def set_ontology(self, graph_id: str, ontology: Dict[str, Any]):
         """设置图谱本体（公开方法）"""

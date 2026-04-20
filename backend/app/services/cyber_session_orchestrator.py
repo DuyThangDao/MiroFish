@@ -11,9 +11,11 @@ Không dùng OASIS subprocess (tương thích với môi trường không có OA
 """
 
 import os
+import time
 import uuid
 import threading
 import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Any, Optional
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
@@ -34,7 +36,110 @@ from .cyber_oasis_env import (
 )
 from ..models.cyber_models import GapDeclaration
 
+# Contract audit mode imports (lazy to avoid circular imports)
+def _get_contract_modules():
+    from .contract_oasis_env import (
+        ContractAuditEnvBuilder,
+        ContractAttackerAction, parse_contract_finding_from_text,
+        parse_contract_gap_declarations, build_gap_context_for_agent as contract_gap_context,
+        build_published_registry as contract_published_registry,
+        get_phase_for_round as contract_get_phase,
+    )
+    return {
+        "env_builder":         ContractAuditEnvBuilder,
+        "attacker_action":     ContractAttackerAction,
+        "parse_finding":       parse_contract_finding_from_text,
+        "parse_gap":           parse_contract_gap_declarations,
+        "gap_context":         contract_gap_context,
+        "published_registry":  contract_published_registry,
+        "get_phase":           contract_get_phase,
+    }
+
 logger = get_logger("mirofish.cyber_orchestrator")
+
+
+class _RateLimiter:
+    """
+    Sliding-window rate limiter — thread-safe.
+
+    Two modes (mutually exclusive, global takes priority):
+    - LLM_GLOBAL_RPM_LIMIT > 0 : cross-process file-based limiter shared across
+      all parallel evaluate_phase5b.py processes. Enforces a single RPM cap for
+      the entire machine, preventing 429 cascade when running --parallel N.
+    - LLM_RPM_LIMIT > 0        : per-process in-memory limiter (original behaviour,
+      used for single-process runs).
+    """
+
+    _SHARED_FILE = "/tmp/mirofish_global_rpm.json"
+    _LOCK_FILE   = "/tmp/mirofish_global_rpm.lock"
+
+    def __init__(self):
+        import threading as _threading
+        self._lock = _threading.Lock()
+        self._timestamps: list = []
+        self.rpm        = int(os.environ.get("LLM_RPM_LIMIT",        "0"))
+        self.global_rpm = int(os.environ.get("LLM_GLOBAL_RPM_LIMIT", "0"))
+
+    def acquire(self):
+        import time as _time
+        if self.global_rpm > 0:
+            self._acquire_global(_time)
+        elif self.rpm > 0:
+            self._acquire_local(_time)
+
+    # ------------------------------------------------------------------ #
+    # Per-process in-memory limiter (original)                            #
+    # ------------------------------------------------------------------ #
+    def _acquire_local(self, _time):
+        with self._lock:
+            now = _time.monotonic()
+            self._timestamps = [t for t in self._timestamps if now - t < 60.0]
+            if len(self._timestamps) >= self.rpm:
+                sleep_for = 60.0 - (now - self._timestamps[0]) + 0.1
+                if sleep_for > 0:
+                    logger.debug(f"[rate limiter] sleeping {sleep_for:.1f}s (RPM cap={self.rpm})")
+                    _time.sleep(sleep_for)
+            self._timestamps.append(_time.monotonic())
+
+    # ------------------------------------------------------------------ #
+    # Cross-process file-based limiter (global)                           #
+    # ------------------------------------------------------------------ #
+    def _acquire_global(self, _time):
+        import fcntl
+        import json as _json
+
+        while True:
+            wait_for = 0.0
+            with open(self._LOCK_FILE, "w") as lf:
+                fcntl.flock(lf, fcntl.LOCK_EX)
+                try:
+                    now = _time.time()
+                    cutoff = now - 60.0
+                    try:
+                        with open(self._SHARED_FILE) as f:
+                            data = _json.load(f)
+                        ts = [t for t in data.get("ts", []) if t > cutoff]
+                    except (FileNotFoundError, _json.JSONDecodeError):
+                        ts = []
+
+                    if len(ts) < self.global_rpm:
+                        ts.append(now)
+                        with open(self._SHARED_FILE, "w") as f:
+                            _json.dump({"ts": ts}, f)
+                        return  # slot acquired
+
+                    wait_for = ts[0] + 60.0 - now + 0.1
+                finally:
+                    fcntl.flock(lf, fcntl.LOCK_UN)
+
+            logger.debug(
+                f"[global rate limiter] waiting {wait_for:.1f}s "
+                f"(global RPM cap={self.global_rpm})"
+            )
+            _time.sleep(min(wait_for, 1.0))
+
+
+_rate_limiter = _RateLimiter()
 
 
 class CyberSessionOrchestrator:
@@ -60,10 +165,14 @@ class CyberSessionOrchestrator:
         network_summary: str,
         profiles: List[CyberAgentProfile],
         session_id: Optional[str] = None,
+        mode: str = "network_security",
     ) -> str:
         """
         Khởi chạy session trong background thread.
         Returns task_id để frontend poll.
+
+        Args:
+            mode: "network_security" (default) | "contract_audit"
         """
         session_id = session_id or f"cyber_{uuid.uuid4().hex[:12]}"
         task_id = self.task_manager.create_task(
@@ -72,12 +181,13 @@ class CyberSessionOrchestrator:
                 "session_id": session_id,
                 "graph_id": graph_id,
                 "agent_count": len(profiles),
+                "mode": mode,
             }
         )
 
         thread = threading.Thread(
             target=self._session_worker,
-            args=(task_id, session_id, graph_id, network_summary, profiles),
+            args=(task_id, session_id, graph_id, network_summary, profiles, mode),
             daemon=True
         )
         thread.start()
@@ -159,6 +269,19 @@ class CyberSessionOrchestrator:
             logger.warning(f"build_network_context_from_zep failed for {graph_id}: {e}")
             return f"Network graph ID: {graph_id}. (Context unavailable — Zep query failed: {e})"
 
+    def build_contract_context_from_zep(self, graph_id: str) -> str:
+        """
+        Query Zep KG → tóm tắt contract entity để inject vào agent prompts.
+        Dùng ContractKGBuilder.build_context_summary() nếu có, fallback về Zep raw query.
+        """
+        try:
+            from .contract_kg_builder import ContractKGBuilder
+            kg_builder = ContractKGBuilder(llm_client=self.llm)
+            return kg_builder.build_context_summary(graph_id)
+        except Exception as e:
+            logger.warning(f"build_contract_context_from_zep failed for {graph_id}: {e}")
+            return f"Contract graph ID: {graph_id}. (Context unavailable — KG query failed: {e})"
+
     # ─── Session state persistence ────────────────────────────────────────────
 
     @staticmethod
@@ -220,6 +343,7 @@ class CyberSessionOrchestrator:
         graph_id: str,
         network_summary: str,
         profiles: List[CyberAgentProfile],
+        mode: str = "network_security",
     ):
         try:
             self.task_manager.update_task(
@@ -227,13 +351,27 @@ class CyberSessionOrchestrator:
                 progress=5, message="Khởi tạo session..."
             )
 
-            # Build OASIS config (metadata only — không chạy subprocess)
-            config = self.env_builder.build_config(
-                session_id=session_id,
-                graph_id=graph_id,
-                profiles=profiles,
-                network_summary=network_summary,
-            )
+            # Pick env_builder and phase function based on mode
+            if mode == "contract_audit":
+                cm = _get_contract_modules()
+                env_builder = cm["env_builder"]()
+                get_phase = cm["get_phase"]
+                config = env_builder.build_config(
+                    session_id=session_id,
+                    graph_id=graph_id,
+                    contract_id=graph_id,
+                    profiles=profiles,
+                    contract_summary=network_summary,
+                )
+            else:
+                env_builder = self.env_builder
+                get_phase = get_phase_for_round
+                config = env_builder.build_config(
+                    session_id=session_id,
+                    graph_id=graph_id,
+                    profiles=profiles,
+                    network_summary=network_summary,
+                )
 
             session_state = CyberSessionState(
                 session_id=session_id,
@@ -243,7 +381,7 @@ class CyberSessionOrchestrator:
 
             # Chạy 10 rounds
             for round_num in range(1, TOTAL_ROUNDS + 1):
-                phase = get_phase_for_round(round_num)
+                phase = get_phase(round_num)
                 progress = 5 + int((round_num - 1) / TOTAL_ROUNDS * 85)
 
                 self.task_manager.update_task(
@@ -259,12 +397,20 @@ class CyberSessionOrchestrator:
                     session_state=session_state,
                     network_summary=network_summary,
                     config=config,
+                    mode=mode,
+                    env_builder=env_builder,
                 )
 
                 session_state.current_round = round_num
                 session_state.current_phase = phase
-                # Persist state sau mỗi round để GET endpoints có thể đọc realtime
                 self._save_session_state(session_state)
+
+                # Inter-round cooldown — let Vertex AI TPM window partially recover
+                # before next burst. Reads LLM_ROUND_COOLDOWN_S (default 15s).
+                if round_num < TOTAL_ROUNDS:
+                    cooldown = float(os.environ.get("LLM_ROUND_COOLDOWN_S", "15"))
+                    if cooldown > 0:
+                        time.sleep(cooldown)
 
             session_state.current_phase = "done"
             self._save_session_state(session_state)
@@ -295,7 +441,9 @@ class CyberSessionOrchestrator:
         profiles: List[CyberAgentProfile],
         session_state: CyberSessionState,
         network_summary: str,
-        config: CyberOasisConfig,
+        config: Any,
+        mode: str = "network_security",
+        env_builder=None,
     ):
         """
         Chạy 1 round: gọi LLM cho từng active agent → parse findings + GAP declarations.
@@ -303,56 +451,86 @@ class CyberSessionOrchestrator:
         GAP declarations từ round này sẽ được route và inject vào round tiếp theo,
         cho phép experts nhận diện điểm mù của nhau và lấp đầy coverage gaps.
         """
-        active_profiles = self.env_builder.get_active_agents_for_phase(profiles, phase)
-        prior_context = self._build_prior_context(session_state)
+        if env_builder is None:
+            env_builder = self.env_builder
 
-        for profile in active_profiles:
-            try:
-                # Build per-agent gap context: chỉ inject gaps routed đến domain group này
-                gap_context = ""
-                if profile.tier == 1 and phase in ("A", "B"):
+        active_profiles = env_builder.get_active_agents_for_phase(profiles, phase)
+        prior_context = self._build_prior_context(session_state, mode=mode)
+        max_workers = int(os.environ.get("LLM_MAX_WORKERS", "1"))
+
+        def _call_one(profile):
+            """Single agent call — thread-safe (no shared mutable state written here)."""
+            gap_context = ""
+            if profile.tier == 1 and phase in ("A", "B"):
+                if mode == "contract_audit":
+                    cm = _get_contract_modules()
+                    gap_context = cm["gap_context"](
+                        pending_gaps=session_state.pending_gaps(),
+                        agent_domain=profile.domain_group,
+                    )
+                else:
                     gap_context = build_gap_context_for_agent(
                         pending_gaps=session_state.pending_gaps(),
                         agent_domain_group=profile.domain_group,
                     )
+            phase_instruction = env_builder.build_phase_instruction(
+                phase, round_num, gap_context=gap_context
+            )
+            _rate_limiter.acquire()
+            response = self._call_agent(
+                profile=profile,
+                phase=phase,
+                round_num=round_num,
+                phase_instruction=phase_instruction,
+                prior_context=prior_context,
+                network_summary=network_summary,
+                mode=mode,
+            )
+            return profile, gap_context, response
 
-                phase_instruction = self.env_builder.build_phase_instruction(
-                    phase, round_num, gap_context=gap_context
-                )
+        if max_workers > 1:
+            # Parallel LLM calls within the round; process findings sequentially after
+            submit_delay = float(os.environ.get("LLM_SUBMIT_DELAY_S", "1.0"))
+            results = []
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                futures = {}
+                for i, p in enumerate(active_profiles):
+                    if i > 0 and submit_delay > 0:
+                        import time as _t; _t.sleep(submit_delay)
+                    futures[pool.submit(_call_one, p)] = p
+                for future in as_completed(futures):
+                    try:
+                        results.append(future.result())
+                    except Exception as e:
+                        logger.warning(f"Agent {futures[future].agent_id} round {round_num} error: {e}")
+        else:
+            results = []
+            for profile in active_profiles:
+                try:
+                    results.append(_call_one(profile))
+                except Exception as e:
+                    logger.warning(f"Agent {profile.agent_id} round {round_num} error: {e}")
 
-                response = self._call_agent(
-                    profile=profile,
-                    phase=phase,
-                    round_num=round_num,
-                    phase_instruction=phase_instruction,
-                    prior_context=prior_context,
-                    network_summary=network_summary,
-                )
-
-                # Persist post to feed
-                self._append_feed_post(session_state.session_id, {
-                    "round_num": round_num,
-                    "phase": phase,
-                    "agent_id": profile.agent_id,
-                    "agent_display": profile.display_name,
-                    "tier": profile.tier,
-                    "domain_group": profile.domain_group,
-                    "persona": profile.persona,
-                    "content": response,
-                    "timestamp": datetime.now().isoformat(),
-                    "gap_context_injected": bool(gap_context),
-                })
-
-                if profile.tier == 1:
-                    self._process_expert_response(response, profile, round_num, session_state)
-                    # Parse và register GAP declarations (Phases A và B only)
-                    if phase in ("A", "B"):
-                        self._process_gap_declarations(response, profile, round_num, session_state)
-                else:
-                    self._process_attacker_response(response, profile, round_num, session_state)
-
-            except Exception as e:
-                logger.warning(f"Agent {profile.agent_id} round {round_num} error: {e}")
+        # Process findings sequentially (no LLM — safe, preserves GAP routing order)
+        for profile, gap_context, response in results:
+            self._append_feed_post(session_state.session_id, {
+                "round_num": round_num,
+                "phase": phase,
+                "agent_id": profile.agent_id,
+                "agent_display": profile.display_name,
+                "tier": profile.tier,
+                "domain_group": profile.domain_group,
+                "persona": profile.persona,
+                "content": response,
+                "timestamp": datetime.now().isoformat(),
+                "gap_context_injected": bool(gap_context),
+            })
+            if profile.tier == 1:
+                self._process_expert_response(response, profile, round_num, session_state, mode=mode)
+                if phase in ("A", "B"):
+                    self._process_gap_declarations(response, profile, round_num, session_state, mode=mode)
+            else:
+                self._process_attacker_response(response, profile, round_num, session_state, mode=mode)
 
         # After all agents in round complete: mark injected gaps as routed
         if phase in ("A", "B"):
@@ -366,10 +544,19 @@ class CyberSessionOrchestrator:
         phase_instruction: str,
         prior_context: str,
         network_summary: str,
+        mode: str = "network_security",
     ) -> str:
         """Gọi LLM cho 1 agent và trả về response text."""
         # Chọn LLM (boost cho attacker Phase C)
         llm = self.boost_llm if (profile.tier == 2 and phase == "C") else self.llm
+
+        if mode == "contract_audit":
+            specificity_hint = (
+                "Be specific, reference actual functions, state variables, "
+                "and code patterns from the contract."
+            )
+        else:
+            specificity_hint = "Be specific, reference actual hosts and services from the infrastructure."
 
         messages = [
             {"role": "system", "content": profile.system_prompt},
@@ -379,7 +566,7 @@ class CyberSessionOrchestrator:
                     f"{phase_instruction}\n\n"
                     f"=== DISCUSSION SO FAR ===\n{prior_context}\n\n"
                     f"Provide your analysis for Round {round_num}. "
-                    f"Be specific, reference actual hosts and services from the infrastructure."
+                    f"{specificity_hint}"
                 )
             }
         ]
@@ -394,8 +581,21 @@ class CyberSessionOrchestrator:
         profile: CyberAgentProfile,
         round_num: int,
         session_state: CyberSessionState,
+        mode: str = "network_security",
     ):
-        """Parse expert agent response → ExpertFinding entries."""
+        """Parse expert agent response → ExpertFinding / ContractFinding entries."""
+        if mode == "contract_audit":
+            cm = _get_contract_modules()
+            finding_dict = cm["parse_finding"](text, profile, round_num)
+            if not finding_dict:
+                return
+            session_state.expert_findings.append(finding_dict)
+            logger.debug(
+                f"ContractFinding [{finding_dict['finding_id']}] from {profile.agent_id}: "
+                f"{finding_dict['title']} ({finding_dict['severity']})"
+            )
+            return
+
         finding_raw = parse_expert_finding_from_text(text, profile, round_num)
         if not finding_raw:
             return
@@ -429,8 +629,36 @@ class CyberSessionOrchestrator:
         profile: CyberAgentProfile,
         round_num: int,
         session_state: CyberSessionState,
+        mode: str = "network_security",
     ):
         """Parse attacker agent response → AttackerFinding or AttackerCorroboration."""
+        if mode == "contract_audit":
+            cm = _get_contract_modules()
+            ContractAttackerAction = cm["attacker_action"]
+            action = ContractAttackerAction.parse_from_text(text)
+            if not action:
+                return
+            action_type = action["action_type"]
+            if action_type == ContractAttackerAction.ADD_PATH:
+                finding_id = f"af_{uuid.uuid4().hex[:8]}"
+                session_state.attacker_findings.append({
+                    "finding_id":       finding_id,
+                    "attacker_profile": profile.persona,
+                    "title":            action["finding_ref"] or f"Attack path by {profile.display_name}",
+                    "description":      action["reason"],
+                    "severity":         "high",
+                    "base_confidence":  0.60,
+                    "path_description": action["path"],
+                })
+                logger.debug(f"Contract Attacker NEW path [{finding_id}] by {profile.agent_id}")
+            else:
+                self._attach_corroboration(
+                    action=action,
+                    attacker_profile=profile.persona,
+                    session_state=session_state,
+                )
+            return
+
         action = AttackerAction.parse_from_text(text)
         if not action:
             return
@@ -466,17 +694,27 @@ class CyberSessionOrchestrator:
         profile: CyberAgentProfile,
         round_num: int,
         session_state: CyberSessionState,
+        mode: str = "network_security",
     ):
         """
         Parse GAP declarations từ expert agent post và lưu vào session state.
         Gaps sẽ được route đến domain groups phù hợp trong round tiếp theo.
         """
-        gaps = parse_gap_declarations(
-            text=text,
-            author_group=profile.domain_group,
-            author_persona=profile.persona,
-            round_num=round_num,
-        )
+        if mode == "contract_audit":
+            cm = _get_contract_modules()
+            gaps = cm["parse_gap"](
+                text=text,
+                author_domain=profile.domain_group,
+                author_persona=profile.persona,
+                round_num=round_num,
+            )
+        else:
+            gaps = parse_gap_declarations(
+                text=text,
+                author_group=profile.domain_group,
+                author_persona=profile.persona,
+                round_num=round_num,
+            )
         for gap in gaps:
             session_state.gap_registry.append(gap)
             logger.debug(
@@ -520,7 +758,7 @@ class CyberSessionOrchestrator:
 
     # ─── Context builder ──────────────────────────────────────────────────────
 
-    def _build_prior_context(self, session_state: CyberSessionState) -> str:
+    def _build_prior_context(self, session_state: CyberSessionState, mode: str = "network_security") -> str:
         """
         Build text summary của các findings đã có để inject vào tiếp theo.
         Giới hạn độ dài để không overflow context window.
@@ -529,11 +767,16 @@ class CyberSessionOrchestrator:
         agents see unique titles already reported → instructed to CHALLENGE
         or EXPAND rather than re-report the same finding.
         """
-        from .cyber_oasis_env import build_published_registry
         lines = []
 
+        if mode == "contract_audit":
+            cm = _get_contract_modules()
+            registry = cm["published_registry"](session_state.expert_findings, max_entries=20)
+        else:
+            from .cyber_oasis_env import build_published_registry
+            registry = build_published_registry(session_state.expert_findings, max_entries=20)
+
         # Published Registry — shown first so agents read it before anything else
-        registry = build_published_registry(session_state.expert_findings, max_entries=20)
         if registry:
             lines.append(registry)
             lines.append("")  # blank line separator
@@ -544,9 +787,15 @@ class CyberSessionOrchestrator:
             recent = session_state.expert_findings[-6:]
             for f in recent:
                 corr_count = len(f.get("attacker_corroborations", []))
+                if mode == "contract_audit":
+                    author_key = "author_domain"
+                    swc_info = f"[{f.get('swc_id', '?')}] " if f.get("swc_id") else ""
+                else:
+                    author_key = "author_group"
+                    swc_info = ""
                 lines.append(
-                    f"[{f.get('severity','?').upper()}] {f.get('title','Untitled')} "
-                    f"(by {f.get('author_group','?')}/{f.get('author_persona','?')}, "
+                    f"[{f.get('severity','?').upper()}] {swc_info}{f.get('title','Untitled')} "
+                    f"(by {f.get(author_key,'?')}/{f.get('author_persona','?')}, "
                     f"confidence: {f.get('confidence', 0.5):.2f}"
                     + (f", {corr_count} attacker reactions" if corr_count else "") + ")"
                 )
@@ -564,9 +813,10 @@ class CyberSessionOrchestrator:
         if all_gaps:
             lines.append(f"\n=== DECLARED KNOWLEDGE GAPS ({len(all_gaps)} total) ===")
             lines.append("Areas experts could not verify — still open for investigation:")
+            author_key = "author_domain" if mode == "contract_audit" else "author_group"
             for g in all_gaps[-8:]:  # show last 8 to avoid overflow
                 lines.append(
-                    f"  [{g.get('author_group','?')}] Area: {g.get('analyzed','?')} — "
+                    f"  [{g.get(author_key,'?')}] Area: {g.get('analyzed','?')} — "
                     f"{g.get('gap_text','')[:100]}"
                 )
 

@@ -5,10 +5,56 @@ LLM客户端封装
 
 import json
 import re
+import time
+import logging
 from typing import Optional, Dict, Any, List
 from openai import OpenAI
 
 from ..config import Config
+
+_logger = logging.getLogger("mirofish.llm_client")
+
+# ─── Global rate limiter (shared across all threads/processes) ────────────────
+import fcntl
+import os as _os
+
+_GLOBAL_RPM_FILE = "/tmp/mirofish_global_rpm.json"
+_GLOBAL_RPM_LOCK = "/tmp/mirofish_global_rpm.lock"
+
+
+def _acquire_global_slot():
+    """Block until a slot is available in the global RPM window."""
+    limit = int(_os.environ.get("LLM_GLOBAL_RPM_LIMIT", "0"))
+    if limit <= 0:
+        return  # limiter disabled
+
+    while True:
+        wait_for = 0.0
+        with open(_GLOBAL_RPM_LOCK, "w") as lf:
+            fcntl.flock(lf, fcntl.LOCK_EX)
+            try:
+                now = time.time()
+                cutoff = now - 60.0
+                try:
+                    import json as _json
+                    with open(_GLOBAL_RPM_FILE) as f:
+                        data = _json.load(f)
+                    ts = [t for t in data.get("ts", []) if t > cutoff]
+                except (FileNotFoundError, ValueError):
+                    ts = []
+
+                if len(ts) < limit:
+                    ts.append(now)
+                    import json as _json
+                    with open(_GLOBAL_RPM_FILE, "w") as f:
+                        _json.dump({"ts": ts}, f)
+                    return  # slot acquired
+
+                wait_for = ts[0] + 60.0 - now + 0.1
+            finally:
+                fcntl.flock(lf, fcntl.LOCK_UN)
+
+        time.sleep(min(wait_for, 1.0))
 
 
 def _build_vertex_ai_http_client(key_file: str):
@@ -95,7 +141,29 @@ class LLMClient:
         if response_format:
             kwargs["response_format"] = response_format
         
-        response = self.client.chat.completions.create(**kwargs)
+        # Retry with exponential backoff on 429 rate limit
+        max_retries = 5
+        base_delay  = 15  # seconds — generous initial wait for Vertex AI TPM limits
+        for attempt in range(max_retries):
+            try:
+                _acquire_global_slot()  # enforce global RPM cap across all callers
+                response = self.client.chat.completions.create(**kwargs)
+                break
+            except Exception as e:
+                is_rate_limit = ("429" in str(e) or
+                                 "rate" in str(e).lower() or
+                                 "quota" in str(e).lower() or
+                                 "resource_exhausted" in str(e).lower())
+                if is_rate_limit and attempt < max_retries - 1:
+                    delay = base_delay * (2 ** attempt)  # 15, 30, 60, 120 s
+                    _logger.warning(
+                        f"Rate limit hit (attempt {attempt+1}/{max_retries}). "
+                        f"Waiting {delay}s before retry..."
+                    )
+                    time.sleep(delay)
+                else:
+                    raise
+
         choice = response.choices[0] if response.choices else None
         content = (choice.message.content if choice and choice.message else None) or ""
         # 部分模型（如MiniMax M2.5）会在content中包含<think>思考内容，需要移除

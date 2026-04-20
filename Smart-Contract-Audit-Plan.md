@@ -57,7 +57,7 @@ GIỮ NGUYÊN (không sửa):
 SỬA NHỎ (thêm mode, không xóa gì):
   cyber_session_orchestrator.py    ← Thêm mode="contract_audit" song song mode hiện tại
   consensus_engine.py              ← Thêm SWC anchor types vào semantic clustering
-  api/cyber.py                     ← Thêm /api/contract/* endpoints
+  app/__init__.py                  ← Đăng ký contract_bp blueprint
 
 TẠO MỚI HOÀN TOÀN:
   models/contract_models.py        ← ContractEntity, ContractFinding, AuditResult
@@ -67,7 +67,14 @@ TẠO MỚI HOÀN TOÀN:
   services/contract_profile_generator.py  ← 13+5 agent profiles cho contract domain
   services/contract_oasis_env.py   ← Contract Audit Room environment
   services/contract_audit_agent.py ← ContractAuditReportAgent + patch suggestion
+  api/contract.py                  ← Blueprint riêng (không thêm vào api/cyber.py)
   scripts/run_contract_audit.py    ← End-to-end script tương tự run_security_review.py
+
+FRONTEND (optional — không cần cho paper):
+  Extend MiroFish frontend hiện tại (Vue 3) thêm 2 component nếu cần demo luận án:
+  ContractFeed.vue      ← Xem trao đổi agent theo phase/round (reuse SimulationFeed.vue)
+  ContractInterview.vue ← Chọn agent → hỏi → xem trả lời (reuse InteractionView.vue)
+  → Ưu tiên sau Phase 5 (evaluation) — không block paper
 ```
 
 ---
@@ -776,44 +783,54 @@ Phân biệt rõ:
 
 ### Bước 4.2 — API Endpoints
 
-**File cần sửa**: `backend/app/api/cyber.py` — thêm `/api/contract/*` blueprint:
+**File tạo mới**: `backend/app/api/contract.py` — Blueprint riêng, đăng ký trong `app/__init__.py`:
 
 ```
 POST /api/contract/upload
-  Body: { source_code, contract_name, description }
-  Return: { task_id, contract_id }
+  Body: { source_code, graph_name }
+  Return: { task_id }
+  Task result: { graph_id, contract_id, contract_type, function_count,
+                 state_var_count, swc_candidates, context_summary }
 
 GET  /api/contract/task/<task_id>
-  Return: { status, progress, result }
+  Return: { status, progress, message, result }
 
-GET  /api/contract/<contract_id>/summary
-  Return: { contract_type, function_count, swc_candidates, risk_signals }
+GET  /api/contract/<graph_id>/summary
+  Return: { graph_id, summary }
 
-POST /api/contract/<contract_id>/agents/generate
+POST /api/contract/<graph_id>/agents/generate
   Body: { contract_summary }
-  Return: { tier1_count: 13, tier2_count: 5, profiles }
+  Return: { tier1_count: 17, tier2_count: 5, total: 22, oasis_profiles }
 
 POST /api/contract/session/start
-  Body: { contract_id, contract_summary, profiles }
+  Body: { graph_id, contract_summary, oasis_profiles }
   Return: { task_id, session_id }
 
 GET  /api/contract/review/<session_id>/status
-  Return: { status, current_phase, current_round, finding_count }
+  Return: { status, current_phase, current_round, finding_count, attacker_finding_count }
 
 GET  /api/contract/review/<session_id>/findings
-  Query: domain, severity, swc_id, type (expert|attacker|all)
-  Return: { findings[], domain_breakdown, exploitable_count }
+  Query: phase, domain, severity, swc_id, type (expert|attacker|all)
+  Return: { findings[], domain_breakdown, swc_breakdown, cross_validated_count }
 
 GET  /api/contract/review/<session_id>/feed
-  Query: phase, round_num, limit, offset
-  Return: { posts[], total }
+  Query: phase, round_num, agent_id, limit, offset
+  Return: { posts[], total, phase_breakdown }
 
 POST /api/contract/report/generate
-  Body: { session_id }
+  Body: { session_id, expert_findings, attacker_findings, contract_summary, graph_id }
   Return: { task_id }
 
 GET  /api/contract/report/<session_id>
-  Return: { report_md, vulnerabilities[], patch_suggestions[], stats }
+  Return: { report, consensus_vulns[], unvalidated_swc_gaps[], coverage_gaps, stats }
+
+# Endpoint cần bổ sung (Phase 4 pending):
+POST /api/contract/interview
+  Body: { session_id, agent_id, question }
+  → Load session context + system_prompt của agent đó
+  → Gọi LLM với context → trả lời từ góc nhìn agent
+  Return: { agent_id, answer, agent_domain, agent_persona }
+  Dùng để: theo dõi reasoning và hỏi đáp với từng agent sau session
 ```
 
 ---
@@ -823,18 +840,29 @@ GET  /api/contract/report/<session_id>
 ### Mục tiêu
 Thu thập số liệu cho 5 đóng góp trong paper.
 
+### Chi phí ước tính (Gemini 2.5 Flash)
+
+| Run | LLM calls | Chi phí |
+|-----|-----------|---------|
+| SmartBugs 143 contracts (full) | ~28,600 | ~$8.5 |
+| Ablation V1–V4 | ~17,000 | ~$5 |
+| DeFiHackLabs 20 contracts | ~4,000 | ~$1.5 |
+| **Tổng Phase 5** | | **~$15** |
+
+Thời gian: ~2–3 giờ nếu chạy parallel 5 contracts cùng lúc.
+
 ---
 
 ### Bước 5.1 — Setup Dataset
 
-**SmartBugs dataset** (primary):
+**SmartBugs Curated** (primary benchmark):
 ```bash
 git clone https://github.com/smartbugs/smartbugs-curated
 # 143 contracts với known vulnerabilities, classified theo SWC
-# Ground truth: có biết vulnerability nào ở đây, severity là gì
+# Ground truth: biết chính xác vulnerability nào ở đây
 
 ls smartbugs-curated/dataset/
-# reentrancy/          (20 contracts)
+# reentrancy/          (20 contracts)   ← Phase 5b bắt đầu ở đây
 # access_control/      (18 contracts)
 # arithmetic/          (22 contracts)
 # unchecked_calls/     (23 contracts)
@@ -852,71 +880,124 @@ git clone https://github.com/SunWeb3Sec/DeFiHackLabs
 
 ### Bước 5.2 — Baseline Setup
 
-Cài và chạy baseline tools trên cùng dataset:
-
+**Static analysis tools** (pip install, không cần clone):
 ```bash
-# Slither (static analysis)
-pip install slither-analyzer
-slither contract.sol --json output.json
+pip install slither-analyzer   # Trail of Bits — ~2–5s/contract
+pip install mythril             # ConsenSys — ~30–120s/contract (symbolic execution)
+```
 
-# Mythril (symbolic execution)
-pip install mythril
-myth analyze contract.sol -o json
+**Single-LLM baseline (Option B)** — tự implement, KHÔNG dùng GPTScan:
+```
+Lý do chọn Option B:
+  - Cùng LLM (Gemini 2.5 Flash) với hệ thống → so sánh architecture, không phải model
+  - Kết quả chứng minh multi-agent architecture có giá trị độc lập với model
+  - Không cần clone repo ngoài, không phụ thuộc OpenAI API
 
-# GPTScan — không có pip package, cần reproduce từ paper
-# Hoặc implement single-LLM baseline đơn giản để compare
+Config:
+  - 1 agent duy nhất (appsec_auditor)
+  - 1 pass qua contract (không debate, không consensus)
+  - Prompt: full contract source + system_prompt của agent đó
+  - Output: list of findings (SWC ID + severity + description)
+
+So sánh với GPTScan: cite số F1=0.88 từ paper gốc (họ dùng SmartBugs),
+không cần rerun GPTScan.
 ```
 
 Tạo `scripts/run_baselines.py`:
 ```python
-# Chạy Slither + Mythril trên toàn bộ SmartBugs dataset
+# Chạy Slither + Mythril + Single-LLM trên SmartBugs dataset
 # Lưu kết quả: { contract_id, tool, findings[], tp, fp, fn }
 ```
 
 ---
 
-### Bước 5.3 — Chạy Hệ thống
+### Bước 5.3 — Chiến lược chạy (3 giai đoạn)
+
+Chạy từ nhỏ đến lớn — chỉ mở rộng khi F1 đã ổn:
+
+```
+Phase 5a — Debug (~$0.10, ~30 phút):
+  3 contracts: dao + erc20 + defi_vault (built-in samples)
+  Mục đích: pipeline chạy end-to-end, không lỗi
+  Tiêu chí qua: tất cả 3 samples cho output hợp lệ
+
+Phase 5b — Validate (~$3, ~2 giờ):
+  20 contracts: smartbugs-curated/dataset/reentrancy/ (toàn bộ category)
+  Mục đích: F1 đầu tiên trên real labeled data
+  Tiêu chí qua: F1 ≥ 0.75 → tiến Phase 5c
+               F1 < 0.75 → tune prompts/consensus rồi rerun
+
+Phase 5c — Full (~$8.5, ~3 giờ parallel):
+  143 contracts: toàn bộ SmartBugs Curated
+  Mục đích: primary benchmark numbers — F1/P/R per SWC type cho paper
+  Chỉ chạy sau khi Phase 5b confirm F1 tốt
+
+Phase 5d — Real-World (~$1.5, ~1 giờ):
+  15–20 contracts: DeFiHackLabs real hacked production contracts
+  Mục đích: generalizability — chứng minh MECAP hoạt động trên production code
+  Ground truth: PoC exploit code → chính xác vulnerability bị khai thác
+  Pass criteria: F1 ≥ 0.60, Precision ≥ 0.50, Recall ≥ 0.70
+  Chạy sau Phase 5c
+```
 
 ```bash
-# Chạy toàn bộ SmartBugs dataset (143 contracts)
-python scripts/run_contract_audit.py \
-    --dataset smartbugs-curated/ \
-    --output ./results/smartbugs_full/ \
-    --rounds 10
+# Phase 5a — 3 built-in samples
+python scripts/run_contract_audit.py --sample dao --output ./results/debug/
+python scripts/run_contract_audit.py --sample erc20 --output ./results/debug/
+python scripts/run_contract_audit.py --sample defi_vault --output ./results/debug/
 
-# Chạy DeFiHackLabs subset (20 real incidents)
-python scripts/run_contract_audit.py \
-    --dataset DeFiHackLabs/src/ \
-    --output ./results/defi_incidents/ \
-    --rounds 10
+# Phase 5b — reentrancy category
+python scripts/evaluate_smartbugs.py \
+    --dataset smartbugs-curated/dataset/reentrancy/ \
+    --output ./results/phase5b/ \
+    --parallel 3
+
+# Phase 5c — full SmartBugs (sau khi 5b tốt)
+python scripts/evaluate_smartbugs.py \
+    --dataset smartbugs-curated/dataset/ \
+    --output ./results/smartbugs_full/ \
+    --parallel 5
+
+# Phase 5d — DeFiHackLabs real production contracts (sau khi 5c tốt)
+python scripts/evaluate_phase5d.py \
+    --dataset /path/to/DeFiHackLabs \
+    --output ./results/phase5d/ \
+    --ground-truth ./data/defihacklabs_ground_truth.json \
+    --parallel 1 --cooldown 30
 ```
+
+Cần tạo:
+- `scripts/evaluate_smartbugs.py` — batch runner + metrics (thêm `--dataset DIR` flag)
+- `scripts/run_baselines.py` — Slither + Mythril + Single-LLM baseline
+- `scripts/ablation_study.py` — chạy V1–V5 variants
+- `scripts/evaluate_phase5d.py` — DeFiHackLabs batch runner, ground truth từ PoC exploits
 
 ---
 
 ### Bước 5.4 — Ablation Study (chứng minh từng component đóng góp)
 
 ```
-Variant 1 — Single agent (baseline LLM):
-  1 agent, không có debate, không có consensus
-  → Đo FP/FN
+V1 — Single agent, no KG:
+  1 agent (appsec_auditor), không KG, 1 pass
+  Baseline LLM thuần → Đo FP/FN
 
-Variant 2 — Intra-domain only (Phase A):
-  13 agents, Phase A chỉ, không có cross-domain, không có attacker
-  → Đo FP/FN
+V2 — Single agent + KG:
+  1 agent + Zep KG context
+  Chứng minh C2: KG grounding giảm hallucination → Đo FP/FN
 
-Variant 3 — Intra + Cross domain (Phase A + B):
-  13 agents, Phase A + B, không có attacker profiles
-  → Đo FP/FN
+V3 — Multi-agent Phase A only, no KG:
+  17 Tier-1 agents, chỉ Phase A (intra-domain), không KG
+  Chứng minh multi-agent value độc lập → Đo FP/FN
 
-Variant 4 — Full system (Phase A + B + C):
-  18 agents, đầy đủ 3 phases
-  → Đo FP/FN
+V4 — Multi-agent + KG, no Phase C:
+  17 Tier-1 agents, Phase A + B, có KG, không attacker profiles
+  Chứng minh C3: Phase C (attackers) đóng góp gì → Đo FP/FN
 
-Variant 5 — Full system + Contract KG:
-  18 agents + Zep KG grounding
-  → Đo FP/FN
+V5 — Full system (Phase A + B + C + KG):
+  22 agents (17 Tier-1 + 5 Tier-2), Phase A+B+C, có KG
+  Full framework → Đo FP/FN
 
-Expected: V1 < V2 < V3 < V4 < V5 (mỗi component thêm vào đều cải thiện)
+Expected: V1 < V2 < V3 < V4 < V5 (mỗi component thêm đều cải thiện F1)
 ```
 
 ---
@@ -936,9 +1017,12 @@ Precision = TP / (TP + FP)
 Recall    = TP / (TP + FN)
 F1        = 2 * Precision * Recall / (Precision + Recall)
 
+# Aggregate: macro-F1 trên 143 contracts
+# Per-SWC-type: F1 riêng cho reentrancy, access_control, arithmetic...
+
 # Với DeFiHackLabs:
-# Exploitability Precision = số findings được attacker CONFIRM
-#                            / tổng số findings reported
+# Exploitability Precision = [CONFIRMED EXPLOITABLE] matches real exploit
+#                            / total [CONFIRMED EXPLOITABLE] findings
 ```
 
 ---
@@ -1005,15 +1089,19 @@ Phase 3 — Session & Consensus:
   [ ] consensus_engine.py — SWC anchor keywords hoạt động
 
 Phase 4 — Report & API:
-  [ ] contract_audit_agent.py — 6-section report, patch suggestion
-  [ ] api/cyber.py — 9 endpoints hoạt động
+  [x] contract_audit_agent.py — 6-section report, patch suggestion (31 tests passed)
+  [x] api/contract.py — 11 endpoints hoạt động (Blueprint riêng, kể cả /interview)
+  [x] POST /api/contract/interview — agent interview endpoint (22/22 agent_ids parse đúng)
 
 Phase 5 — Evaluation:
-  [ ] SmartBugs dataset setup xong
-  [ ] Slither + Mythril baseline chạy được
-  [ ] Ablation study 5 variants
-  [ ] Metrics: Precision/Recall/F1 trên 143 contracts
-  [ ] Exploitability validation trên DeFiHackLabs
+  [ ] Phase 5a: debug 3 built-in samples (dao/erc20/defi_vault) end-to-end
+  [ ] Phase 5b: validate trên 20 reentrancy contracts → F1 ≥ 0.75
+  [ ] Slither + Mythril baseline chạy được (scripts/run_baselines.py)
+  [ ] Single-LLM baseline Option B (scripts/run_baselines.py)
+  [ ] Phase 5c: full SmartBugs 143 contracts (chỉ sau khi 5b tốt)
+  [ ] Ablation study 5 variants V1–V5 (scripts/ablation_study.py)
+  [ ] Metrics: Precision/Recall/F1 per SWC type + macro (scripts/evaluate_smartbugs.py)
+  [ ] Phase 5d: DeFiHackLabs 15–20 contracts — F1 ≥ 0.60, P ≥ 0.50, R ≥ 0.70 (scripts/evaluate_phase5d.py)
 
 Phase 6 — Paper:
   [ ] Abstract + Introduction
