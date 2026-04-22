@@ -1,0 +1,603 @@
+"""
+Contract Audit Script — Multi-Expert Panel for Smart Contracts (Đề tài 10)
+
+End-to-end CLI: load .sol file → parse → build Zep KG → run audit session → generate report.
+Không cần Flask server — chạy trực tiếp từ CLI.
+
+Sử dụng:
+    python run_contract_audit.py --sol /path/to/Contract.sol
+    python run_contract_audit.py --sol /path/to/Contract.sol --output ./audit_results/
+    python run_contract_audit.py --sol /path/to/Contract.sol --graph-name "DAO Hack Audit"
+
+Ví dụ đầy đủ:
+    python run_contract_audit.py \\
+        --sol ./samples/dao_hack.sol \\
+        --output ./audit_results/dao_hack/ \\
+        --graph-name "DAO Hack Contract" \\
+        --rounds 10
+
+Chạy với built-in sample:
+    python run_contract_audit.py --sample dao        # classic DAO hack contract
+    python run_contract_audit.py --sample erc20      # vulnerable ERC20
+    python run_contract_audit.py --sample defi_vault # DeFi vault with oracle risk
+"""
+
+import argparse
+import json
+import logging
+import os
+import sys
+import re
+import time
+from dataclasses import asdict
+from datetime import datetime
+from typing import Optional, List, Set
+
+# ─── Path setup ───────────────────────────────────────────────────────────────
+_scripts_dir = os.path.dirname(os.path.abspath(__file__))
+_backend_dir  = os.path.abspath(os.path.join(_scripts_dir, ".."))
+_project_root = os.path.abspath(os.path.join(_backend_dir, ".."))
+
+sys.path.insert(0, _scripts_dir)
+sys.path.insert(0, _backend_dir)
+
+# Load .env
+from dotenv import load_dotenv
+_env_file = os.path.join(_project_root, ".env")
+if os.path.exists(_env_file):
+    load_dotenv(_env_file)
+else:
+    _backend_env = os.path.join(_backend_dir, ".env")
+    if os.path.exists(_backend_env):
+        load_dotenv(_backend_env)
+
+# ─── Logging ──────────────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger("contract_audit")
+
+
+# ─── Built-in sample contracts ────────────────────────────────────────────────
+
+SAMPLE_CONTRACTS = {
+    "dao": {
+        "name": "Classic DAO Hack Contract",
+        "description": "Vulnerable contract illustrating the 2016 DAO reentrancy hack pattern",
+        "source": """
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.6.0;
+
+contract VulnerableDAO {
+    mapping(address => uint) public balances;
+
+    function deposit() public payable {
+        balances[msg.sender] += msg.value;
+    }
+
+    function withdraw(uint _amount) public {
+        require(balances[msg.sender] >= _amount, "Insufficient balance");
+        // SWC-107: External call BEFORE state update
+        (bool success, ) = msg.sender.call{value: _amount}("");
+        require(success, "Transfer failed");
+        balances[msg.sender] -= _amount;  // state updated AFTER call
+    }
+
+    function getBalance() public view returns (uint) {
+        return address(this).balance;
+    }
+}
+""",
+    },
+    "erc20": {
+        "name": "Vulnerable ERC20 Token",
+        "description": "ERC20 with missing access control on minting and tx.origin vulnerability",
+        "source": """
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+contract VulnerableToken {
+    mapping(address => uint256) public balances;
+    mapping(address => mapping(address => uint256)) public allowances;
+    uint256 public totalSupply;
+    address public owner;
+
+    constructor() {
+        owner = msg.sender;
+        totalSupply = 1_000_000 * 10**18;
+        balances[msg.sender] = totalSupply;
+    }
+
+    // SWC-115: tx.origin used for authentication
+    function transfer(address to, uint256 amount) public returns (bool) {
+        require(tx.origin == owner || balances[msg.sender] >= amount, "Not authorized");
+        balances[msg.sender] -= amount;
+        balances[to] += amount;
+        return true;
+    }
+
+    // SWC-105: Missing access control — anyone can mint
+    function mint(address to, uint256 amount) public {
+        totalSupply += amount;
+        balances[to] += amount;
+    }
+
+    function approve(address spender, uint256 amount) public returns (bool) {
+        allowances[msg.sender][spender] = amount;
+        return true;
+    }
+}
+""",
+    },
+    "defi_vault": {
+        "name": "DeFi Vault with Oracle Risk",
+        "description": "Lending vault that uses a price oracle without circuit breaker — flash loan price manipulation risk",
+        "source": """
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+interface IPriceOracle {
+    function getPrice(address token) external view returns (uint256);
+}
+
+contract VulnerableVault {
+    IPriceOracle public oracle;
+    mapping(address => uint256) public deposits;
+    mapping(address => uint256) public borrows;
+    address public owner;
+
+    constructor(address _oracle) {
+        oracle = IPriceOracle(_oracle);
+        owner = msg.sender;
+    }
+
+    // SWC-107 + PRICE_ORACLE_STALENESS: Uses spot price, no TWAP
+    function borrow(address token, uint256 amount) public {
+        uint256 price = oracle.getPrice(token);  // spot price — flash loan manipulable
+        uint256 collateralValue = deposits[msg.sender] * price / 1e18;
+        require(collateralValue >= amount * 150 / 100, "Insufficient collateral");
+        borrows[msg.sender] += amount;
+        // SWC-107: external call before borrows update (re-entrant borrow)
+        (bool ok, ) = msg.sender.call{value: amount}("");
+        require(ok);
+    }
+
+    function deposit() public payable {
+        deposits[msg.sender] += msg.value;
+    }
+
+    // SWC-105: no access control on liquidation
+    function liquidate(address user) public {
+        require(borrows[user] > 0, "No debt");
+        uint256 seized = deposits[user];
+        deposits[user] = 0;
+        borrows[user] = 0;
+        (bool ok, ) = msg.sender.call{value: seized}("");
+        require(ok);
+    }
+}
+""",
+    },
+}
+
+
+# ─── Poll helper ──────────────────────────────────────────────────────────────
+
+def _poll_task(task_manager, task_id: str, label: str, timeout: int = 300) -> dict:
+    """Poll task until complete or fail. Returns task result dict."""
+    deadline = time.monotonic() + timeout
+    last_progress = -1
+    while time.monotonic() < deadline:
+        task = task_manager.get_task(task_id)
+        if not task:
+            raise RuntimeError(f"Task {task_id} disappeared")
+
+        progress = task.progress or 0
+        if progress != last_progress:
+            logger.info(f"  [{label}] {progress}% — {task.message or ''}")
+            last_progress = progress
+
+        if task.status.value == "completed":
+            logger.info(f"  [{label}] ✅ Done")
+            return task.result or {}
+        elif task.status.value in ("failed", "error"):
+            raise RuntimeError(f"Task failed: {task.error}")
+
+        time.sleep(3)
+
+    raise TimeoutError(f"Task {task_id} did not complete within {timeout}s")
+
+
+# ─── Profiles helpers ─────────────────────────────────────────────────────────
+
+def _profiles_to_dicts(profiles: list) -> list:
+    return [asdict(p) for p in profiles]
+
+
+def _profiles_from_dicts(dicts: list) -> list:
+    from app.services.contract_profile_generator import ContractAgentProfile
+    result = []
+    for d in dicts:
+        result.append(ContractAgentProfile(
+            user_id=d["user_id"],
+            agent_id=d["agent_id"],
+            tier=d["tier"],
+            domain_group=d["domain_group"],
+            persona=d["persona"],
+            display_name=d["display_name"],
+            system_prompt=d["system_prompt"],
+            bio=d["bio"],
+            swc_focus=d.get("swc_focus", []),
+            motivation=d.get("motivation"),
+            skill_level=d.get("skill_level"),
+        ))
+    return result
+
+
+# ─── Main audit pipeline ──────────────────────────────────────────────────────
+
+def run_audit(
+    source_code: str,
+    contract_name: str,
+    output_dir: str,
+    graph_name: Optional[str] = None,
+    verbose: bool = False,
+    timeout_session: int = 1800,
+    ground_truth: Optional[List[str]] = None,
+):
+    """
+    Full pipeline:
+      1. Parse Solidity → ContractEntity
+      2. Build Zep KG
+      3. Generate 22 agent profiles
+      4. Run 10-round audit session (Phase A + B + C)
+      5. Generate audit report
+      6. Save everything to output_dir
+    """
+    if verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
+
+    os.makedirs(output_dir, exist_ok=True)
+    graph_name = graph_name or f"{contract_name} Audit"
+
+    logger.info("=" * 60)
+    logger.info(f"Contract Audit — {contract_name}")
+    logger.info(f"Output: {output_dir}")
+    logger.info("=" * 60)
+
+    from app.models.task import TaskManager
+    from app.services.contract_kg_builder import ContractKGBuilder
+    from app.services.contract_profile_generator import ContractExpertProfileGenerator
+    from app.services.cyber_session_orchestrator import CyberSessionOrchestrator
+    from app.services.contract_audit_agent import ContractAuditReportAgent
+    from app.services.contract_invariant_extractor import ContractInvariantExtractor
+
+    task_manager        = TaskManager()
+    kg_builder          = ContractKGBuilder()
+    prof_gen            = ContractExpertProfileGenerator()
+    orchestrator        = CyberSessionOrchestrator()
+    report_agent        = ContractAuditReportAgent()
+    # Use boost LLM for invariant extraction (better reasoning than primary Flash model)
+    invariant_extractor = ContractInvariantExtractor(llm_client=orchestrator.boost_llm)
+
+    from datetime import datetime as _dt
+    _run_start = _dt.now()
+
+    graph_id = None
+    kg_task_id = None
+    try:
+        # ── Step 1 + 2: Parse + Build KG ──────────────────────────────────────
+        logger.info("\n[STEP 1/4] Parsing Solidity source + building Zep KG...")
+        kg_task_id = kg_builder.build_from_source_async(
+            source_code=source_code,
+            graph_name=graph_name,
+        )
+        kg_result = _poll_task(task_manager, kg_task_id, "KG Build", timeout=1800)
+
+        graph_id        = kg_result["graph_id"]
+        contract_id     = kg_result["contract_id"]
+        contract_summary = kg_result["context_summary"]
+
+        logger.info(f"  graph_id     : {graph_id}")
+        logger.info(f"  contract_id  : {contract_id}")
+        logger.info(f"  contract_type: {kg_result.get('contract_type','?')}")
+        logger.info(f"  functions    : {kg_result.get('function_count', 0)}")
+        logger.info(f"  state_vars   : {kg_result.get('state_var_count', 0)}")
+        logger.info(f"  SWC static   : {', '.join(kg_result.get('swc_candidates', [])) or 'none'}")
+
+        _save_json(output_dir, "kg_result.json", kg_result)
+        _save_text(output_dir, "contract_summary.txt", contract_summary)
+
+        # ── Step 1.5: Extract protocol invariants (additive layer) ────────────
+        logger.info("\n[STEP 1.5/4] Extracting protocol invariants...")
+        inv_result       = invariant_extractor.extract(
+            source_code=source_code,
+            context_summary=contract_summary,
+        )
+        invariants        = inv_result["invariants"]
+        contract_summary  = inv_result["enriched_summary"]
+        _save_json(output_dir, "invariants.json", {"invariants": invariants})
+        logger.info(f"  Invariants extracted: {len(invariants)}")
+
+        # ── Step 3: Generate 22 agent profiles ────────────────────────────────
+        logger.info("\n[STEP 2/4] Generating 22 agent profiles...")
+        prof_result = prof_gen.generate_all_profiles(
+            contract_summary=contract_summary,
+            graph_id=graph_id,
+        )
+        profiles = prof_result["all"]
+        logger.info(f"  Tier-1: {len(prof_result['tier1'])} experts | Tier-2: {len(prof_result['tier2'])} attackers")
+
+        _save_json(output_dir, "profiles.json", _profiles_to_dicts(profiles))
+
+        # ── Step 4: Run audit session ──────────────────────────────────────────
+        logger.info("\n[STEP 3/4] Running 10-round audit session (Phase A → B → C)...")
+        task_id = orchestrator.run_session_async(
+            graph_id=graph_id,
+            network_summary=contract_summary,
+            profiles=profiles,
+            mode="contract_audit",
+            invariants=invariants,
+        )
+
+        task = task_manager.get_task(task_id)
+        session_id = task.metadata.get("session_id", task_id) if task else task_id
+        logger.info(f"  session_id: {session_id}")
+
+        session_result = _poll_task(task_manager, task_id, "Audit Session", timeout=timeout_session)
+
+        expert_findings   = session_result.get("expert_findings", [])
+        attacker_findings = session_result.get("attacker_findings", [])
+        semantic_findings = session_result.get("semantic_findings", [])
+
+        logger.info(f"  Expert findings  : {len(expert_findings)}")
+        logger.info(f"  Attacker findings: {len(attacker_findings)}")
+        logger.info(f"  Semantic findings: {len(semantic_findings)}")
+
+        _save_json(output_dir, "session_result.json", session_result)
+
+        # ── Step 5: Generate report ────────────────────────────────────────────
+        logger.info("\n[STEP 4/4] Generating audit report...")
+        task_id = report_agent.generate_report_async(
+            session_id=session_id,
+            expert_findings=expert_findings,
+            attacker_findings=attacker_findings,
+            contract_summary=contract_summary,
+            graph_id=graph_id,
+            semantic_findings=semantic_findings,
+            invariants=invariants,
+        )
+        report_result = _poll_task(task_manager, task_id, "Report Gen", timeout=1800)
+
+        # Inject timing + eval metrics into stats before saving
+        _duration = int((_dt.now() - _run_start).total_seconds())
+        _stats_update = {
+            "started_at": _run_start.isoformat(),
+            "duration_seconds": _duration,
+        }
+        if ground_truth:
+            _stats_update.update(_compute_eval_metrics(
+                report_result.get("consensus_vulns", []), ground_truth,
+            ))
+        report_result.setdefault("stats", {}).update(_stats_update)
+
+        report_path = os.path.join(output_dir, "audit_report.json")
+        _save_json(output_dir, "audit_report.json", report_result)
+
+        # Save human-readable report text
+        report_text = report_result.get("report", "")
+        _save_text(output_dir, "audit_report.md", report_text)
+
+        # ── Summary ───────────────────────────────────────────────────────────
+        stats = report_result.get("stats", {})
+        logger.info("\n" + "=" * 60)
+        logger.info("AUDIT COMPLETE")
+        logger.info("=" * 60)
+        logger.info(f"  Critical vulnerabilities : {stats.get('critical', 0)}")
+        logger.info(f"  High vulnerabilities     : {stats.get('high', 0)}")
+        logger.info(f"  Medium vulnerabilities   : {stats.get('medium', 0)}")
+        logger.info(f"  Consensus findings       : {stats.get('consensus_vulns', 0)}")
+        logger.info(f"  Exploitable confirmed    : {stats.get('exploitable_count', 0)}")
+        logger.info(f"  Unvalidated SWC gaps     : {stats.get('unvalidated_swc_gaps', 0)}")
+        logger.info(f"  Duration                 : {_duration//60}m{_duration%60:02d}s")
+        if ground_truth:
+            em = _stats_update
+            logger.info(f"  Ground truth             : {ground_truth}")
+            logger.info(f"  TP={em.get('tp')} FP={em.get('fp')} FN={em.get('fn')}  "
+                        f"P={em.get('precision'):.2f} R={em.get('recall'):.2f} F1={em.get('f1'):.2f}")
+        logger.info(f"\n  Report saved to          : {os.path.join(output_dir, 'audit_report.md')}")
+        logger.info(f"  JSON result              : {report_path}")
+
+    finally:
+        # ── Cleanup Zep graph regardless of success/failure/timeout ──────────
+        _gid = graph_id or (kg_builder._partial_graph_ids.pop(kg_task_id, None) if kg_task_id else None)
+        if _gid:
+            try:
+                from app.services.graph_builder import GraphBuilderService
+                GraphBuilderService().delete_graph(_gid)
+                logger.info(f"  Zep graph {_gid} deleted (quota cleanup)")
+            except Exception as _de:
+                logger.warning(f"  Failed to delete Zep graph {_gid}: {_de}")
+
+    return report_result
+
+
+# ─── File helpers ─────────────────────────────────────────────────────────────
+
+def _save_json(output_dir: str, filename: str, data):
+    path = os.path.join(output_dir, filename)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    logger.debug(f"  Saved: {path}")
+
+
+def _save_text(output_dir: str, filename: str, text: str):
+    path = os.path.join(output_dir, filename)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+    logger.debug(f"  Saved: {path}")
+
+
+# ─── Ground truth helpers ─────────────────────────────────────────────────────
+
+# SmartBugs category → primary SWC (mirrors evaluate_phase5b.py)
+_CATEGORY_TO_SWC = {
+    "reentrancy":              "SWC-107",
+    "access_control":          "SWC-105",
+    "arithmetic":              "SWC-101",
+    "denial_of_service":       "SWC-113",
+    "front_running":           "SWC-114",
+    "bad_randomness":          "SWC-120",
+    "time_manipulation":       "SWC-116",
+    "short_addresses":         "SWC-104",
+    "unchecked_low_level_calls": "SWC-104",
+    "other":                   None,
+}
+
+def _lookup_ground_truth(sol_path: str) -> List[str]:
+    """Auto-detect expected SWCs from SmartBugs vulnerabilities.json given .sol path."""
+    sol_abs = os.path.abspath(sol_path)
+    # Walk up to find vulnerabilities.json in dataset root
+    check_dir = os.path.dirname(sol_abs)
+    for _ in range(5):
+        candidate = os.path.join(check_dir, "vulnerabilities.json")
+        if os.path.exists(candidate):
+            break
+        check_dir = os.path.dirname(check_dir)
+    else:
+        return []
+    try:
+        with open(candidate, encoding="utf-8") as f:
+            db = json.load(f)
+    except Exception:
+        return []
+    sol_name = os.path.basename(sol_abs)
+    for entry in db:
+        if entry.get("name") == sol_name or entry.get("name") == sol_name.replace(".sol", ""):
+            swcs = set()
+            for v in entry.get("vulnerabilities", []):
+                cat = v.get("category", "")
+                swc = _CATEGORY_TO_SWC.get(cat)
+                if swc:
+                    swcs.add(swc)
+            return sorted(swcs)
+    return []
+
+
+def _compute_eval_metrics(
+    consensus_vulns: list,
+    ground_truth: List[str],
+) -> dict:
+    """Compute TP/FP/FN/Precision/Recall/F1 vs ground truth SWC list."""
+    if not ground_truth:
+        return {}
+    detected: Set[str] = set()
+    for v in consensus_vulns:
+        for swc in v.get("mitre_techniques", []):
+            detected.add(swc)
+    expected = set(ground_truth)
+    tp = len(detected & expected)
+    fp = len(detected - expected)
+    fn = len(expected - detected)
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    recall    = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    f1        = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+    return {
+        "ground_truth":  sorted(expected),
+        "detected_swcs": sorted(detected),
+        "tp": tp, "fp": fp, "fn": fn,
+        "precision": round(precision, 4),
+        "recall":    round(recall, 4),
+        "f1":        round(f1, 4),
+    }
+
+
+# ─── CLI entry point ──────────────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Run end-to-end smart contract audit (parse → KG → session → report)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+
+    source_group = parser.add_mutually_exclusive_group(required=True)
+    source_group.add_argument(
+        "--sol", metavar="FILE",
+        help="Path to Solidity .sol file",
+    )
+    source_group.add_argument(
+        "--sample", choices=list(SAMPLE_CONTRACTS.keys()),
+        help="Use a built-in sample contract",
+    )
+
+    parser.add_argument(
+        "--output", "-o", default="./audit_output",
+        help="Output directory (default: ./audit_output)",
+    )
+    parser.add_argument(
+        "--graph-name", default=None,
+        help="Custom graph name for Zep KG (default: '<contract> Audit')",
+    )
+    parser.add_argument(
+        "--verbose", "-v", action="store_true",
+        help="Verbose debug logging",
+    )
+    parser.add_argument(
+        "--timeout", type=int, default=7200,
+        help="Session timeout in seconds (default: 7200)",
+    )
+    parser.add_argument(
+        "--ground-truth", metavar="SWC[,SWC...]", default=None,
+        help="Comma-separated expected SWC IDs for eval metrics (e.g. SWC-107,SWC-101). "
+             "Auto-detected from SmartBugs vulnerabilities.json if omitted.",
+    )
+
+    args = parser.parse_args()
+
+    # ── Load source ──────────────────────────────────────────────────────────
+    if args.sol:
+        sol_path = os.path.abspath(args.sol)
+        if not os.path.exists(sol_path):
+            logger.error(f"File không tồn tại: {sol_path}")
+            sys.exit(1)
+        with open(sol_path, "r", encoding="utf-8") as f:
+            source_code = f.read()
+        contract_name = os.path.splitext(os.path.basename(sol_path))[0]
+    else:
+        sample = SAMPLE_CONTRACTS[args.sample]
+        source_code   = sample["source"]
+        contract_name = args.sample
+        logger.info(f"Using sample contract: {sample['name']}")
+        logger.info(f"Description: {sample['description']}")
+
+    # ── Timestamped output dir ────────────────────────────────────────────────
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_dir = os.path.join(args.output, f"{contract_name}_{ts}")
+
+    # ── Resolve ground truth ─────────────────────────────────────────────────
+    if args.ground_truth:
+        ground_truth = [s.strip().upper() for s in args.ground_truth.split(",") if s.strip()]
+    elif args.sol:
+        ground_truth = _lookup_ground_truth(sol_path)
+        if ground_truth:
+            logger.info(f"Auto-detected ground truth from SmartBugs: {ground_truth}")
+    else:
+        ground_truth = []
+
+    # ── Run ──────────────────────────────────────────────────────────────────
+    run_audit(
+        source_code=source_code,
+        contract_name=contract_name,
+        output_dir=output_dir,
+        graph_name=args.graph_name,
+        verbose=args.verbose,
+        timeout_session=args.timeout,
+        ground_truth=ground_truth or None,
+    )
+
+
+if __name__ == "__main__":
+    main()

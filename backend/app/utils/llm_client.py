@@ -1,6 +1,7 @@
 """
 LLM客户端封装
 统一使用OpenAI格式调用，支持 AI Studio API key 和 Vertex AI Service Account
+Ngoài ra hỗ trợ AnthropicVertex mode: Claude models trên Vertex AI (dùng anthropic SDK)
 """
 
 import json
@@ -78,75 +79,183 @@ def _build_vertex_ai_http_client(key_file: str):
     return httpx.Client(auth=_VertexAuth(), timeout=1800)
 
 
+def _extract_project_id(key_file: str) -> str:
+    """Đọc project_id từ service account JSON."""
+    with open(key_file) as f:
+        return json.load(f).get("project_id", "")
+
+
 class LLMClient:
-    """LLM客户端"""
+    """LLM客户端
+
+    Hỗ trợ 4 mode:
+      1. Vertex AI Gemini  — vertex_key_file set, không có anthropic_vertex_region
+      2. AnthropicVertex   — vertex_key_file + anthropic_vertex_region → Claude trên Vertex AI
+      3. Anthropic API key — base_url chứa anthropic.com → OpenAI-compat + header
+      4. Standard OpenAI   — api_key only
+    """
 
     def __init__(
         self,
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
-        model: Optional[str] = None
+        model: Optional[str] = None,
+        vertex_key_file: Optional[str] = None,
+        anthropic_vertex_region: Optional[str] = None,
     ):
         self.base_url = base_url or Config.LLM_BASE_URL
         self.model = model or Config.LLM_MODEL_NAME
+        self._is_anthropic = False
+        self._is_anthropic_vertex = False
+        self._av_client = None  # AnthropicVertex client instance
 
-        vertex_key_file = Config.LLM_VERTEX_AI_KEY_FILE
-        if vertex_key_file:
-            # Vertex AI mode: dùng service account JSON, bỏ qua LLM_API_KEY
-            http_client = _build_vertex_ai_http_client(vertex_key_file)
+        resolved_vertex = vertex_key_file or (
+            Config.LLM_VERTEX_AI_KEY_FILE if not api_key else None
+        )
+
+        if resolved_vertex and anthropic_vertex_region:
+            # ── Mode 2: AnthropicVertex — Claude trên Vertex AI ──────────────
+            self._is_anthropic_vertex = True
+            self._is_anthropic = True
+            from anthropic import AnthropicVertex
+            from google.oauth2 import service_account as _sa
+            credentials = _sa.Credentials.from_service_account_file(
+                resolved_vertex,
+                scopes=["https://www.googleapis.com/auth/cloud-platform"],
+            )
+            project_id = _extract_project_id(resolved_vertex)
+            self._av_client = AnthropicVertex(
+                project_id=project_id,
+                region=anthropic_vertex_region,
+                credentials=credentials,
+            )
+            self.client = None  # không dùng OpenAI client trong mode này
+            _logger.info(
+                f"LLMClient: AnthropicVertex mode | model={self.model} "
+                f"| region={anthropic_vertex_region} | project={project_id}"
+            )
+
+        elif resolved_vertex:
+            # ── Mode 1: Vertex AI Gemini ──────────────────────────────────────
+            http_client = _build_vertex_ai_http_client(resolved_vertex)
             self.client = OpenAI(
                 api_key="vertex-ai",  # placeholder, bị override bởi httpx auth
                 base_url=self.base_url,
                 http_client=http_client,
                 max_retries=0,
             )
+
+        elif base_url and "anthropic.com" in (base_url or ""):
+            # ── Mode 3: Anthropic API key (OpenAI-compat) ─────────────────────
+            self._is_anthropic = True
+            resolved_key = api_key or getattr(Config, "BOOST_API_KEY", None)
+            if not resolved_key:
+                raise ValueError("BOOST_API_KEY not set for Anthropic endpoint")
+            self.client = OpenAI(
+                api_key=resolved_key,
+                base_url=self.base_url,
+                default_headers={"anthropic-version": "2023-06-01"},
+                timeout=1800,
+                max_retries=0,
+            )
+
         else:
-            # Standard mode: AI Studio / OpenAI / Groq / Ollama
+            # ── Mode 4: Standard OpenAI / AI Studio / Groq / Ollama ──────────
             self.api_key = api_key or Config.LLM_API_KEY
             if not self.api_key:
                 raise ValueError("LLM_API_KEY 未配置")
             self.client = OpenAI(
                 api_key=self.api_key,
                 base_url=self.base_url,
-                timeout=1800,   # 30 min — sufficient for large model responses
-                max_retries=0,  # disable built-in retry; caller handles rate limiting
+                timeout=1800,
+                max_retries=0,
             )
-    
+
+    # ─── AnthropicVertex chat ─────────────────────────────────────────────────
+
+    def _chat_anthropic_vertex(
+        self,
+        messages: List[Dict[str, str]],
+        temperature: float,
+        max_tokens: int,
+    ) -> str:
+        """Gọi Claude trên Vertex AI qua anthropic SDK."""
+        # Tách system message ra (Anthropic API yêu cầu riêng)
+        system_content = ""
+        user_messages = []
+        for msg in messages:
+            if msg["role"] == "system":
+                system_content = msg["content"]
+            else:
+                user_messages.append({"role": msg["role"], "content": msg["content"]})
+
+        if not user_messages:
+            user_messages = [{"role": "user", "content": "(no content)"}]
+
+        max_retries = 5
+        base_delay  = 15
+        for attempt in range(max_retries):
+            try:
+                _acquire_global_slot()
+                kwargs: Dict[str, Any] = {
+                    "model":       self.model,
+                    "max_tokens":  max_tokens,
+                    "temperature": temperature,
+                    "messages":    user_messages,
+                }
+                if system_content:
+                    kwargs["system"] = system_content
+
+                response = self._av_client.messages.create(**kwargs)
+                break
+            except Exception as e:
+                is_rate_limit = ("429" in str(e) or
+                                 "rate" in str(e).lower() or
+                                 "quota" in str(e).lower() or
+                                 "overloaded" in str(e).lower())
+                if is_rate_limit and attempt < max_retries - 1:
+                    delay = base_delay * (2 ** attempt)
+                    _logger.warning(
+                        f"[AnthropicVertex] Rate limit (attempt {attempt+1}/{max_retries}), "
+                        f"waiting {delay}s..."
+                    )
+                    time.sleep(delay)
+                else:
+                    raise
+
+        # Anthropic response: response.content[0].text
+        if response.content and hasattr(response.content[0], "text"):
+            return response.content[0].text or ""
+        return ""
+
+    # ─── Public interface ─────────────────────────────────────────────────────
+
     def chat(
         self,
         messages: List[Dict[str, str]],
         temperature: float = 0.7,
         max_tokens: int = 4096,
-        response_format: Optional[Dict] = None
+        response_format: Optional[Dict] = None,
+        strip_think: bool = True,
     ) -> str:
-        """
-        发送聊天请求
-        
-        Args:
-            messages: 消息列表
-            temperature: 温度参数
-            max_tokens: 最大token数
-            response_format: 响应格式（如JSON模式）
-            
-        Returns:
-            模型响应文本
-        """
+        """发送聊天请求"""
+        if self._is_anthropic_vertex:
+            return self._chat_anthropic_vertex(messages, temperature, max_tokens)
+
         kwargs = {
-            "model": self.model,
-            "messages": messages,
+            "model":       self.model,
+            "messages":    messages,
             "temperature": temperature,
-            "max_tokens": max_tokens,
+            "max_tokens":  max_tokens,
         }
-        
         if response_format:
             kwargs["response_format"] = response_format
-        
-        # Retry with exponential backoff on 429 rate limit
+
         max_retries = 5
-        base_delay  = 15  # seconds — generous initial wait for Vertex AI TPM limits
+        base_delay  = 15
         for attempt in range(max_retries):
             try:
-                _acquire_global_slot()  # enforce global RPM cap across all callers
+                _acquire_global_slot()
                 response = self.client.chat.completions.create(**kwargs)
                 break
             except Exception as e:
@@ -155,7 +264,7 @@ class LLMClient:
                                  "quota" in str(e).lower() or
                                  "resource_exhausted" in str(e).lower())
                 if is_rate_limit and attempt < max_retries - 1:
-                    delay = base_delay * (2 ** attempt)  # 15, 30, 60, 120 s
+                    delay = base_delay * (2 ** attempt)
                     _logger.warning(
                         f"Rate limit hit (attempt {attempt+1}/{max_retries}). "
                         f"Waiting {delay}s before retry..."
@@ -166,41 +275,31 @@ class LLMClient:
 
         choice = response.choices[0] if response.choices else None
         content = (choice.message.content if choice and choice.message else None) or ""
-        # 部分模型（如MiniMax M2.5）会在content中包含<think>思考内容，需要移除
-        content = re.sub(r'<think>[\s\S]*?</think>', '', content).strip()
+        if strip_think:
+            content = re.sub(r'<think>[\s\S]*?</think>', '', content).strip()
         return content
-    
+
     def chat_json(
         self,
         messages: List[Dict[str, str]],
         temperature: float = 0.3,
         max_tokens: int = 4096
     ) -> Dict[str, Any]:
-        """
-        发送聊天请求并返回JSON
-        
-        Args:
-            messages: 消息列表
-            temperature: 温度参数
-            max_tokens: 最大token数
-            
-        Returns:
-            解析后的JSON对象
-        """
+        """发送聊天请求并返回JSON"""
+        # Anthropic (both Vertex and API-key mode) enforces JSON via prompt, not response_format
+        fmt = None if self._is_anthropic else {"type": "json_object"}
         response = self.chat(
             messages=messages,
             temperature=temperature,
             max_tokens=max_tokens,
-            response_format={"type": "json_object"}
+            response_format=fmt,
         )
-        # 清理markdown代码块标记
-        cleaned_response = response.strip()
-        cleaned_response = re.sub(r'^```(?:json)?\s*\n?', '', cleaned_response, flags=re.IGNORECASE)
-        cleaned_response = re.sub(r'\n?```\s*$', '', cleaned_response)
-        cleaned_response = cleaned_response.strip()
+        cleaned = response.strip()
+        cleaned = re.sub(r'^```(?:json)?\s*\n?', '', cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r'\n?```\s*$', '', cleaned)
+        cleaned = cleaned.strip()
 
         try:
-            return json.loads(cleaned_response)
+            return json.loads(cleaned)
         except json.JSONDecodeError:
-            raise ValueError(f"LLM返回的JSON格式无效: {cleaned_response}")
-
+            raise ValueError(f"LLM返回的JSON格式无效: {cleaned}")

@@ -575,6 +575,7 @@ def generate_report():
         session_id        = data.get("session_id", "")
         expert_findings   = data.get("expert_findings", [])
         attacker_findings = data.get("attacker_findings", [])
+        semantic_findings = data.get("semantic_findings", [])
         contract_summary  = data.get("contract_summary", "")
         graph_id          = data.get("graph_id")
 
@@ -591,6 +592,7 @@ def generate_report():
             attacker_findings=attacker_findings,
             contract_summary=contract_summary,
             graph_id=graph_id,
+            semantic_findings=semantic_findings,
         )
 
         return jsonify({"success": True, "data": {"task_id": task_id}})

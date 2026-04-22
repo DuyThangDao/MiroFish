@@ -205,6 +205,7 @@ class CyberSessionState:
 
     expert_findings:   List[Dict[str, Any]] = field(default_factory=list)   # ExpertFinding serialized
     attacker_findings: List[Dict[str, Any]] = field(default_factory=list)  # AttackerFinding serialized
+    semantic_findings: List[Dict[str, Any]] = field(default_factory=list)  # SemanticFinding serialized
     consensus_vulns:   List[Dict[str, Any]] = field(default_factory=list)   # ConsensusVulnerability serialized
     gap_registry:      List[Dict[str, Any]] = field(default_factory=list)   # GapDeclaration serialized
 

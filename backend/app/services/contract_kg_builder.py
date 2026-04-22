@@ -22,8 +22,12 @@ import uuid
 from typing import Callable, Dict, List, Any, Optional
 
 
-def _zep_retry(fn: Callable, max_attempts: int = 8):
-    """Retry a Zep API call on 429 / 403-episode-limit errors with exponential backoff."""
+def _zep_retry(fn: Callable, max_attempts: int = 8, retry_episode_limit: bool = True):
+    """Retry a Zep API call on 429 / 403-episode-limit errors with exponential backoff.
+
+    retry_episode_limit=False: fail immediately on monthly quota exceeded
+    (useful for episode batch upload — caller handles graceful degradation).
+    """
     import logging as _logging
     _log = _logging.getLogger("mirofish.contract_kg")
     for attempt in range(max_attempts):
@@ -33,6 +37,8 @@ def _zep_retry(fn: Callable, max_attempts: int = 8):
             s = str(e)
             is_rate = ("429" in s or "rate limit" in s.lower())
             is_episode_limit = ("403" in s and "episode" in s.lower())
+            if is_episode_limit and not retry_episode_limit:
+                raise  # fail fast — caller will degrade gracefully
             if (is_rate or is_episode_limit) and attempt < max_attempts - 1:
                 m = re.search(r"retry-after['\": ]+(\d+)", s.lower())
                 wait = int(m.group(1)) + 1 if m else min(15 * (2 ** attempt), 120)
@@ -173,6 +179,239 @@ class ContractKGBuilder:
         thread.start()
         return task_id
 
+    # ─── Context completeness helpers (Tầng 1 + Tầng 3) ─────────────────────────
+
+    @staticmethod
+    def _extract_function_snippets(
+        source_code: str, func_names: list, max_body_lines: int = 3, max_line_chars: int = 90
+    ) -> dict:
+        """
+        Tầng 1: extract first N statements from each function body.
+        Returns {func_name: "stmt1 | stmt2 | stmt3"}.
+
+        Agents see actual implementation → can verify safety patterns (SafeMath,
+        require checks, CEI order) without hallucinating.
+        """
+        src_lines = source_code.split('\n')
+        snippets: dict = {}
+
+        for name in func_names:
+            func_re = re.compile(rf'\bfunction\s+{re.escape(name)}\b')
+            # Find line where function is defined
+            start = next(
+                (i for i, ln in enumerate(src_lines) if func_re.search(ln)), None
+            )
+            if start is None:
+                continue
+
+            # Scan forward to opening brace (may be on same or next few lines)
+            brace_line = start
+            found_brace = False
+            for j in range(start, min(start + 6, len(src_lines))):
+                if '{' in src_lines[j]:
+                    brace_line = j
+                    found_brace = True
+                    break
+            if not found_brace:
+                continue
+
+            # Collect meaningful body lines
+            body: list = []
+            for ln in src_lines[brace_line + 1: brace_line + 18]:
+                s = ln.strip()
+                if not s or s.startswith('//') or s.startswith('*'):
+                    continue
+                if s == '}':
+                    break
+                body.append(s[:max_line_chars])
+                if len(body) >= max_body_lines:
+                    break
+
+            if body:
+                snippets[name] = ' | '.join(body)
+
+        return snippets
+
+    @staticmethod
+    def _detect_safety_patterns(source_code: str) -> list:
+        """
+        Tầng 3: detect safety/protection mechanisms in Solidity source.
+        Returns list of human-readable signal strings for context_summary.
+
+        Provides explicit ground-truth context so agents don't need to infer
+        whether SafeMath, reentrancy guards, or access control are present.
+        """
+        signals: list = []
+
+        # SafeMath — most common FP trigger for SWC-101
+        # Handle both: 'using SafeMath for uint256' and 'using SafeMath for *'
+        safemath_types = re.findall(r'using\s+SafeMath\s+for\s+(\w+|\*)', source_code)
+        if safemath_types:
+            types_str = "all types" if "*" in safemath_types else ", ".join(set(safemath_types))
+            signals.append(
+                f"SafeMath applied to {types_str} — "
+                f"arithmetic overflow/underflow protection ACTIVE; SWC-101 likely mitigated"
+            )
+        elif re.search(r'\blibrary\s+SafeMath\b', source_code):
+            signals.append(
+                "SafeMath library defined — "
+                "check for 'using SafeMath for' before reporting SWC-101"
+            )
+
+        # Solidity 0.8+ built-in overflow protection
+        m = re.search(r'pragma\s+solidity\s+\^?([\d.]+)', source_code)
+        if m:
+            parts = m.group(1).split('.')
+            major, minor = int(parts[0]), int(parts[1]) if len(parts) > 1 else 0
+            if major == 0 and minor < 8:
+                signals.append(
+                    f"Compiler ^{m.group(1)}: pre-0.8 — NO built-in overflow protection; "
+                    f"SafeMath or manual checks required for safe arithmetic"
+                )
+            else:
+                signals.append(
+                    f"Compiler ^{m.group(1)}: 0.8+ — built-in overflow/underflow protection "
+                    f"(arithmetic REVERTS on overflow; SafeMath redundant but harmless)"
+                )
+
+        # ReentrancyGuard
+        if re.search(r'\bnonReentrant\b', source_code):
+            nr_funcs = re.findall(
+                r'function\s+(\w+)[^{]*\bnonReentrant\b', source_code
+            )
+            funcs_str = f" on: {', '.join(nr_funcs)}" if nr_funcs else ""
+            signals.append(
+                f"nonReentrant modifier present{funcs_str} — "
+                f"reentrancy (SWC-107) mitigated on these functions"
+            )
+
+        # tx.origin
+        if re.search(r'\btx\.origin\b', source_code):
+            tx_funcs = re.findall(
+                r'function\s+(\w+)[^{]*\{[^}]*\btx\.origin\b', source_code, re.DOTALL
+            )
+            funcs_str = f" in: {', '.join(tx_funcs[:3])}" if tx_funcs else ""
+            signals.append(
+                f"tx.origin used for authentication{funcs_str} — SWC-115 confirmed"
+            )
+
+        # Access control modifiers
+        only_mods = list(set(re.findall(r'\bmodifier\s+(only\w+)\b', source_code)))
+        if only_mods:
+            signals.append(f"Access control modifiers defined: {', '.join(only_mods)}")
+
+        # require() count as proxy for input validation density
+        req_count = len(re.findall(r'\brequire\s*\(', source_code))
+        if req_count:
+            signals.append(f"Input validation: {req_count} require() checks in source")
+
+        return signals
+
+    @staticmethod
+    def _extract_events_and_rules(source_code: str) -> str:
+        """
+        Extract events (state-transition signals) and require() messages (business rules)
+        from Solidity source. Injected into context_summary AFTER parsing — never touches
+        the KG builder's input so function names remain uncontaminated.
+        """
+        lines: List[str] = []
+
+        # Events — tell agents what state transitions the protocol considers significant
+        event_re = re.compile(
+            r'^\s*event\s+(\w+)\s*\(([^)]*)\)\s*;',
+            re.MULTILINE | re.DOTALL,
+        )
+        events = []
+        for m in event_re.finditer(source_code):
+            params = re.sub(r'\s+', ' ', m.group(2).replace('\n', ' ')).strip()
+            events.append(f"{m.group(1)}({params})")
+        if events:
+            lines.append("PROTOCOL EVENTS (state-transition signals):")
+            for ev in events[:20]:
+                lines.append(f"  event {ev}")
+            lines.append("")
+
+        # require() messages — plain-English business rules embedded in code
+        req_re = re.compile(
+            r'require\s*\([^,)]+,\s*["\']([^"\']{4,80})["\']',
+            re.MULTILINE,
+        )
+        msgs = list(dict.fromkeys(
+            m.group(1).strip()
+            for m in req_re.finditer(source_code)
+            if len(m.group(1).strip()) > 5
+        ))
+        if msgs:
+            lines.append("BUSINESS RULES (require messages):")
+            for msg in msgs[:25]:
+                lines.append(f'  "{msg}"')
+            lines.append("")
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def _build_call_graph_summary(source_code: str, known_functions: List[str]) -> str:
+        """
+        Build a per-function call-dependency summary using known_functions from the parsed
+        entity. Only tracks calls to known functions — no hallucination from comment text.
+        Falls back to regex extraction if entity parsing yielded no functions.
+        Marks low-level / interface calls as [EXTERNAL].
+        """
+        if not known_functions:
+            # Regex fallback: extract from source directly (only real function names)
+            known_functions = list(set(re.findall(
+                r'\bfunction\s+([a-zA-Z_]\w*)\s*\(', source_code
+            )))
+        if not known_functions:
+            return ""
+
+        fn_set = set(known_functions)
+        LOW_LEVEL = {"call", "delegatecall", "staticcall", "transfer", "send"}
+
+        fn_body_re = re.compile(
+            r'function\s+(\w+)\s*\([^)]*\)[^{]*\{',
+            re.MULTILINE,
+        )
+        call_re = re.compile(r'\b(\w+)\s*\(')
+
+        matches = list(fn_body_re.finditer(source_code))
+        if not matches:
+            return ""
+
+        lines: List[str] = ["CALL GRAPH:"]
+        for i, m in enumerate(matches):
+            fn_name = m.group(1)
+            start = m.end()
+            end = matches[i + 1].start() if i + 1 < len(matches) else len(source_code)
+            body = source_code[start:end]
+
+            called: set = set()
+            ext_markers: set = set()
+
+            for cm in call_re.finditer(body):
+                callee = cm.group(1)
+                if callee in fn_set and callee != fn_name:
+                    called.add(callee)
+                if callee in LOW_LEVEL:
+                    ext_markers.add(callee)
+
+            if re.search(r'\.(call|delegatecall|staticcall)\s*[({]', body):
+                ext_markers.add("low-level-call")
+            if re.search(r'I[A-Z]\w+\s*\(\s*\w+\s*\)\.', body):
+                ext_markers.add("interface-call")
+
+            parts: List[str] = []
+            if called:
+                parts.append("calls: " + ", ".join(sorted(called)))
+            if ext_markers:
+                parts.append("[EXTERNAL: " + ", ".join(sorted(ext_markers)) + "]")
+
+            desc = " | ".join(parts) if parts else "(leaf)"
+            lines.append(f"  {fn_name}() → {desc}")
+
+        lines.append("")
+        return "\n".join(lines)
+
     # ─── Context summary for agent injection ─────────────────────────────────
 
     def build_context_summary(self, entity: ContractEntity) -> str:
@@ -198,6 +437,36 @@ class ContractKGBuilder:
                 if f.swc_candidates:
                     lines.append(f"    Static SWC candidates: {', '.join(f.swc_candidates)}")
             lines.append("")
+            # Tầng 1: inject function body snippets for public/external functions
+            if entity.source_code:
+                snippets = ContractKGBuilder._extract_function_snippets(
+                    entity.source_code, [f.name for f in public_funcs[:20]]
+                )
+                if snippets:
+                    lines.append("FUNCTION IMPLEMENTATIONS:")
+                    for fname, snippet in snippets.items():
+                        lines.append(f"  {fname}(): {snippet}")
+                    lines.append("")
+        elif entity.source_code:
+            # RC-1 (2nd layer): static regex fallback when LLM extraction missed functions.
+            # Gives agents a ground-truth function list so they don't hallucinate.
+            static_funcs = sorted(set(re.findall(
+                r'\bfunction\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(',
+                entity.source_code
+            )))
+            if static_funcs:
+                # Tầng 1: show snippets instead of bare names for richer context
+                snippets = ContractKGBuilder._extract_function_snippets(
+                    entity.source_code, static_funcs[:20]
+                )
+                if snippets:
+                    lines.append("FUNCTION IMPLEMENTATIONS:")
+                    for fname, snippet in snippets.items():
+                        lines.append(f"  {fname}(): {snippet}")
+                else:
+                    lines.append("DEFINED FUNCTIONS:")
+                    lines.append(f"  {', '.join(static_funcs)}")
+                lines.append("")
 
         # Critical state variables
         critical_vars = [v for v in entity.state_vars if v.is_critical]
@@ -263,9 +532,30 @@ class ContractKGBuilder:
         if entity.external_dependencies:
             lines.append(f"EXTERNAL DEPENDENCIES: {', '.join(entity.external_dependencies[:10])}")
 
-        lines.append("")
+        # Tầng 3: safety patterns — explicit ground-truth about protections present
+        if entity.source_code:
+            safety = ContractKGBuilder._detect_safety_patterns(entity.source_code)
+            if safety:
+                lines.append("SAFETY PATTERNS DETECTED:")
+                for s in safety:
+                    lines.append(f"  • {s}")
+                lines.append("")
+
         lines.append("NOTE: All agents must reference function names and state variables above when reporting findings.")
         lines.append("      Cite specific evidence from this context or contract source code.")
+
+        # Inject events + business rules + call graph from source (after parse — no contamination)
+        if entity.source_code:
+            all_fn_names = [f.name for f in entity.functions]
+            events_and_rules = ContractKGBuilder._extract_events_and_rules(entity.source_code)
+            if events_and_rules:
+                lines.append("")
+                lines.append(events_and_rules)
+            call_graph = ContractKGBuilder._build_call_graph_summary(
+                entity.source_code, all_fn_names
+            )
+            if call_graph:
+                lines.append(call_graph)
 
         return "\n".join(lines)
 
@@ -353,14 +643,26 @@ class ContractKGBuilder:
         chunks = self._build_episode_chunks(entity)
         logger.info(f"Sending {len(chunks)} episode chunks to Zep for {entity.contract_id}")
 
-        episode_uuids = _zep_retry(lambda: self.graph_service.add_text_batches(
-            graph_id, chunks, batch_size=3,
-            progress_callback=lambda msg, _: logger.debug(msg)
-        ))
-        self.graph_service._wait_for_episodes(
-            episode_uuids,
-            progress_callback=lambda msg, _: logger.debug(msg)
-        )
+        try:
+            episode_uuids = _zep_retry(
+                lambda: self.graph_service.add_text_batches(
+                    graph_id, chunks, batch_size=3,
+                    progress_callback=lambda msg, _: logger.debug(msg)
+                ),
+                retry_episode_limit=False,  # fail fast so caller can degrade gracefully
+            )
+            self.graph_service._wait_for_episodes(
+                episode_uuids,
+                progress_callback=lambda msg, _: logger.debug(msg)
+            )
+        except Exception as e:
+            if "403" in str(e) and "episode" in str(e).lower():
+                logger.warning(
+                    f"Zep monthly episode quota exceeded — continuing without KG episodes "
+                    f"for {entity.contract_id}. context_summary will use local parse only."
+                )
+            else:
+                raise
         return graph_id
 
     def _build_episode_chunks(self, entity: ContractEntity) -> List[str]:

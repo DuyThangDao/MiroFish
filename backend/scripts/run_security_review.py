@@ -514,7 +514,7 @@ def run_review(
     # ── Consensus engine ──────────────────────────────────────────────────────
     logger.info("\n[Step 3/4] Running consensus engine (3-layer scoring)...")
     engine = ConsensusEngine()
-    consensus_vulns = engine.run(
+    consensus_vulns, _ = engine.run(
         session_state.expert_findings,
         session_state.attacker_findings,
     )

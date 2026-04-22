@@ -510,6 +510,7 @@ class CyberOasisEnvBuilder:
         phase: str,
         round_num: int,
         gap_context: str = "",
+        **kwargs,  # absorb contract_audit-specific params (phase_c_review_list)
     ) -> str:
         """
         Build system instruction injected at the start of each round.

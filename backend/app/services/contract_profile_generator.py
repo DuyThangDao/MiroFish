@@ -394,6 +394,13 @@ CONTRACT_ATTACKER_PROFILES: Dict[str, Dict[str, Any]] = {
             "→ DoS via griefing (e.g., front-run to reset a time-dependent calculation).\n"
             "6. UNEXPECTED ETHER: Can force-sending ETH (via selfdestruct) break assumptions "
             "that rely on address(this).balance == tracked_balance?\n\n"
+            "When you find a business-logic vulnerability with NO matching SWC ID, use SEMANTIC_FINDING:\n"
+            "SEMANTIC_FINDING: <title>\n"
+            "CATEGORY: <state_machine_bug|incorrect_accounting|incentive_misalignment|other>\n"
+            "SEVERITY: <critical|high|medium|low>\n"
+            "FUNCTION: <affected_function()>\n"
+            "EVIDENCE: <specific code pattern or economic invariant violated>\n"
+            "ATTACK_PATH: <step-by-step scenario>\n\n"
             "Evaluate the contract for these logic-level vulnerabilities."
         ),
     },
@@ -564,6 +571,9 @@ class ContractExpertProfileGenerator:
             user_id += 1
         return profiles
 
+    # Domains that should also report semantic/business-logic findings
+    _SEMANTIC_DOMAINS = {"defi", "smart_contract_economics", "governance"}
+
     def _build_tier1_system_prompt(
         self,
         domain_key: str,
@@ -575,6 +585,19 @@ class ContractExpertProfileGenerator:
         swc_context = self.swc.get_swc_context_for_agent(domain_key, persona)
         persona_instruction = domain_cfg["persona_prompts"].get(persona, "")
         graph_ref = f"\nKnowledge Graph ID: {graph_id}" if graph_id else ""
+
+        semantic_block = ""
+        if domain_key in self._SEMANTIC_DOMAINS:
+            semantic_block = """
+SEMANTIC_FINDING: <concise title — for business-logic / semantic bugs with no SWC ID>
+CATEGORY: <price_oracle|flash_loan|governance_attack|incorrect_accounting|state_machine_bug|incentive_misalignment|reentrancy_logic|other>
+SEVERITY: <critical|high|medium|low>
+FUNCTION: <affected_function()>
+EVIDENCE: <specific code pattern or economic invariant violated>
+ATTACK_PATH: <step-by-step scenario>
+
+Use SEMANTIC_FINDING (instead of FINDING) when the vulnerability is a design/logic flaw with no matching SWC ID.
+"""
 
         return f"""You are a smart contract security expert specializing in {domain_cfg['display_name']}.
 Role: {persona.replace('_', ' ').upper()}
@@ -599,7 +622,7 @@ DESCRIPTION: <detailed explanation of the vulnerability>
 PATCH: <concrete remediation recommendation>
 ANALYZED: <function or property you evaluated>
 GAP: <what you cannot verify from available information, or "None — fully assessed">
-
+{semantic_block}
 Rules:
 - Every finding MUST reference a specific function name from the contract
 - Evidence must be a code pattern or KG-derived fact, not a generic statement
@@ -646,7 +669,7 @@ You have read all expert findings. Now:
    Reason: <why this is not exploitable or not worth pursuing>
 
 3. ATTACKER_ADD_PATH: New attack vectors the experts missed?
-   Format:
+   Format for SWC-based bugs:
    [ATTACKER_ADD_PATH]
    FINDING: <new finding title>
    SWC: <SWC-ID>
@@ -654,6 +677,15 @@ You have read all expert findings. Now:
    FUNCTION: <affected function>
    DESCRIPTION: <the attack path>
    PATCH: <how to fix>
+
+   For business-logic / semantic bugs with no SWC ID, use SEMANTIC_FINDING instead:
+   [ATTACKER_ADD_PATH]
+   SEMANTIC_FINDING: <new finding title>
+   CATEGORY: <price_oracle|flash_loan|governance_attack|incorrect_accounting|state_machine_bug|incentive_misalignment|reentrancy_logic|other>
+   SEVERITY: <critical|high|medium|low>
+   FUNCTION: <affected function>
+   EVIDENCE: <specific code pattern or economic invariant violated>
+   ATTACK_PATH: <step-by-step scenario>
 
 4. ATTACKER_ESCALATE or ATTACKER_DOWNGRADE: Adjust severity if you disagree.
 

@@ -1,19 +1,33 @@
 """
 Consensus Engine — Multi-Expert Panel (Direction B)
 
-3-layer weighted consensus scoring:
-  Layer 1 — Intra-group agreement   weight: 0.30
-  Layer 2 — Cross-group validation  weight: 0.45  (highest — prevents group bias)
-  Layer 3 — Attacker corroboration  weight: 0.25
+Two-stage scoring — Claim → Verify:
 
-Final confidence = L1×0.30 + L2×0.45 + L3×0.25
-Filter: confidence < 0.35 → discard (likely false positive)
+  Stage 1 (Expert hypothesis):
+    expert_confidence = L1×0.40 + L2×0.60
+      L1 — Intra-group agreement  weight: 0.40
+      L2 — Cross-group validation weight: 0.60  (highest — prevents group bias)
+
+  Stage 2 (Attacker verification gate — multiplicative):
+    gate = 1.00  if net attacker confirms  > dismisses   (verified)
+    gate = 0.75  if no attacker reviewed                 (unverified — 25% penalty)
+    gate = 0.50  if net attacker dismisses > confirms    (rejected)
+
+  final_confidence = expert_confidence × gate
+  Filter: confidence < 0.50 → exclude from consensus_vulns
+
+Rationale: expert agreement alone cannot confirm a finding. Cross-domain consensus
+amplifies group hallucinations (many agents independently reaching the same wrong
+conclusion). The attacker gate ensures expert findings are hypotheses until Phase C
+independently verifies exploitability. Unreviewed findings are penalised so that
+hallucinations that slip past Phase C don't auto-confirm via expert majority alone.
+
+Safety net: findings below threshold still appear in unvalidated_swc_gaps (via
+enforce_swc_coverage) — nothing is silently discarded.
 
 Enhancements:
   B-dynamic — Semantic anchor clustering: findings sharing a control/host keyword
               in their title are clustered together even if title tokens differ.
-              Anchors derived dynamically from SecurityControls fields + affected_assets
-              in findings — no hardcoding, works across all scenarios.
   D         — Post-consensus control coverage enforcement: after scoring, any
               standard security control absent from consensus list is collected
               from raw findings into an `unvalidated_control_gaps` section.
@@ -55,14 +69,35 @@ SWC_ANCHOR_KEYWORDS: Dict[str, List[str]] = {
     "signature":      ["signature", "ecrecover", "replay", "SWC-121", "SWC-122"],
 }
 
+# Semantic category anchors for S-category (Web3Bugs) findings.
+SEMANTIC_ANCHOR_KEYWORDS: Dict[str, List[str]] = {
+    "price_oracle":          ["oracle", "price manipulation", "spot price", "TWAP", "stale price", "Chainlink"],
+    "flash_loan":            ["flash loan", "flashloan", "flash attack", "FLASH_LOAN"],
+    "governance_attack":     ["governance", "voting", "proposal", "vote manipulation", "quorum"],
+    "incorrect_accounting":  ["accounting", "balance", "share", "reward", "rounding", "precision", "incorrect"],
+    "state_machine_bug":     ["state machine", "state transition", "invariant", "locked", "stuck"],
+    "incentive_misalignment":["incentive", "misalignment", "griefing", "sandwich", "MEV", "economic"],
+    "reentrancy_logic":      ["reentrancy", "re-entrancy", "reentrant", "callback", "cross-contract"],
+    "other":                 [],
+}
+
 # ─── Weights ──────────────────────────────────────────────────────────────────
-WEIGHT_INTRA  = 0.30   # Layer 1
-WEIGHT_CROSS  = 0.45   # Layer 2
-WEIGHT_ATTACK = 0.25   # Layer 3
+# Stage 1: expert hypothesis strength
+WEIGHT_INTRA  = 0.40   # L1 — intra-group agreement
+WEIGHT_CROSS  = 0.60   # L2 — cross-domain validation
 
-MIN_CONFIDENCE = 0.35  # Below this → discard as likely FP
+# Stage 2: attacker verification gate (multiplicative)
+# NEUTRAL = 1.0: unreviewed findings keep full expert_confidence
+#   (no neutral penalty — avoids over-filtering when Phase C has low attacker activity)
+# DISMISS = 0.40: actively-dismissed findings almost always fall below MIN_CONFIDENCE
+#   (0.40 * max_exp_conf=1.0 = 0.40 < 0.50 threshold)
+ATTACKER_GATE_CONFIRM  = 1.00   # confirmed by attacker  → no change
+ATTACKER_GATE_NEUTRAL  = 1.00   # not reviewed           → no penalty
+ATTACKER_GATE_DISMISS  = 0.40   # dismissed by attacker  → heavy penalty
 
-# Attacker action → confidence delta (applied on top of layer scores)
+MIN_CONFIDENCE = 0.35  # Below this → exclude from consensus_vulns (safety net: goes to gaps)
+
+# Attacker action → delta used only for attacker_score metadata field
 ATTACKER_DELTA = {
     "ATTACKER_CONFIRM":   +0.15,
     "ATTACKER_DISMISS":   -0.20,
@@ -93,7 +128,8 @@ class ConsensusEngine:
         attacker_findings_raw: List[Dict[str, Any]],
         domain_group_count: int = 5,
         mode: str = "network_security",
-    ) -> List[ConsensusVulnerability]:
+        semantic_findings_raw: Optional[List[Dict[str, Any]]] = None,
+    ) -> Tuple[List[ConsensusVulnerability], List[Dict[str, Any]]]:
         """
         Run full consensus pipeline.
 
@@ -102,9 +138,12 @@ class ConsensusEngine:
             attacker_findings_raw: serialized AttackerFinding dicts từ session
             domain_group_count: số domain groups (default 5; use 7 for contract_audit)
             mode: "network_security" | "contract_audit"
+            semantic_findings_raw: serialized SemanticFinding dicts (optional)
 
         Returns:
-            Sorted list ConsensusVulnerability (highest confidence first)
+            Tuple of:
+              - Sorted list ConsensusVulnerability (highest confidence first)
+              - List of semantic consensus dicts (may be empty for network_security mode)
         """
         # ── Step 1: Cluster expert findings ──────────────────────────────────
         clusters = self._cluster_findings(expert_findings_raw, mode=mode)
@@ -130,12 +169,20 @@ class ConsensusEngine:
         vulns = [v for v in vulns if v.confidence_score >= MIN_CONFIDENCE]
         vulns.sort(key=lambda v: (v.confidence_score, SEVERITY_RANK.get(v.severity, 0)), reverse=True)
 
+        # ── Step 7: Semantic consensus (contract_audit only) ─────────────────
+        semantic_results: List[Dict[str, Any]] = []
+        if mode == "contract_audit" and semantic_findings_raw:
+            semantic_results = self._run_semantic_consensus(
+                semantic_findings_raw, domain_group_count
+            )
+
         logger.info(
             f"Consensus: {len(expert_findings_raw)} expert findings + "
             f"{len(attacker_findings_raw)} attacker findings → "
-            f"{len(vulns)} consensus vulnerabilities"
+            f"{len(vulns)} consensus vulnerabilities, "
+            f"{len(semantic_results)} semantic consensus findings"
         )
-        return vulns
+        return vulns, semantic_results
 
     # ─── Clustering ───────────────────────────────────────────────────────────
 
@@ -314,12 +361,28 @@ class ConsensusEngine:
 
         attacker_score = self._calc_attacker_score(all_corr)
 
-        # ── Final weighted score ──────────────────────────────────────────────
-        confidence = (
-            intra_score  * WEIGHT_INTRA
-            + cross_score  * WEIGHT_CROSS
-            + attacker_score * WEIGHT_ATTACK
-        )
+        # ── Stage 1: Expert hypothesis strength ──────────────────────────────
+        expert_confidence = intra_score * WEIGHT_INTRA + cross_score * WEIGHT_CROSS
+
+        # ── Stage 2: Attacker verification gate (multiplicative) ─────────────
+        # Expert agreement = hypothesis. Attacker review = verification.
+        # Without attacker review, confidence is penalised so that cross-domain
+        # hallucinations (many groups independently wrong) cannot auto-confirm.
+        net_confirms  = sum(1 for c in all_corr
+                            if c.get("action") in {"ATTACKER_CONFIRM", "ATTACKER_ESCALATE"})
+        net_dismisses = sum(1 for c in all_corr
+                            if c.get("action") in {"ATTACKER_DISMISS", "ATTACKER_DOWNGRADE"})
+
+        if not all_corr:
+            gate = ATTACKER_GATE_NEUTRAL   # no Phase C review → 25% penalty
+        elif net_confirms > net_dismisses:
+            gate = ATTACKER_GATE_CONFIRM   # attackers verified exploitability
+        elif net_dismisses > net_confirms:
+            gate = ATTACKER_GATE_DISMISS   # attackers rejected finding
+        else:
+            gate = ATTACKER_GATE_NEUTRAL   # tied → treat as unreviewed
+
+        confidence = expert_confidence * gate
 
         # ── Severity consensus ────────────────────────────────────────────────
         severity = self._consensus_severity(cluster, all_corr)
@@ -378,7 +441,7 @@ class ConsensusEngine:
             mitre_techniques=all_mitre,
             source_finding_ids=all_source_ids,
             attacker_finding_ids=[],
-            needs_review=(MIN_CONFIDENCE <= confidence < 0.50),
+            needs_review=(len(all_corr) == 0),
         )
 
     def _calc_attacker_score(self, corroborations: List[Dict[str, Any]]) -> float:
@@ -442,7 +505,7 @@ class ConsensusEngine:
         agreed_by = af.get("agreed_by", [])
         # Layer 3 score: proportional to agreement (2 → 0.70, 3 → 0.85, 4+ → 0.95)
         attacker_score = min(0.95, 0.60 + len(agreed_by) * 0.10)
-        confidence = attacker_score * WEIGHT_ATTACK + 0.50 * WEIGHT_CROSS + 0.0 * WEIGHT_INTRA
+        confidence = attacker_score
 
         if confidence < MIN_CONFIDENCE:
             return None
@@ -470,6 +533,121 @@ class ConsensusEngine:
             is_attacker_only=True,
             needs_review=True,
         )
+
+    # ─── Semantic consensus (Web3Bugs S-category) ────────────────────────────
+
+    @staticmethod
+    def _shares_semantic_anchor(f1: Dict[str, Any], f2: Dict[str, Any]) -> bool:
+        """True if both semantic findings share the same category or a title keyword anchor."""
+        if f1.get("category") == f2.get("category") and f1.get("category") != "other":
+            return True
+        t1 = (f1.get("title", "") + " " + f1.get("evidence", "")).lower()
+        t2 = (f2.get("title", "") + " " + f2.get("evidence", "")).lower()
+        for cat, keywords in SEMANTIC_ANCHOR_KEYWORDS.items():
+            if cat == "other":
+                continue
+            if any(kw.lower() in t1 and kw.lower() in t2 for kw in keywords):
+                return True
+        return False
+
+    def _cluster_semantic_findings(
+        self, findings: List[Dict[str, Any]]
+    ) -> List[List[Dict[str, Any]]]:
+        """Cluster semantic findings by category and keyword overlap."""
+        clusters: List[List[Dict]] = []
+        assigned: Set[int] = set()
+
+        for i, f in enumerate(findings):
+            if i in assigned:
+                continue
+            cluster = [f]
+            assigned.add(i)
+            for j, g in enumerate(findings):
+                if j <= i or j in assigned:
+                    continue
+                tokens_i = self._title_tokens(f.get("title", ""))
+                tokens_j = self._title_tokens(g.get("title", ""))
+                if len(tokens_i & tokens_j) >= 2 or self._shares_semantic_anchor(f, g):
+                    cluster.append(g)
+                    assigned.add(j)
+            clusters.append(cluster)
+        return clusters
+
+    def _score_semantic_cluster(
+        self,
+        cluster: List[Dict[str, Any]],
+        domain_group_count: int,
+    ) -> Optional[Dict[str, Any]]:
+        """Score one semantic cluster → consensus semantic finding dict."""
+        if not cluster:
+            return None
+
+        rep = cluster[0]
+        group_counts: Dict[str, int] = defaultdict(int)
+        for f in cluster:
+            group_counts[self._get_author_group(f)] += 1
+
+        groups_with_multiple = sum(1 for cnt in group_counts.values() if cnt >= 2)
+        total_groups_in_cluster = len(group_counts)
+        intra_score = groups_with_multiple / max(total_groups_in_cluster, 1)
+        cross_score = len(group_counts) / domain_group_count
+
+        attacker_surfaced = any(f.get("is_attacker_surfaced") for f in cluster)
+        gate = ATTACKER_GATE_CONFIRM if attacker_surfaced else ATTACKER_GATE_NEUTRAL
+
+        expert_confidence = intra_score * WEIGHT_INTRA + cross_score * WEIGHT_CROSS
+        confidence = expert_confidence * gate
+
+        # Semantic findings use a lower threshold (0.25) since they have no SWC
+        # cross-validation baseline — 2 domains + attacker corroboration is sufficient
+        if confidence < 0.25:
+            return None
+
+        severity = self._consensus_severity(cluster, [])
+        all_funcs = list(dict.fromkeys(
+            func for f in cluster for func in f.get("affected_functions", [])
+        ))
+        all_attack_paths = [
+            step for f in cluster for step in f.get("attack_path", []) if step
+        ]
+
+        # Category by majority vote
+        cat_votes: Dict[str, int] = defaultdict(int)
+        for f in cluster:
+            cat_votes[f.get("category", "other")] += 1
+        category = max(cat_votes, key=lambda k: cat_votes[k])
+
+        return {
+            "semantic_vuln_id":    f"sv_{uuid.uuid4().hex[:8]}",
+            "title":               rep.get("title", "Unnamed Semantic Finding"),
+            "category":            category,
+            "severity":            severity,
+            "affected_functions":  all_funcs,
+            "evidence":            rep.get("evidence", ""),
+            "attack_path":         all_attack_paths[:5],
+            "confidence_score":    min(1.0, confidence),
+            "intra_score":         intra_score,
+            "cross_score":         cross_score,
+            "attacker_score":      gate,
+            "supporting_domains":  list(group_counts.keys()),
+            "is_attacker_surfaced": attacker_surfaced,
+            "source_finding_ids":  [f["finding_id"] for f in cluster if f.get("finding_id")],
+        }
+
+    def _run_semantic_consensus(
+        self,
+        semantic_findings_raw: List[Dict[str, Any]],
+        domain_group_count: int,
+    ) -> List[Dict[str, Any]]:
+        """Full semantic consensus pipeline."""
+        clusters = self._cluster_semantic_findings(semantic_findings_raw)
+        results = []
+        for cluster in clusters:
+            sv = self._score_semantic_cluster(cluster, domain_group_count)
+            if sv:
+                results.append(sv)
+        results.sort(key=lambda x: x["confidence_score"], reverse=True)
+        return results
 
     # ─── Solution D: Post-consensus control coverage enforcement ─────────────
 

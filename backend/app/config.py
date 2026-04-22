@@ -33,7 +33,19 @@ class Config:
     LLM_MODEL_NAME = os.environ.get('LLM_MODEL_NAME', 'gpt-4o-mini')
     # Vertex AI: đường dẫn tới service account JSON (nếu set thì bỏ qua LLM_API_KEY)
     LLM_VERTEX_AI_KEY_FILE = os.environ.get('LLM_VERTEX_AI_KEY_FILE')
-    
+
+    # Boost LLM — dùng cho Phase C attacker agents + invariant extraction
+    # Mode A — Claude trên Vertex AI (cùng service account):
+    #   Set BOOST_VERTEX_CLAUDE_REGION + BOOST_MODEL_NAME (claude-*)
+    # Mode B — Gemini Pro trên Vertex AI (cùng service account):
+    #   Chỉ set BOOST_MODEL_NAME (google/gemini-2.5-pro)
+    # Mode C — Anthropic API key riêng:
+    #   Set BOOST_API_KEY + BOOST_BASE_URL + BOOST_MODEL_NAME
+    BOOST_API_KEY              = os.environ.get('BOOST_API_KEY')
+    BOOST_BASE_URL             = os.environ.get('BOOST_BASE_URL')
+    BOOST_MODEL_NAME           = os.environ.get('BOOST_MODEL_NAME')
+    BOOST_VERTEX_CLAUDE_REGION = os.environ.get('BOOST_VERTEX_CLAUDE_REGION')
+
     # Zep配置
     ZEP_API_KEY = os.environ.get('ZEP_API_KEY')
     

@@ -208,6 +208,44 @@ class AttackerContractFinding:
     agreed_by:        List[str] = field(default_factory=list)
 
 
+# ─── Semantic Finding (Web3Bugs S-category) ────────────────────────────────────
+
+SEMANTIC_CATEGORIES = {
+    "price_oracle":          "Price oracle manipulation / stale price",
+    "flash_loan":            "Flash loan attack vector",
+    "governance_attack":     "Governance takeover / vote manipulation",
+    "incorrect_accounting":  "Incorrect balance / share / reward accounting",
+    "state_machine_bug":     "Incorrect state transition or invariant violation",
+    "incentive_misalignment":"Economic incentive misalignment or griefing",
+    "reentrancy_logic":      "Logic-level reentrancy (no SWC-107 pattern)",
+    "other":                 "Other semantic / business-logic vulnerability",
+}
+
+
+@dataclass
+class SemanticFinding:
+    """
+    Business-logic / semantic vulnerability without a SWC ID.
+    Parallel to ContractFinding but captures S-category bugs (Web3Bugs taxonomy).
+    """
+    finding_id:          str
+    author_domain:       str
+    author_persona:      str
+    title:               str
+    category:            str    # key from SEMANTIC_CATEGORIES
+    severity:            str
+    affected_functions:  List[str]
+    evidence:            str
+    attack_path:         List[str]
+    phase:               str
+    round_number:        int
+    confidence:          float = 0.55
+    validated_by:        List[str] = field(default_factory=list)
+    challenged_by:       List[str] = field(default_factory=list)
+    is_exploitable:      Optional[bool] = None
+    is_attacker_surfaced: bool = False
+
+
 # ─── Consensus Output ─────────────────────────────────────────────────────────
 
 @dataclass
@@ -293,6 +331,7 @@ class ContractSessionState:
 
     contract_findings:   List[Dict[str, Any]] = field(default_factory=list)
     attacker_findings:   List[Dict[str, Any]] = field(default_factory=list)
+    semantic_findings:   List[Dict[str, Any]] = field(default_factory=list)   # SemanticFinding serialized
     audit_results:       List[Dict[str, Any]] = field(default_factory=list)
     gap_registry:        List[Dict[str, Any]] = field(default_factory=list)
 

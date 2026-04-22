@@ -11,6 +11,7 @@ Không dùng OASIS subprocess (tương thích với môi trường không có OA
 """
 
 import os
+import re
 import time
 import uuid
 import threading
@@ -41,21 +42,121 @@ def _get_contract_modules():
     from .contract_oasis_env import (
         ContractAuditEnvBuilder,
         ContractAttackerAction, parse_contract_finding_from_text,
+        parse_semantic_finding_from_text,
         parse_contract_gap_declarations, build_gap_context_for_agent as contract_gap_context,
         build_published_registry as contract_published_registry,
         get_phase_for_round as contract_get_phase,
+        extract_known_functions,
     )
     return {
-        "env_builder":         ContractAuditEnvBuilder,
-        "attacker_action":     ContractAttackerAction,
-        "parse_finding":       parse_contract_finding_from_text,
-        "parse_gap":           parse_contract_gap_declarations,
-        "gap_context":         contract_gap_context,
-        "published_registry":  contract_published_registry,
-        "get_phase":           contract_get_phase,
+        "env_builder":          ContractAuditEnvBuilder,
+        "attacker_action":      ContractAttackerAction,
+        "parse_finding":        parse_contract_finding_from_text,
+        "parse_semantic":       parse_semantic_finding_from_text,
+        "parse_gap":            parse_contract_gap_declarations,
+        "gap_context":          contract_gap_context,
+        "published_registry":   contract_published_registry,
+        "get_phase":            contract_get_phase,
+        "extract_funcs":        extract_known_functions,
     }
 
 logger = get_logger("mirofish.cyber_orchestrator")
+
+
+def _build_phase_c_review_list(
+    expert_findings: List[Dict[str, Any]],
+    invariants: Optional[List[Dict[str, Any]]] = None,
+) -> str:
+    """
+    RC-3 Two-step Phase C: build per-(SWC, function) review list for attackers.
+
+    RC-3a: No social proof — no confidence scores, no group counts.
+           Header frames claims as UNVERIFIED, default stance is DISMISS.
+    RC-3b: One entry per (SWC, function) pair — forces per-function evaluation,
+           prevents one SWC-level dismiss/confirm from sweeping all related findings.
+    Invariant section appended when invariants are provided.
+    """
+    if not expert_findings:
+        return ""
+
+    # Build deduplicated per-(swc, func) items, preserving claimed evidence
+    seen: set = set()
+    items: List[Dict[str, Any]] = []
+    for f in expert_findings:
+        swc = f.get("swc_id") or "SWC-???"
+        funcs = f.get("affected_functions") or []
+        evidence_list = f.get("evidence") or []
+        evidence = evidence_list[0] if evidence_list else ""
+        title = f.get("title", "Untitled")
+
+        if funcs:
+            for func in funcs[:2]:  # max 2 functions per finding
+                key = (swc, func.lower().rstrip("()"))
+                if key not in seen:
+                    seen.add(key)
+                    items.append({"swc": swc, "func": func, "title": title, "evidence": evidence})
+        else:
+            key = (swc, "")
+            if key not in seen:
+                seen.add(key)
+                items.append({"swc": swc, "func": "", "title": title, "evidence": evidence})
+
+    if not items:
+        return ""
+
+    items = items[:25]  # cap list to avoid context overflow
+
+    # RC-3a: adversarial framing — no confidence/group signals
+    lines = [
+        f"=== UNVERIFIED CLAIMS — {len(items)} per-function claims require independent attacker verification ===",
+        "DEFAULT STANCE: DISMISS — only CONFIRM if you independently trace the exploit through contract code above.",
+        "",
+    ]
+    for i, item in enumerate(items, 1):
+        func_str = f" in {item['func']}" if item["func"] else ""
+        ev_str = f"\n  Claimed evidence: {item['evidence']}" if item["evidence"] else ""
+        lines.append(
+            f"[F{i}] {item['swc']}{func_str} — {item['title'][:70]}"
+            + ev_str
+        )
+
+    lines += [
+        "",
+        "Required format — one block per claim, INCLUDE function name:",
+        "  [ATTACKER_DISMISS SWC-101 transfer()]",
+        "  Finding: <title>",
+        "  Reason: <why this specific function is NOT vulnerable>",
+        "  ---",
+        "  [ATTACKER_CONFIRM SWC-114 approve()]",
+        "  Finding: <title>",
+        "  Path: <concrete step-by-step exploit through this function>",
+        "",
+    ]
+
+    # Invariant attack objectives section
+    if invariants:
+        lines += [
+            "=== INVARIANT ATTACK OBJECTIVES — Prove or disprove each invariant ===",
+            "For each invariant you can VIOLATE, use [ATTACKER_EXPLOIT INV-xxx]:",
+            "",
+        ]
+        for inv in invariants[:10]:
+            funcs_str = ", ".join(inv.get("functions") or []) or "—"
+            hint_str = f"\n  Hint: {inv['violation_hint']}" if inv.get("violation_hint") else ""
+            lines.append(
+                f"  [{inv['id']}] {inv.get('statement', '')}\n"
+                f"    Try via: {funcs_str}{hint_str}"
+            )
+        lines += [
+            "",
+            "  [ATTACKER_EXPLOIT INV-001]",
+            "  Path: <step-by-step exploit>",
+            "  Impact: <what attacker gains>",
+            "  Feasible: yes/no",
+            "",
+        ]
+
+    return "\n".join(lines)
 
 
 class _RateLimiter:
@@ -166,6 +267,7 @@ class CyberSessionOrchestrator:
         profiles: List[CyberAgentProfile],
         session_id: Optional[str] = None,
         mode: str = "network_security",
+        invariants: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         """
         Khởi chạy session trong background thread.
@@ -173,6 +275,7 @@ class CyberSessionOrchestrator:
 
         Args:
             mode: "network_security" (default) | "contract_audit"
+            invariants: protocol invariants from ContractInvariantExtractor (contract_audit only)
         """
         session_id = session_id or f"cyber_{uuid.uuid4().hex[:12]}"
         task_id = self.task_manager.create_task(
@@ -187,7 +290,7 @@ class CyberSessionOrchestrator:
 
         thread = threading.Thread(
             target=self._session_worker,
-            args=(task_id, session_id, graph_id, network_summary, profiles, mode),
+            args=(task_id, session_id, graph_id, network_summary, profiles, mode, invariants),
             daemon=True
         )
         thread.start()
@@ -344,6 +447,7 @@ class CyberSessionOrchestrator:
         network_summary: str,
         profiles: List[CyberAgentProfile],
         mode: str = "network_security",
+        invariants: Optional[List[Dict[str, Any]]] = None,
     ):
         try:
             self.task_manager.update_task(
@@ -363,6 +467,12 @@ class CyberSessionOrchestrator:
                     profiles=profiles,
                     contract_summary=network_summary,
                 )
+                # RC-1 (2nd layer): extract known function names once per session
+                known_functions = cm["extract_funcs"](network_summary)
+                logger.info(
+                    f"  Contract known functions ({len(known_functions)}): "
+                    f"{', '.join(sorted(known_functions)) or '(none extracted)'}"
+                )
             else:
                 env_builder = self.env_builder
                 get_phase = get_phase_for_round
@@ -372,12 +482,16 @@ class CyberSessionOrchestrator:
                     profiles=profiles,
                     network_summary=network_summary,
                 )
+                known_functions = None
 
             session_state = CyberSessionState(
                 session_id=session_id,
                 graph_id=graph_id,
             )
             self._save_session_state(session_state)
+
+            # RC-3 Two-step Phase C: computed after round 7, injected into Phase C rounds
+            phase_c_review_list = ""
 
             # Chạy 10 rounds
             for round_num in range(1, TOTAL_ROUNDS + 1):
@@ -399,11 +513,26 @@ class CyberSessionOrchestrator:
                     config=config,
                     mode=mode,
                     env_builder=env_builder,
+                    known_functions=known_functions,
+                    phase_c_review_list=phase_c_review_list,
                 )
 
                 session_state.current_round = round_num
                 session_state.current_phase = phase
                 self._save_session_state(session_state)
+
+                # RC-3: after Phase B ends (round 7), build Phase C review list
+                if round_num == 7 and mode == "contract_audit":
+                    phase_c_review_list = _build_phase_c_review_list(
+                        session_state.expert_findings,
+                        invariants=invariants,
+                    )
+                    logger.info(
+                        f"Phase C review list built: "
+                        f"{len(phase_c_review_list.splitlines())} lines from "
+                        f"{len(session_state.expert_findings)} expert findings"
+                        + (f", {len(invariants)} invariants" if invariants else "")
+                    )
 
                 # Inter-round cooldown — let Vertex AI TPM window partially recover
                 # before next burst. Reads LLM_ROUND_COOLDOWN_S (default 15s).
@@ -421,6 +550,7 @@ class CyberSessionOrchestrator:
                 "graph_id": graph_id,
                 "expert_findings": session_state.expert_findings,
                 "attacker_findings": session_state.attacker_findings,
+                "semantic_findings": session_state.semantic_findings,
                 "total_findings": (
                     len(session_state.expert_findings) +
                     len(session_state.attacker_findings)
@@ -444,6 +574,8 @@ class CyberSessionOrchestrator:
         config: Any,
         mode: str = "network_security",
         env_builder=None,
+        known_functions=None,
+        phase_c_review_list: str = "",
     ):
         """
         Chạy 1 round: gọi LLM cho từng active agent → parse findings + GAP declarations.
@@ -473,10 +605,15 @@ class CyberSessionOrchestrator:
                         pending_gaps=session_state.pending_gaps(),
                         agent_domain_group=profile.domain_group,
                     )
+            # RC-3: pass phase_c_review_list to Phase C instructions
             phase_instruction = env_builder.build_phase_instruction(
-                phase, round_num, gap_context=gap_context
+                phase, round_num,
+                gap_context=gap_context,
+                phase_c_review_list=phase_c_review_list if phase == "C" else "",
             )
             _rate_limiter.acquire()
+            # RC1: attacker Phase C → keep raw text (think blocks intact) for tag rescue
+            is_attacker_phase_c = (profile.tier == 2 and phase == "C")
             response = self._call_agent(
                 profile=profile,
                 phase=phase,
@@ -485,6 +622,7 @@ class CyberSessionOrchestrator:
                 prior_context=prior_context,
                 network_summary=network_summary,
                 mode=mode,
+                strip_think=not is_attacker_phase_c,
             )
             return profile, gap_context, response
 
@@ -512,7 +650,12 @@ class CyberSessionOrchestrator:
                     logger.warning(f"Agent {profile.agent_id} round {round_num} error: {e}")
 
         # Process findings sequentially (no LLM — safe, preserves GAP routing order)
+        _think_re = re.compile(r'<think>[\s\S]*?</think>')
         for profile, gap_context, response in results:
+            # RC1: attacker Phase C responses are raw (think blocks intact for tag rescue).
+            # Strip think blocks for feed storage to keep UI content clean.
+            is_attacker_phase_c = (profile.tier == 2 and phase == "C")
+            feed_content = _think_re.sub('', response).strip() if is_attacker_phase_c else response
             self._append_feed_post(session_state.session_id, {
                 "round_num": round_num,
                 "phase": phase,
@@ -521,15 +664,19 @@ class CyberSessionOrchestrator:
                 "tier": profile.tier,
                 "domain_group": profile.domain_group,
                 "persona": profile.persona,
-                "content": response,
+                "content": feed_content,
                 "timestamp": datetime.now().isoformat(),
                 "gap_context_injected": bool(gap_context),
             })
             if profile.tier == 1:
-                self._process_expert_response(response, profile, round_num, session_state, mode=mode)
+                self._process_expert_response(
+                    response, profile, round_num, session_state,
+                    mode=mode, known_functions=known_functions,
+                )
                 if phase in ("A", "B"):
                     self._process_gap_declarations(response, profile, round_num, session_state, mode=mode)
             else:
+                # Pass raw response (may contain think blocks) — parse_from_text uses last-tag logic
                 self._process_attacker_response(response, profile, round_num, session_state, mode=mode)
 
         # After all agents in round complete: mark injected gaps as routed
@@ -545,6 +692,7 @@ class CyberSessionOrchestrator:
         prior_context: str,
         network_summary: str,
         mode: str = "network_security",
+        strip_think: bool = True,
     ) -> str:
         """Gọi LLM cho 1 agent và trả về response text."""
         # Chọn LLM (boost cho attacker Phase C)
@@ -571,9 +719,33 @@ class CyberSessionOrchestrator:
             }
         ]
 
-        return llm.chat(messages, temperature=0.7, max_tokens=1500)
+        # Phase C attacker agents use boost LLM (Pro) with extended thinking — needs more tokens
+        is_attacker_phase_c = (profile.tier == 2 and phase == "C")
+        max_tok = 4096 if is_attacker_phase_c else 1500
+        return llm.chat(messages, temperature=0.7, max_tokens=max_tok, strip_think=strip_think)
 
     # ─── Parsers ──────────────────────────────────────────────────────────────
+
+    def _process_semantic_response(
+        self,
+        text: str,
+        profile: CyberAgentProfile,
+        round_num: int,
+        session_state: CyberSessionState,
+        known_functions=None,
+        is_attacker_surfaced: bool = False,
+    ):
+        """Parse SEMANTIC_FINDING block from agent post → appended to semantic_findings."""
+        cm = _get_contract_modules()
+        sf = cm["parse_semantic"](text, profile, round_num, known_functions=known_functions)
+        if not sf:
+            return
+        sf["is_attacker_surfaced"] = is_attacker_surfaced
+        session_state.semantic_findings.append(sf)
+        logger.debug(
+            f"SemanticFinding [{sf['finding_id']}] from {profile.agent_id}: "
+            f"{sf['title']} ({sf['category']}, {sf['severity']})"
+        )
 
     def _process_expert_response(
         self,
@@ -582,18 +754,22 @@ class CyberSessionOrchestrator:
         round_num: int,
         session_state: CyberSessionState,
         mode: str = "network_security",
+        known_functions=None,
     ):
         """Parse expert agent response → ExpertFinding / ContractFinding entries."""
         if mode == "contract_audit":
             cm = _get_contract_modules()
-            finding_dict = cm["parse_finding"](text, profile, round_num)
+            finding_dict = cm["parse_finding"](text, profile, round_num, known_functions=known_functions)
             if not finding_dict:
+                self._process_semantic_response(text, profile, round_num, session_state, known_functions)
                 return
             session_state.expert_findings.append(finding_dict)
             logger.debug(
                 f"ContractFinding [{finding_dict['finding_id']}] from {profile.agent_id}: "
                 f"{finding_dict['title']} ({finding_dict['severity']})"
             )
+            # Also check for semantic findings in the same post
+            self._process_semantic_response(text, profile, round_num, session_state, known_functions)
             return
 
         finding_raw = parse_expert_finding_from_text(text, profile, round_num)
@@ -637,20 +813,51 @@ class CyberSessionOrchestrator:
             ContractAttackerAction = cm["attacker_action"]
             action = ContractAttackerAction.parse_from_text(text)
             if not action:
+                # Still check for SEMANTIC_FINDING in attacker post
+                self._process_semantic_response(
+                    text, profile, round_num, session_state, is_attacker_surfaced=True
+                )
                 return
             action_type = action["action_type"]
-            if action_type == ContractAttackerAction.ADD_PATH:
-                finding_id = f"af_{uuid.uuid4().hex[:8]}"
-                session_state.attacker_findings.append({
-                    "finding_id":       finding_id,
-                    "attacker_profile": profile.persona,
-                    "title":            action["finding_ref"] or f"Attack path by {profile.display_name}",
-                    "description":      action["reason"],
-                    "severity":         "high",
-                    "base_confidence":  0.60,
-                    "path_description": action["path"],
-                })
-                logger.debug(f"Contract Attacker NEW path [{finding_id}] by {profile.agent_id}")
+            if action_type == ContractAttackerAction.EXPLOIT:
+                # Invariant violation — feasible exploits become attacker findings
+                inv_id = action.get("invariant_id", "INV-???")
+                feasible = action.get("feasible", "yes").lower() == "yes"
+                if feasible:
+                    finding_id = f"af_{uuid.uuid4().hex[:8]}"
+                    session_state.attacker_findings.append({
+                        "finding_id":       finding_id,
+                        "invariant_id":     inv_id,
+                        "attacker_profile": profile.persona,
+                        "title":            f"Invariant Violated: {inv_id}",
+                        "description":      action.get("reason", ""),
+                        "path_description": action.get("path", ""),
+                        "severity":         "high",
+                        "base_confidence":  0.70,
+                        "source":           "invariant_exploit",
+                    })
+                    logger.debug(
+                        f"Contract Attacker EXPLOIT [{finding_id}] {inv_id} "
+                        f"by {profile.agent_id}"
+                    )
+            elif action_type == ContractAttackerAction.ADD_PATH:
+                # Check if the ADD_PATH contains a SEMANTIC_FINDING instead of FINDING
+                if "SEMANTIC_FINDING:" in text or "SEMANTIC_FINDING :" in text:
+                    self._process_semantic_response(
+                        text, profile, round_num, session_state, is_attacker_surfaced=True
+                    )
+                else:
+                    finding_id = f"af_{uuid.uuid4().hex[:8]}"
+                    session_state.attacker_findings.append({
+                        "finding_id":       finding_id,
+                        "attacker_profile": profile.persona,
+                        "title":            action["finding_ref"] or f"Attack path by {profile.display_name}",
+                        "description":      action["reason"],
+                        "severity":         "high",
+                        "base_confidence":  0.60,
+                        "path_description": action["path"],
+                    })
+                    logger.debug(f"Contract Attacker NEW path [{finding_id}] by {profile.agent_id}")
             else:
                 self._attach_corroboration(
                     action=action,
@@ -737,23 +944,90 @@ class CyberSessionOrchestrator:
         attacker_profile: str,
         session_state: CyberSessionState,
     ):
-        """Tìm expert finding phù hợp và gắn corroboration."""
-        finding_ref = action["finding_ref"].lower()
-        for finding_dict in session_state.expert_findings:
-            if finding_ref and finding_ref in finding_dict.get("title", "").lower():
+        """
+        Gắn attacker corroboration vào matching expert findings.
+
+        RC-3b: per-function matching — [ATTACKER_DISMISS SWC-101 transfer()] only
+               applies to findings where BOTH swc_id AND function match.
+        RC-3c: normalize confidence delta by number of affected findings —
+               prevents one SWC-level action from having N×weight.
+        Legacy: title-keyword match (no SWC) — stops at first hit.
+        """
+        swc_id    = action.get("swc_id", "")
+        func_name = action.get("func_name", "")   # RC-3b: e.g. "transfer()"
+        finding_ref = (action.get("finding_ref") or "").lower()
+
+        # Bridge: SINV-xxx / INV-xxx from invariant targets — match by function name
+        # instead of SWC ID (structural invariants don't have a SWC equivalent)
+        if swc_id.upper().startswith(("SINV-", "INV-")):
+            fn_bare = func_name.lower().rstrip("()") if func_name else ""
+            delta = action["confidence_delta"]
+            for finding_dict in session_state.expert_findings:
+                funcs = finding_dict.get("affected_functions", [])
+                fn_match = fn_bare and any(
+                    fn_bare in fn.lower().rstrip("()") for fn in funcs
+                )
+                if not fn_match:
+                    continue
                 corr = AttackerCorroboration(
                     profile_id=attacker_profile,
                     action=action["action_type"],
-                    comment=action["reason"],
-                    confidence_delta=action["confidence_delta"],
+                    comment=action.get("reason", f"Invariant target {swc_id} confirmed"),
+                    confidence_delta=delta,
                 )
                 if "attacker_corroborations" not in finding_dict:
                     finding_dict["attacker_corroborations"] = []
                 finding_dict["attacker_corroborations"].append(asdict(corr))
-
-                # Apply confidence delta
                 current = finding_dict.get("confidence", 0.5)
-                finding_dict["confidence"] = max(0.0, min(1.0, current + corr.confidence_delta))
+                finding_dict["confidence"] = max(0.0, min(1.0, current + delta))
+            return
+
+        # RC-3c: pre-count affected findings to normalize delta
+        if swc_id:
+            fn_bare = func_name.lower().rstrip("()") if func_name else ""
+            n_affected = sum(
+                1 for f in session_state.expert_findings
+                if f.get("swc_id") == swc_id and (
+                    not fn_bare or any(
+                        fn_bare in fn.lower().rstrip("()")
+                        for fn in f.get("affected_functions", [])
+                    )
+                )
+            )
+            delta = action["confidence_delta"] / max(n_affected, 1)
+        else:
+            delta = action["confidence_delta"]
+
+        for finding_dict in session_state.expert_findings:
+            swc_match = bool(swc_id and finding_dict.get("swc_id") == swc_id)
+            title_match = bool(
+                not swc_id and finding_ref
+                and finding_ref in finding_dict.get("title", "").lower()
+            )
+            if not (swc_match or title_match):
+                continue
+
+            # RC-3b: with function qualifier, skip findings that don't include that function
+            if swc_match and func_name:
+                fn_bare = func_name.lower().rstrip("()")
+                funcs = finding_dict.get("affected_functions", [])
+                if not any(fn_bare in fn.lower().rstrip("()") for fn in funcs):
+                    continue
+
+            corr = AttackerCorroboration(
+                profile_id=attacker_profile,
+                action=action["action_type"],
+                comment=action["reason"],
+                confidence_delta=delta,
+            )
+            if "attacker_corroborations" not in finding_dict:
+                finding_dict["attacker_corroborations"] = []
+            finding_dict["attacker_corroborations"].append(asdict(corr))
+            current = finding_dict.get("confidence", 0.5)
+            finding_dict["confidence"] = max(0.0, min(1.0, current + delta))
+
+            # Legacy title match: stop at first hit; SWC match: continue to cover all matching
+            if title_match:
                 return
 
     # ─── Context builder ──────────────────────────────────────────────────────
@@ -831,13 +1105,41 @@ class CyberSessionOrchestrator:
         )
 
     def _try_build_boost_client(self) -> LLMClient:
-        """Thử dùng BOOST LLM config nếu có, fallback về primary LLM."""
+        """Thử dùng BOOST LLM config nếu có, fallback về primary LLM.
+
+        Mode A — Claude trên Vertex AI:
+          BOOST_VERTEX_CLAUDE_REGION set + BOOST_MODEL_NAME=claude-*
+        Mode B — Gemini Pro trên Vertex AI (cùng endpoint, đổi model):
+          BOOST_MODEL_NAME=google/... (không set BOOST_VERTEX_CLAUDE_REGION)
+        Mode C — Anthropic API key riêng:
+          BOOST_API_KEY set
+        """
         try:
-            boost_key = Config.BOOST_API_KEY if hasattr(Config, "BOOST_API_KEY") else None
-            boost_url = Config.BOOST_BASE_URL if hasattr(Config, "BOOST_BASE_URL") else None
-            boost_model = Config.BOOST_MODEL_NAME if hasattr(Config, "BOOST_MODEL_NAME") else None
+            boost_key           = getattr(Config, "BOOST_API_KEY",              None)
+            boost_url           = getattr(Config, "BOOST_BASE_URL",             None)
+            boost_model         = getattr(Config, "BOOST_MODEL_NAME",           None)
+            claude_region       = getattr(Config, "BOOST_VERTEX_CLAUDE_REGION", None)
+            vertex_key_file     = getattr(Config, "LLM_VERTEX_AI_KEY_FILE",     None)
+
+            if claude_region and boost_model:
+                # Mode A: Claude trên Vertex AI
+                return LLMClient(
+                    model=boost_model,
+                    vertex_key_file=vertex_key_file,
+                    anthropic_vertex_region=claude_region,
+                )
+
             if boost_key:
+                # Mode C: Anthropic / OpenAI external key
                 return LLMClient(api_key=boost_key, base_url=boost_url, model=boost_model)
+
+            if boost_model and boost_model != Config.LLM_MODEL_NAME:
+                # Mode B: Vertex AI, đổi model
+                return LLMClient(
+                    base_url=boost_url or Config.LLM_BASE_URL,
+                    model=boost_model,
+                    vertex_key_file=vertex_key_file,
+                )
         except Exception:
             pass
         return self.llm

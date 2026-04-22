@@ -131,7 +131,7 @@ class VulnReportAgent:
     ) -> Dict[str, Any]:
         """Synchronous version — trả về report dict trực tiếp."""
         engine = ConsensusEngine()
-        consensus_vulns = engine.run(expert_findings, attacker_findings)
+        consensus_vulns, _ = engine.run(expert_findings, attacker_findings)
         unvalidated_gaps = engine.enforce_control_coverage(consensus_vulns, expert_findings)
 
         tool_context = _ToolContext(

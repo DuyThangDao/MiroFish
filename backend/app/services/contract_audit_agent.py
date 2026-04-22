@@ -76,6 +76,10 @@ TOOLS_SPEC = """You have access to the following tools:
   Description: Show silent domain groups, low-validation findings, and unvalidated SWC categories
   Args: {}
 
+[get_semantic_findings]
+  Description: Get business-logic / semantic vulnerabilities (no SWC ID) — Web3Bugs S-category style
+  Args: { "category": <"price_oracle"|"flash_loan"|"governance_attack"|"incorrect_accounting"|"state_machine_bug"|"incentive_misalignment"|"reentrancy_logic"|"other"|"all", default "all"> }
+
 Use tools by writing: ACTION: tool_name({"arg": value})
 Write final report using: FINAL_ANSWER: <report content>
 """
@@ -115,6 +119,12 @@ Your report MUST include these 6 sections:
    - Oracle manipulation surface
    - Governance attack vectors
 
+## 5B. SEMANTIC / BUSINESS-LOGIC FINDINGS (if any — no SWC ID)
+   Use get_semantic_findings tool to retrieve these.
+   - Category | Affected function | Severity | Confidence
+   - Evidence | Step-by-step attack path
+   - Note: these vulnerabilities have no SWC ID — they represent protocol design flaws
+
 ## 6. REMEDIATION ROADMAP
    - Immediate (critical): fix before deployment
    - Short-term (high): fix within 2 weeks
@@ -128,6 +138,43 @@ Confidence labels:
   [DISPUTED] = cross-domain disagreement present
 
 Be specific — reference actual function names, SWC IDs, and code patterns."""
+
+
+def _build_invariant_coverage(
+    invariants: List[Dict[str, Any]],
+    attacker_findings: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """
+    Cross-reference extracted invariants against attacker findings to produce
+    invariant_coverage[]: VIOLATED | HOLDS | UNVERIFIED for each invariant.
+    """
+    violated: Dict[str, Dict[str, Any]] = {}
+    for af in attacker_findings:
+        inv_id = af.get("invariant_id")
+        if inv_id and af.get("source") == "invariant_exploit":
+            violated[inv_id] = af
+
+    coverage = []
+    for inv in invariants:
+        inv_id = inv["id"]
+        if inv_id in violated:
+            af = violated[inv_id]
+            coverage.append({
+                "id":          inv_id,
+                "statement":   inv.get("statement", ""),
+                "status":      "VIOLATED",
+                "finding_ref": af.get("finding_id"),
+                "attacker":    af.get("attacker_profile"),
+            })
+        else:
+            # HOLDS if experts found no issues with the invariant's functions
+            # UNVERIFIED by default — we cannot confirm absence of violation without exploit
+            coverage.append({
+                "id":        inv_id,
+                "statement": inv.get("statement", ""),
+                "status":    "UNVERIFIED",
+            })
+    return coverage
 
 
 class ContractAuditReportAgent:
@@ -148,6 +195,8 @@ class ContractAuditReportAgent:
         attacker_findings: List[Dict[str, Any]],
         contract_summary: str,
         graph_id: Optional[str] = None,
+        semantic_findings: Optional[List[Dict[str, Any]]] = None,
+        invariants: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         """
         Generate audit report trong background thread.
@@ -160,7 +209,8 @@ class ContractAuditReportAgent:
 
         thread = threading.Thread(
             target=self._generate_worker,
-            args=(task_id, session_id, expert_findings, attacker_findings, contract_summary, graph_id),
+            args=(task_id, session_id, expert_findings, attacker_findings,
+                  contract_summary, graph_id, semantic_findings, invariants),
             daemon=True
         )
         thread.start()
@@ -173,12 +223,15 @@ class ContractAuditReportAgent:
         attacker_findings: List[Dict[str, Any]],
         contract_summary: str,
         graph_id: Optional[str] = None,
+        semantic_findings: Optional[List[Dict[str, Any]]] = None,
+        invariants: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """Synchronous version — trả về report dict trực tiếp."""
         engine = ConsensusEngine()
-        consensus_vulns = engine.run(
+        consensus_vulns, semantic_results = engine.run(
             expert_findings, attacker_findings,
-            domain_group_count=7, mode="contract_audit"
+            domain_group_count=7, mode="contract_audit",
+            semantic_findings_raw=semantic_findings or [],
         )
         unvalidated_swc_gaps = engine.enforce_swc_coverage(consensus_vulns, expert_findings)
 
@@ -187,6 +240,7 @@ class ContractAuditReportAgent:
             expert_findings=expert_findings,
             attacker_findings=attacker_findings,
             unvalidated_swc_gaps=unvalidated_swc_gaps,
+            semantic_results=semantic_results,
         )
 
         report_text = self._run_react_loop(
@@ -195,6 +249,7 @@ class ContractAuditReportAgent:
         )
 
         coverage_gaps = engine.get_coverage_gaps(consensus_vulns, mode="contract_audit")
+        invariant_coverage = _build_invariant_coverage(invariants or [], attacker_findings)
 
         return {
             "session_id":          session_id,
@@ -202,13 +257,21 @@ class ContractAuditReportAgent:
             "generated_at":        datetime.now().isoformat(),
             "report":              report_text,
             "consensus_vulns":     [asdict(v) for v in consensus_vulns],
+            "semantic_results":    semantic_results,
             "unvalidated_swc_gaps": unvalidated_swc_gaps,
             "coverage_gaps":       coverage_gaps,
+            "invariant_coverage":  invariant_coverage,
             "stats": {
-                "total_expert_findings":   len(expert_findings),
-                "total_attacker_findings": len(attacker_findings),
-                "consensus_vulns":         len(consensus_vulns),
-                "unvalidated_swc_gaps":    len(unvalidated_swc_gaps),
+                "total_expert_findings":    len(expert_findings),
+                "total_attacker_findings":  len(attacker_findings),
+                "total_semantic_findings":  len(semantic_findings or []),
+                "consensus_vulns":          len(consensus_vulns),
+                "semantic_consensus":       len(semantic_results),
+                "unvalidated_swc_gaps":     len(unvalidated_swc_gaps),
+                "invariants_extracted":     len(invariants or []),
+                "invariants_violated":      sum(
+                    1 for ic in invariant_coverage if ic["status"] == "VIOLATED"
+                ),
                 "critical":  sum(1 for v in consensus_vulns if v.severity == "critical"),
                 "high":      sum(1 for v in consensus_vulns if v.severity == "high"),
                 "medium":    sum(1 for v in consensus_vulns if v.severity == "medium"),
@@ -229,6 +292,8 @@ class ContractAuditReportAgent:
         attacker_findings: List[Dict[str, Any]],
         contract_summary: str,
         graph_id: Optional[str],
+        semantic_findings: Optional[List[Dict[str, Any]]] = None,
+        invariants: Optional[List[Dict[str, Any]]] = None,
     ):
         try:
             self.task_manager.update_task(
@@ -242,6 +307,8 @@ class ContractAuditReportAgent:
                 attacker_findings=attacker_findings,
                 contract_summary=contract_summary,
                 graph_id=graph_id,
+                semantic_findings=semantic_findings,
+                invariants=invariants,
             )
 
             self.task_manager.update_task(task_id, progress=90, message="Saving report...")
@@ -368,25 +435,28 @@ class _ContractToolContext:
         expert_findings: List[Dict[str, Any]],
         attacker_findings: List[Dict[str, Any]],
         unvalidated_swc_gaps: List[Dict[str, Any]] = None,
+        semantic_results: List[Dict[str, Any]] = None,
     ):
         self.vulns = consensus_vulns
         self.expert_findings = expert_findings
         self.attacker_findings = attacker_findings
         self.unvalidated_swc_gaps = unvalidated_swc_gaps or []
+        self.semantic_results = semantic_results or []
 
     def execute(self, tool_name: str, args: Dict[str, Any]) -> str:
         """Dispatch tool call → return string observation."""
         dispatch = {
-            "get_top_vulnerabilities":       self._get_top_vulnerabilities,
-            "get_critical_findings":         self._get_critical_findings,
-            "get_exploitable_findings":      self._get_exploitable_findings,
+            "get_top_vulnerabilities":        self._get_top_vulnerabilities,
+            "get_critical_findings":          self._get_critical_findings,
+            "get_exploitable_findings":       self._get_exploitable_findings,
             "get_attacker_profile_breakdown": self._get_attacker_profile_breakdown,
-            "get_attacker_only_findings":    self._get_attacker_only_findings,
-            "get_patch_suggestions":         self._get_patch_suggestions,
-            "get_swc_breakdown":             self._get_swc_breakdown,
-            "get_defi_specific_risks":       self._get_defi_specific_risks,
-            "get_findings_by_domain":        self._get_findings_by_domain,
-            "get_coverage_gaps":             self._get_coverage_gaps,
+            "get_attacker_only_findings":     self._get_attacker_only_findings,
+            "get_patch_suggestions":          self._get_patch_suggestions,
+            "get_swc_breakdown":              self._get_swc_breakdown,
+            "get_defi_specific_risks":        self._get_defi_specific_risks,
+            "get_findings_by_domain":         self._get_findings_by_domain,
+            "get_coverage_gaps":              self._get_coverage_gaps,
+            "get_semantic_findings":          self._get_semantic_findings,
         }
         fn = dispatch.get(tool_name)
         if not fn:
@@ -662,4 +732,32 @@ class _ContractToolContext:
                     f"{g['swc_category']}: {g['title']}"
                     f" (mentioned in {g['source_count']} raw findings, by {g['author_domain']})"
                 )
+        return "\n".join(lines)
+
+    def _get_semantic_findings(self, args: Dict) -> str:
+        """Return semantic / business-logic findings (no SWC ID)."""
+        cat_filter = args.get("category", "all")
+        items = self.semantic_results
+        if cat_filter != "all":
+            items = [sv for sv in items if sv.get("category") == cat_filter]
+
+        if not items:
+            if cat_filter == "all":
+                return "No semantic/business-logic findings detected in this audit."
+            return f"No semantic findings for category '{cat_filter}'."
+
+        lines = [f"Semantic findings ({len(items)} consensus results, filter={cat_filter}):"]
+        for sv in items:
+            funcs = ", ".join(sv.get("affected_functions", [])[:3]) or "unspecified"
+            attack_path = sv.get("attack_path", [])
+            path_preview = " → ".join(attack_path[:3]) if attack_path else "N/A"
+            lines.append(
+                f"\n[{sv['severity'].upper()}][{sv['category']}] {sv['title']}"
+                f"\n  Confidence: {sv['confidence_score']:.3f}"
+                f"\n  Functions: {funcs}"
+                f"\n  Evidence: {sv.get('evidence', 'N/A')[:200]}"
+                f"\n  Attack path: {path_preview}"
+                f"\n  Supporting domains: {', '.join(sv.get('supporting_domains', []))}"
+                + (" [ATTACKER SURFACED]" if sv.get("is_attacker_surfaced") else "")
+            )
         return "\n".join(lines)

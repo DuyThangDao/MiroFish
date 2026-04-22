@@ -99,11 +99,31 @@ PHASE_CONFIG = {
         "description": "Attacker profiles validate exploitability and propose attack paths",
         "attacker_active": True,
         "instruction_addition": (
-            "In this phase, ATTACKER PROFILES are activated. "
-            "Domain expert agents: respond if an attacker challenges or escalates your finding. "
-            "Attacker agents: read ALL findings and validate or dismiss them from an attacker's perspective. "
-            "Add attack paths that domain experts missed."
-            # Note: GAP format NOT required for attacker agents — they use ATTACKER_* format
+            "ATTACKER PHASE — Your visible response MUST begin with [ATTACKER_XXX] declaration blocks.\n\n"
+            "=== REQUIRED FORMAT (write these blocks as the FIRST lines of your response) ===\n\n"
+            "  [ATTACKER_CONFIRM SWC-114 approve()]\n"
+            "  Finding: approve() race condition\n"
+            "  Path: 1) Alice calls approve(Bob,100) 2) Bob front-runs transferFrom — spends old+new allowance\n"
+            "  ---\n"
+            "  [ATTACKER_DISMISS SWC-101 transfer()]\n"
+            "  Finding: Integer overflow in transfer\n"
+            "  Reason: transfer() uses SafeMath.sub() — reverts on underflow, no overflow possible\n"
+            "  ---\n"
+            "  [ATTACKER_EXPLOIT INV-001]\n"
+            "  Path: 1. Call addLiquidity(amount, assetId, victimRouter) from any address\n"
+            "        2. No require(router == msg.sender) — any caller accepted\n"
+            "        3. Call removeLiquidity() to drain victim router's funds\n"
+            "  Impact: Full liquidity drain of any router\n"
+            "  Feasible: yes\n"
+            "  ---\n\n"
+            "=== RULES ===\n"
+            "• DEFAULT STANCE: DISMISS. Every claim is UNVERIFIED until you independently confirm it.\n"
+            "• CONFIRM only with a concrete step-by-step exploit traceable through THIS contract's code.\n"
+            "• DISMISS for: out-of-scope claims, SafeMath/require-protected ops, no traceable exploit.\n"
+            "• Write one block per claim in the UNVERIFIED CLAIMS LIST above.\n"
+            "• For INVARIANT ATTACK OBJECTIVES: use [ATTACKER_EXPLOIT INV-xxx] if you can violate the invariant.\n"
+            "• Dismissing false positives is MORE valuable than confirming an obvious finding.\n"
+            "Domain expert agents: respond only if an attacker directly challenges your specific finding.\n"
         ),
     },
 }
@@ -380,6 +400,7 @@ class ContractAttackerAction:
     ADD_PATH  = "ATTACKER_ADD_PATH"
     ESCALATE  = "ATTACKER_ESCALATE"
     DOWNGRADE = "ATTACKER_DOWNGRADE"
+    EXPLOIT   = "ATTACKER_EXPLOIT"    # invariant violation with concrete exploit path
 
     # Confidence deltas when parsing from post text
     CONFIDENCE_DELTA = {
@@ -388,49 +409,252 @@ class ContractAttackerAction:
         ADD_PATH:   0.00,   # handled separately as new finding
         ESCALATE:  +0.10,
         DOWNGRADE: -0.10,
+        EXPLOIT:   +0.25,   # strong signal — attacker found a concrete invariant violation
     }
 
-    ALL = {CONFIRM, DISMISS, ADD_PATH, ESCALATE, DOWNGRADE}
+    ALL = {CONFIRM, DISMISS, ADD_PATH, ESCALATE, DOWNGRADE, EXPLOIT}
+
+    # RC-3b: match [ATTACKER_CONFIRM SWC-107 transfer()] — SWC + optional function qualifier
+    # Also matches SINV-xxx / INV-xxx (invariant targets from structural scan)
+    _SWC_ACTION_RE = re.compile(
+        r'\[(ATTACKER_CONFIRM|ATTACKER_DISMISS|ATTACKER_ESCALATE|ATTACKER_DOWNGRADE)'
+        r'\s+(SWC-\d{1,3}|DEFI-[A-Z][A-Z_]{2,}|SINV-\d{1,3}|INV-\d{1,3})'
+        r'(?:\s+([a-zA-Z_][a-zA-Z0-9_]*\(\)))?\]'  # optional: funcName()
+    )
+
+    # Match [ATTACKER_EXPLOIT INV-001]
+    _EXPLOIT_RE = re.compile(
+        r'\[ATTACKER_EXPLOIT\s+(INV-\d{1,3})\]',
+        re.IGNORECASE,
+    )
 
     @staticmethod
     def parse_from_text(text: str) -> Optional[Dict[str, Any]]:
         """
         Parse attacker action from agent post.
 
-        Expected format:
-          [ATTACKER_CONFIRM]
-          Finding: <exact finding title>
-          Reason: <why exploitable>
-          Path: <attack steps>
-
-        Returns dict or None if no action found.
+        Formats (tried in order):
+          [ATTACKER_CONFIRM SWC-107 withdraw()]  ← RC-3b per-function (new)
+          [ATTACKER_CONFIRM SWC-107]             ← RC-3 SWC-only
+          [ATTACKER_CONFIRM]                     ← legacy title match
         """
+        def _extract_fields(txt: str):
+            finding_ref = reason = path = exploit_path = ""
+            for ln in txt.split("\n"):
+                ln = ln.strip()
+                if ln.lower().startswith("finding:"):
+                    finding_ref = ln.split(":", 1)[1].strip()
+                elif ln.lower().startswith("reason:"):
+                    reason = ln.split(":", 1)[1].strip()
+                elif ln.lower().startswith("path:"):
+                    path = ln.split(":", 1)[1].strip()
+                elif ln.lower().startswith("exploit:") or ln.lower().startswith("exploit path:"):
+                    exploit_path = ln.split(":", 1)[1].strip()
+            return finding_ref, reason, path or exploit_path
+
+        # RC2: normalize markdown wrappers (bold/backtick) around ATTACKER tags
+        # Handles: **ATTACKER_DISMISS**, **ATTACKER_DISMISS SWC-101**, **[ATTACKER_DISMISS SWC-101 func()]**
+        _MD_WRAP_RE = re.compile(
+            r'[`*]{1,2}\[?(ATTACKER_(?:CONFIRM|DISMISS|ESCALATE|DOWNGRADE|ADD_PATH|EXPLOIT)'
+            r'(?:\s+(?:SWC-\d{1,3}|DEFI-[A-Z][A-Z_]+|INV-\d{1,3}))?'
+            r'(?:\s+[a-zA-Z_]\w*\(\))?)\]?[`*]{1,2}'
+        )
+        text = _MD_WRAP_RE.sub(r'[\1]', text)
+
+        # Check for ATTACKER_EXPLOIT INV-xxx first (invariant violation path)
+        exploit_matches = list(ContractAttackerAction._EXPLOIT_RE.finditer(text))
+        if exploit_matches:
+            m = exploit_matches[-1]
+            inv_id = m.group(1).upper()
+            finding_ref, reason, path = _extract_fields(text[m.start():])
+            # Parse feasibility
+            feasible = "yes"
+            for ln in text[m.start():].split("\n"):
+                if ln.lower().startswith("feasible:"):
+                    feasible = ln.split(":", 1)[1].strip().lower()
+                    break
+            # Parse impact
+            impact = ""
+            for ln in text[m.start():].split("\n"):
+                if ln.lower().startswith("impact:"):
+                    impact = ln.split(":", 1)[1].strip()
+                    break
+            return {
+                "action_type":      ContractAttackerAction.EXPLOIT,
+                "invariant_id":     inv_id,
+                "swc_id":           "",
+                "func_name":        "",
+                "finding_ref":      finding_ref or f"Invariant violation: {inv_id}",
+                "reason":           reason or impact,
+                "path":             path,
+                "feasible":         feasible,
+                "confidence_delta": ContractAttackerAction.CONFIDENCE_DELTA[ContractAttackerAction.EXPLOIT],
+            }
+
+        # RC1: use LAST match (final decision, not think-block deliberation noise)
+        all_matches = list(ContractAttackerAction._SWC_ACTION_RE.finditer(text))
+        if all_matches:
+            m = all_matches[-1]
+            action_type = m.group(1)
+            swc_id = m.group(2)
+            func_name = m.group(3) or ""   # e.g. "transfer()" or ""
+            # Extract fields from text at/after the last tag for accurate context
+            finding_ref, reason, path = _extract_fields(text[m.start():])
+            return {
+                "action_type":      action_type,
+                "swc_id":           swc_id,
+                "func_name":        func_name,
+                "finding_ref":      finding_ref,
+                "reason":           reason,
+                "path":             path,
+                "confidence_delta": ContractAttackerAction.CONFIDENCE_DELTA.get(action_type, 0.0),
+            }
+
+        # Legacy format: [ATTACKER_CONFIRM] — title match, no SWC
         for action_type in ContractAttackerAction.ALL:
             if f"[{action_type}]" in text:
-                lines = text.split("\n")
-                finding_ref = ""
-                reason = ""
-                path = ""
-                exploit_path = ""
-                for line in lines:
-                    line = line.strip()
-                    if line.lower().startswith("finding:"):
-                        finding_ref = line.split(":", 1)[1].strip()
-                    elif line.lower().startswith("reason:"):
-                        reason = line.split(":", 1)[1].strip()
-                    elif line.lower().startswith("path:"):
-                        path = line.split(":", 1)[1].strip()
-                    elif line.lower().startswith("exploit:") or line.lower().startswith("exploit path:"):
-                        exploit_path = line.split(":", 1)[1].strip()
-
+                finding_ref, reason, path = _extract_fields(text)
                 return {
                     "action_type":      action_type,
+                    "swc_id":           "",
+                    "func_name":        "",
                     "finding_ref":      finding_ref,
                     "reason":           reason,
-                    "path":             path or exploit_path,
+                    "path":             path,
                     "confidence_delta": ContractAttackerAction.CONFIDENCE_DELTA.get(action_type, 0.0),
                 }
         return None
+
+
+# ─── SWC Validation ──────────────────────────────────────────────────────────
+
+# Known non-standard tags that map to a canonical SWC/DEFI ID
+_SWC_REMAP: Dict[str, str] = {
+    "ACCESS_CONTROL_MISCONFIGURATION": "SWC-105",
+    "MISSING_ACCESS_CONTROL":          "SWC-105",
+    "UNPROTECTED_FUNCTION":            "SWC-105",
+    "FLASH_LOAN_PRICE_MANIPULATION":   "DEFI-FLASH_LOAN",
+    "FLASH_LOAN_ATTACK":               "DEFI-FLASH_LOAN",
+    "GOVERNANCE_FLASH_LOAN":           "DEFI-GOVERNANCE",
+    "REENTRANCY_ATTACK":               "SWC-107",
+    "INTEGER_OVERFLOW":                "SWC-101",
+    "INTEGER_UNDERFLOW":               "SWC-101",
+    "TIMESTAMP_DEPENDENCE":            "SWC-116",
+    "TX_ORIGIN_AUTHENTICATION":        "SWC-115",
+    "SIGNATURE_REPLAY":                "SWC-121",
+    "DELEGATECALL_INJECTION":          "SWC-112",
+}
+# Accepted formats: SWC-N through SWC-NNN, DEFI-UPPERCASE_NAME
+_VALID_SWC_RE = re.compile(r'^(SWC-\d{1,3}|DEFI-[A-Z][A-Z_]{2,})$')
+
+
+# ─── Function Field Parser ────────────────────────────────────────────────────
+
+# Only match identifiers starting with a letter (not underscore) — filters param names like _spender
+_SOLIDITY_FUNC_RE = re.compile(r'\b([a-zA-Z][a-zA-Z0-9_]{3,})\b')
+
+# English prose words and Solidity keywords that are NOT function names
+_FUNC_PROSE_BLACKLIST = frozenset({
+    "function", "functions", "contract", "assumed", "potentially", "standard",
+    "implied", "inferred", "general", "hypothetical", "specific", "similar",
+    "administrative", "operations", "involving", "balances", "supply",
+    "modifier", "returns", "internal", "external", "public", "private",
+    "virtual", "override", "memory", "storage", "calldata", "payable",
+    "view", "pure", "abstract", "address", "struct", "mapping", "event",
+    "error", "using", "import", "pragma", "solidity", "library", "interface",
+    "emit", "indexed", "constructor", "fallback", "receive", "assembly",
+    "delegatecall", "selfdestruct", "suicide", "keccak", "ecrecover",
+    "reentrancy", "overflow", "underflow", "vulnerability", "finding",
+    "critical", "unprotected", "missing", "lack", "absence", "potential",
+    "allows", "enables", "performs", "executes", "calls", "sends",
+    "receives", "creates", "deploys", "updates", "reads", "writes", "checks",
+    "requires", "asserts", "reverts", "emits", "certain", "certain",
+    "token", "owner", "spender", "amount", "value", "balance", "total",
+    "wallet", "account", "asset", "logic", "control", "access", "state",
+    "type", "name", "role", "guard", "check", "none", "null", "true",
+    "false", "this", "that", "with", "without", "from", "into", "through",
+    "during", "before", "after", "while", "when", "where", "which", "what",
+    "also", "then", "thus", "hence", "however", "therefore", "because",
+    "since", "case", "note", "instance", "example", "detail", "provided",
+    "context", "based", "determined", "determinable", "described", "mentioned",
+    "referenced", "indicated", "applies", "applied", "given", "known",
+    "unknown", "possible", "likely", "unlikely", "uncertain", "explicit",
+    "implicit", "inferred", "derived", "includes", "containing", "related",
+    "particularly", "especially", "specifically", "generally", "typically",
+    "effectively", "directly", "indirectly", "currently", "potentially",
+})
+
+
+def _parse_function_field(raw: str) -> List[str]:
+    """
+    RC-1 fix: extract only valid Solidity function names from the FUNCTION field.
+
+    Filters:
+    - Tokens starting with underscore (parameter names: _spender, _value)
+    - Tokens ending in a digit (type names: uint256, bytes32, int128)
+    - Prose words and Solidity keywords (via blacklist)
+    """
+    tokens = _SOLIDITY_FUNC_RE.findall(raw)
+    result = []
+    for t in tokens:
+        if (t[-1].isdigit()                # type name: uint256, bytes32, int128
+                or t.lower() in _FUNC_PROSE_BLACKLIST):
+            continue
+        result.append(t + "()")
+    return result
+
+
+def extract_known_functions(context_summary: str) -> set:
+    """
+    Parse function names from a contract_summary string.
+    Handles both formats emitted by build_context_summary():
+      - PUBLIC/EXTERNAL FUNCTIONS:\\n  - funcName()...
+      - DEFINED FUNCTIONS:\\n  funcA, funcB, funcC
+    Returns lowercase set of bare function names (no parens).
+    """
+    funcs: set = set()
+    # Format 1: "  - funcName()" lines under PUBLIC/EXTERNAL FUNCTIONS:
+    for m in re.finditer(r'^\s+-\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(', context_summary, re.MULTILINE):
+        funcs.add(m.group(1).lower())
+    # Format 2: "DEFINED FUNCTIONS:\n  funcA, funcB, ..." line
+    m2 = re.search(r'DEFINED FUNCTIONS:\s*\n\s*([^\n]+)', context_summary)
+    if m2:
+        for token in m2.group(1).split(','):
+            t = token.strip()
+            if re.match(r'^[a-zA-Z_][a-zA-Z0-9_]+$', t):
+                funcs.add(t.lower())
+    return funcs
+
+
+# ─── Evidence Gate ────────────────────────────────────────────────────────────
+
+# Solidity-specific markers — presence in evidence text indicates real code reference
+_EVIDENCE_MARKERS = (
+    "()", ".call", ".transfer", ".send", "require(", "assert(", "revert(",
+    "mapping(", "msg.sender", "msg.value", "msg.data", "block.", "tx.origin",
+    "tx.", "pragma", "function ", "modifier ", "emit ", "event ", "assembly",
+    "delegatecall", "selfdestruct", "suicide(", "ecrecover(", "keccak",
+    "+=", "-=", "*=", "++", "--", "<<", ">>",
+    "^0.",       # compiler version: ^0.4.24, ^0.8.0
+    "solidity ", # pragma solidity
+)
+
+def _has_specific_evidence(evidence: List[str], functions: List[str]) -> bool:
+    """
+    RC-2: Return True if finding has concrete code evidence.
+    After RC-1 fix, `functions` only contains clean Solidity identifiers.
+    """
+    # A named function that survived RC-1 filter = concrete evidence
+    if functions:
+        return True
+    if not evidence:
+        return False
+    combined = " ".join(evidence).lower()
+    # RC-2: reject trivially short evidence like "The", "N/A", "a function"
+    if len(combined.strip()) < 15:
+        return False
+    # Must contain at least one Solidity-specific syntax marker
+    return any(marker.lower() in combined for marker in _EVIDENCE_MARKERS)
 
 
 # ─── Contract Finding Parser ──────────────────────────────────────────────────
@@ -439,6 +663,7 @@ def parse_contract_finding_from_text(
     text: str,
     agent_profile: ContractAgentProfile,
     round_num: int,
+    known_functions: Optional[set] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     Parse ContractFinding from an agent post.
@@ -498,11 +723,13 @@ def parse_contract_finding_from_text(
             title = re.sub(r'(?i)^FINDING\s*:', '', stripped).replace("[FINDING]", "").strip()
         elif lower.startswith("swc:"):
             raw = stripped.split(":", 1)[1].strip()
-            # Extract first SWC-XXX or DeFi pattern key
-            m = re.search(r'(SWC-\d+|[A-Z_]{5,})', raw)
+            # Extract first SWC-XXX or known tag
+            m = re.search(r'(SWC-\d+|[A-Z][A-Z_]{4,})', raw)
             swc_id = m.group(1) if m else raw.split()[0] if raw else ""
+            # RC-5: remap known aliases to canonical IDs
+            swc_id = _SWC_REMAP.get(swc_id, swc_id)
             # Try to get SWC name from the rest
-            if m and raw != swc_id:
+            if m and raw != m.group(1):
                 after = raw[m.end():].strip(" -—:")
                 swc_name = after.split(".")[0].strip() if after else ""
         elif lower.startswith("severity:"):
@@ -511,11 +738,8 @@ def parse_contract_finding_from_text(
                 severity = sev_raw
         elif lower.startswith("function:"):
             func_raw = stripped.split(":", 1)[1].strip()
-            affected_functions = [
-                f.strip().rstrip("()").strip() + "()"
-                for f in func_raw.replace(",", " ").split()
-                if f.strip()
-            ]
+            # RC-1: extract only valid Solidity identifiers (not prose words)
+            affected_functions = _parse_function_field(func_raw)
         elif lower.startswith("evidence:"):
             evidence_raw = stripped.split(":", 1)[1].strip()
             evidence = [evidence_raw] if evidence_raw else []
@@ -537,6 +761,35 @@ def parse_contract_finding_from_text(
     _flush_field()
 
     if not title:
+        return None
+
+    # RC-5 — SWC validation: reject findings with unmappable non-standard SWC tags
+    if swc_id and not _VALID_SWC_RE.match(swc_id):
+        logger.debug(
+            f"RC-5: invalid SWC tag '{swc_id}' → dropped '{title[:60]}' "
+            f"from {agent_profile.agent_id}"
+        )
+        return None
+
+    # RC-1 (2nd layer) — if contract function list is known, keep only existing functions
+    if known_functions and affected_functions:
+        validated_funcs = [
+            f for f in affected_functions
+            if f.rstrip("()").lower() in known_functions
+        ]
+        if validated_funcs:
+            affected_functions = validated_funcs
+        # If none match the known list, discard all (don't fall back to garbage)
+        # but only if known_functions is substantial (>= 3 entries)
+        elif len(known_functions) >= 3:
+            affected_functions = []
+
+    # Layer 2 — Evidence gate: drop findings with no concrete code reference
+    if not _has_specific_evidence(evidence, affected_functions):
+        logger.debug(
+            f"Evidence gate: dropped '{title[:60]}' from {agent_profile.agent_id} "
+            f"— no function name or Solidity code pattern in evidence"
+        )
         return None
 
     return {
@@ -583,6 +836,148 @@ def _initial_confidence(severity: str, phase: str) -> float:
         base += 0.08
 
     return min(base, 0.85)
+
+
+# ─── Semantic Finding Parser (Web3Bugs S-category) ───────────────────────────
+
+SEMANTIC_CATEGORIES_LIST = [
+    "price_oracle", "flash_loan", "governance_attack",
+    "incorrect_accounting", "state_machine_bug", "incentive_misalignment",
+    "reentrancy_logic", "other",
+]
+
+SEMANTIC_FINDING_FORMAT = """\
+SEMANTIC_FINDING: <title>
+CATEGORY: <price_oracle|flash_loan|governance_attack|incorrect_accounting|state_machine_bug|incentive_misalignment|reentrancy_logic|other>
+SEVERITY: <critical|high|medium|low>
+FUNCTION: <affected_function()>
+EVIDENCE: <specific code pattern or economic invariant violated>
+ATTACK_PATH: <step-by-step scenario>"""
+
+_SEMANTIC_ATTACK_PATH_RE = re.compile(
+    r'(?i)^(STEP\s*\d+|→|\d+[\.\)]\s)', re.MULTILINE
+)
+
+
+def parse_semantic_finding_from_text(
+    text: str,
+    agent_profile: "ContractAgentProfile",
+    round_num: int,
+    known_functions: Optional[set] = None,
+) -> Optional[Dict[str, Any]]:
+    """
+    Parse a SEMANTIC_FINDING block from an agent post.
+
+    Expected format:
+      SEMANTIC_FINDING: <title>
+      CATEGORY: <category>
+      SEVERITY: <critical|high|medium|low>
+      FUNCTION: <affected_function()>
+      EVIDENCE: <specific code pattern or economic invariant violated>
+      ATTACK_PATH: <step-by-step scenario>
+
+    Returns raw dict or None if no semantic finding detected.
+    """
+    if not re.search(r'(?i)^SEMANTIC_FINDING\s*:', text, re.MULTILINE):
+        return None
+
+    lines = text.split("\n")
+    title = ""
+    category = "other"
+    severity = "medium"
+    affected_functions: List[str] = []
+    evidence = ""
+    attack_path: List[str] = []
+    phase = get_phase_for_round(round_num)
+
+    current_field = None
+    current_value: List[str] = []
+
+    def _flush():
+        nonlocal evidence, attack_path
+        if current_field == "evidence" and current_value:
+            evidence = " ".join(current_value)
+        elif current_field == "attack_path" and current_value:
+            attack_path = [v for v in current_value if v.strip()]
+
+    _FIELD_RE = re.compile(
+        r'(?i)^(SEMANTIC_FINDING|CATEGORY|SEVERITY|FUNCTION|EVIDENCE|ATTACK_PATH)\s*:',
+        re.MULTILINE
+    )
+
+    for line in lines:
+        stripped = line.strip()
+        lower = stripped.lower()
+
+        if _FIELD_RE.match(stripped):
+            _flush()
+            current_field = None
+            current_value = []
+
+        if re.match(r'(?i)^SEMANTIC_FINDING\s*:', stripped):
+            title = re.sub(r'(?i)^SEMANTIC_FINDING\s*:', '', stripped).strip()
+        elif lower.startswith("category:"):
+            cat_raw = stripped.split(":", 1)[1].strip().lower()
+            category = cat_raw if cat_raw in SEMANTIC_CATEGORIES_LIST else "other"
+        elif lower.startswith("severity:"):
+            sev_raw = stripped.split(":", 1)[1].strip().lower()
+            if sev_raw in {"critical", "high", "medium", "low", "info"}:
+                severity = sev_raw
+        elif lower.startswith("function:"):
+            func_raw = stripped.split(":", 1)[1].strip()
+            affected_functions = _parse_function_field(func_raw)
+        elif lower.startswith("evidence:"):
+            current_field = "evidence"
+            current_value = [stripped.split(":", 1)[1].strip()]
+        elif lower.startswith("attack_path:"):
+            current_field = "attack_path"
+            val = stripped.split(":", 1)[1].strip()
+            current_value = [val] if val else []
+        elif current_field and (line.startswith("  ") or (
+            stripped and not _FIELD_RE.match(stripped)
+        )):
+            if stripped:
+                current_value.append(stripped)
+
+    _flush()
+
+    if not title:
+        return None
+
+    # Validate known functions if provided
+    if known_functions and affected_functions:
+        validated = [f for f in affected_functions if f.rstrip("()").lower() in known_functions]
+        if validated:
+            affected_functions = validated
+        elif len(known_functions) >= 3:
+            affected_functions = []
+
+    # Require at least some evidence text
+    if not evidence or len(evidence.strip()) < 10:
+        logger.debug(
+            f"Semantic evidence gate: dropped '{title[:60]}' from {agent_profile.agent_id} "
+            f"— evidence too short or missing"
+        )
+        return None
+
+    return {
+        "finding_id":          f"sf_{uuid.uuid4().hex[:8]}",
+        "author_domain":       agent_profile.domain_group,
+        "author_persona":      agent_profile.persona,
+        "title":               title,
+        "category":            category,
+        "severity":            severity,
+        "affected_functions":  affected_functions,
+        "evidence":            evidence,
+        "attack_path":         attack_path,
+        "phase":               phase,
+        "round_number":        round_num,
+        "confidence":          _initial_confidence(severity, phase),
+        "validated_by":        [],
+        "challenged_by":       [],
+        "is_exploitable":      None,
+        "is_attacker_surfaced": False,
+    }
 
 
 # ─── OASIS Config Builder ─────────────────────────────────────────────────────
@@ -670,6 +1065,7 @@ class ContractAuditEnvBuilder:
         phase: str,
         round_num: int,
         gap_context: str = "",
+        phase_c_review_list: str = "",
     ) -> str:
         """Build system instruction injected at the start of each round."""
         phase_cfg = PHASE_CONFIG.get(phase, {})
@@ -677,6 +1073,9 @@ class ContractAuditEnvBuilder:
             f"=== Phase {phase}: {phase_cfg.get('name', '')} | Round {round_num}/{TOTAL_ROUNDS} ===\n"
             f"{phase_cfg.get('instruction_addition', '')}"
         )
+        # RC-3 Two-step Phase C: inject preliminary consensus findings for attackers to review
+        if phase == "C" and phase_c_review_list:
+            instruction = phase_c_review_list + "\n" + instruction
         if gap_context:
             instruction = gap_context + "\n" + instruction
         return instruction
@@ -733,6 +1132,13 @@ SWC-105 (Unprotected Ether Withdrawal), SWC-106 (Unprotected SELFDESTRUCT), SWC-
 SWC-112 (Delegatecall Untrusted Callee), SWC-113 (DoS / Unbounded Loop), SWC-114 (Front-Running / Tx Order Dependence),
 SWC-115 (tx.origin Authorization), SWC-116 (Block Timestamp Manipulation), SWC-120 (Weak Randomness),
 SWC-121 (Signature Replay). For DeFi-only patterns: `DEFI-<PATTERN>`.
+
+**CRITICAL — EVIDENCE GATE: Only report a finding if you can provide concrete evidence from THIS contract.**
+- FUNCTION must name a real function that exists in the contract (e.g. `withdraw()`, `changeOwner()`).
+- EVIDENCE must quote a specific code pattern, variable name, or line from the contract source — NOT a generic description.
+- If you cannot point to specific code in THIS contract → do NOT use FINDING format. Use GAP instead:
+  `GAP: No evidence of <vulnerability> in this contract — <function> not present / pattern not found.`
+- Hypothetical or "potential" findings without code evidence will be dismissed as false positives.
 
 Start the audit. Report your first findings based on the contract context above.
 """
