@@ -145,7 +145,7 @@ class ContractKGBuilder:
 
     # ─── Public async API ─────────────────────────────────────────────────────
 
-    def build_from_source_async(self, source_code: str, graph_name: str) -> str:
+    def build_from_source_async(self, source_code: str, graph_name: str, contract_name: str = "") -> str:
         """
         Async: parse Solidity source → build Zep KG.
         Returns task_id.
@@ -156,7 +156,7 @@ class ContractKGBuilder:
         )
         thread = threading.Thread(
             target=self._build_worker,
-            args=(task_id, source_code, graph_name),
+            args=(task_id, source_code, graph_name, contract_name),
             daemon=True,
         )
         thread.start()
@@ -197,35 +197,39 @@ class ContractKGBuilder:
 
         for name in func_names:
             func_re = re.compile(rf'\bfunction\s+{re.escape(name)}\b')
-            # Find line where function is defined
-            start = next(
-                (i for i, ln in enumerate(src_lines) if func_re.search(ln)), None
-            )
-            if start is None:
+            # Find ALL occurrences (flat files have interface stubs before implementations)
+            all_starts = [i for i, ln in enumerate(src_lines) if func_re.search(ln)]
+            if not all_starts:
                 continue
 
-            # Scan forward to opening brace (may be on same or next few lines)
-            brace_line = start
-            found_brace = False
-            for j in range(start, min(start + 6, len(src_lines))):
-                if '{' in src_lines[j]:
-                    brace_line = j
-                    found_brace = True
-                    break
-            if not found_brace:
-                continue
-
-            # Collect meaningful body lines
+            # Try occurrences in reverse order — implementation bodies come after stubs
             body: list = []
-            for ln in src_lines[brace_line + 1: brace_line + 18]:
-                s = ln.strip()
-                if not s or s.startswith('//') or s.startswith('*'):
+            for start in reversed(all_starts):
+                # Scan forward to opening brace (may be on same or next few lines)
+                brace_line = start
+                found_brace = False
+                for j in range(start, min(start + 6, len(src_lines))):
+                    if '{' in src_lines[j]:
+                        brace_line = j
+                        found_brace = True
+                        break
+                if not found_brace:
                     continue
-                if s == '}':
-                    break
-                body.append(s[:max_line_chars])
-                if len(body) >= max_body_lines:
-                    break
+
+                # Collect meaningful body lines
+                candidate: list = []
+                for ln in src_lines[brace_line + 1: brace_line + 18]:
+                    s = ln.strip()
+                    if not s or s.startswith('//') or s.startswith('*'):
+                        continue
+                    if s == '}':
+                        break
+                    candidate.append(s[:max_line_chars])
+                    if len(candidate) >= max_body_lines:
+                        break
+                if candidate:
+                    body = candidate
+                    break  # found an occurrence with actual body
 
             if body:
                 snippets[name] = ' | '.join(body)
@@ -561,14 +565,14 @@ class ContractKGBuilder:
 
     # ─── Workers ──────────────────────────────────────────────────────────────
 
-    def _build_worker(self, task_id: str, source_code: str, graph_name: str):
+    def _build_worker(self, task_id: str, source_code: str, graph_name: str, contract_name: str = ""):
         """Full pipeline: parse source → store to Zep."""
         try:
             self.task_manager.update_task(
                 task_id, status=TaskStatus.PROCESSING,
                 progress=5, message="Parsing Solidity source code..."
             )
-            entity = self.parser.parse_from_source(source_code)
+            entity = self.parser.parse_from_source(source_code, contract_name=contract_name)
 
             self.task_manager.update_task(
                 task_id, progress=40,

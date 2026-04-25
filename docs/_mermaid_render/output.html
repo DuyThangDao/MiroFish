@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Research Proposal</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;700&family=Noto+Serif:ital,wght@0,400;0,700;1,400&family=Source+Code+Pro&display=swap');
+
+* { box-sizing: border-box; }
+body {
+    font-family: 'Noto Serif', Georgia, serif, 'Noto Color Emoji', 'Apple Color Emoji', 'Segoe UI Emoji', 'Twemoji Mozilla', sans-serif;
+    font-size: 11pt;
+    line-height: 1.6;
+    color: #1a1a1a;
+    max-width: 780px;
+    margin: 0 auto;
+    padding: 20px 30px;
+}
+h1 { font-size: 22pt; margin-top: 1.5em; page-break-before: always; }
+h1:first-of-type { page-break-before: avoid; }
+h2 { font-size: 16pt; margin-top: 1.4em; border-bottom: 1px solid #ccc; padding-bottom: 4px; }
+h3 { font-size: 13pt; margin-top: 1.2em; }
+h4 { font-size: 11pt; font-weight: bold; }
+code, pre {
+    font-family: 'Source Code Pro', 'Courier New', monospace;
+    font-size: 9pt;
+    background: #f4f4f4;
+    border-radius: 3px;
+}
+code { padding: 1px 4px; }
+pre { padding: 10px 14px; overflow-x: auto; border-left: 3px solid #aaa; }
+pre code { background: none; padding: 0; }
+table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 12px 0;
+    font-size: 9.5pt;
+    page-break-inside: avoid;
+}
+th { background: #2c4a7c; color: white; font-weight: bold; text-align: left; }
+th, td { padding: 6px 10px; border: 1px solid #ccc; }
+tr:nth-child(even) { background: #f7f9fc; }
+blockquote {
+    border-left: 4px solid #2c4a7c;
+    margin-left: 0;
+    padding-left: 16px;
+    color: #444;
+    font-style: italic;
+}
+.mermaid {
+    text-align: center;
+    margin: 20px 0;
+    page-break-inside: avoid;
+}
+.mermaid svg {
+    width: 100% !important;
+    height: auto !important;
+    max-width: 100%;
+    display: block;
+    margin: 0 auto;
+}
+@page {
+    size: A4;
+    margin: 2.2cm 2cm 2cm 2cm;
+}
+@media print {
+    pre { page-break-inside: avoid; }
+}
+</style>
+</head>
+<body>
+<h1 id="multi-expert-llm-panel-for-smart-contract-vulnerability-detection">Multi-Expert LLM Panel for Smart Contract Vulnerability Detection</h1><p><strong>Đề tài</strong>: Ứng dụng GenAI trong việc tự động phát hiện lỗ hổng logic và đề xuất bản vá cho Smart Contracts trên nền tảng Blockchain</p><hr /><h2 id="abstract">Abstract</h2><p>Smart contract là các chương trình bất biến được triển khai trên blockchain, quản lý trực tiếp tài sản tài chính. Các công cụ kiểm toán tự động hiện có — chủ yếu là phân tích tĩnh (Slither, Mythril) và hướng tiếp cận đơn LLM (GPTScan) — có tỷ lệ False Positive cao và khả năng phát hiện lỗ hổng ngữ nghĩa/logic nghiệp vụ hạn chế. Nghiên cứu này đề xuất <strong>MECAP (Multi-Expert Contract Audit Panel)</strong> — một framework đa tác nhân LLM mới, điều phối 22 agents chuyên biệt trên 7 lĩnh vực bảo mật để kiểm toán smart contract Solidity từ nhiều góc nhìn chuyên gia đồng thời. MECAP giới thiệu ba đóng góp chính: (1) cơ chế Knowledge Graph grounding gắn kết suy luận của agent với bằng chứng cụ thể trong contract, giảm hallucination; (2) phiên kiểm toán 3 pha (intra-domain → cross-domain → attacker challenge) thách thức và xác minh findings một cách có hệ thống; và (3) cơ chế đồng thuận 3 lớp có trọng số kết hợp sự đồng ý trong domain (w=0.30), xác nhận chéo giữa các domain (w=0.45), và corroboration từ attacker (w=0.25) để lọc False Positive. MECAP được đánh giá trên SmartBugs Curated — 143 contracts được gán nhãn thủ công qua 10 danh mục SWC — với mục tiêu Macro F1 ≥ 0.75, Precision ≥ 0.60 và Recall ≥ 0.80. Một ablation study qua 5 biến thể hệ thống (V1–V5) xác nhận độc lập từng đóng góp kiến trúc.</p><hr /><h2 id="bối-cảnh-và-động-lực-nghiên-cứu">1. Bối cảnh và Động lực nghiên cứu</h2><p>Smart contract là các chương trình tự thực thi trên blockchain — <strong>không thể sửa sau khi deploy</strong>, xử lý trực tiếp tài sản tài chính. Điều này khiến lỗ hổng bảo mật có hậu quả không thể đảo ngược:</p><table><thead><tr class="header"><th>Vụ tấn công</th><th>Lỗ hổng</th><th>Thiệt hại</th></tr></thead><tbody><tr class="odd"><td>The DAO hack (2016)</td><td>Reentrancy (SWC-107)</td><td><strong>$60M</strong></td></tr><tr class="even"><td>Parity Multisig (2017)</td><td>Access control (SWC-115)</td><td>Đóng băng <strong>$150M</strong></td></tr><tr class="odd"><td>bZx Protocol (2020)</td><td>Flash loan + oracle manipulation</td><td><strong>$1M</strong></td></tr><tr class="even"><td>Ronin Bridge (2022)</td><td>Validator key compromise</td><td><strong>$625M</strong></td></tr><tr class="odd"><td>Euler Finance (2023)</td><td>Logic lỗi DeFi lending</td><td><strong>$197M</strong></td></tr></tbody></table><p>Tổng thiệt hại từ DeFi hacks: <strong>&gt;$10 tỷ USD</strong> từ 2016–2024 (DeFiLlama, 2024).</p><p><strong>Vấn đề với công cụ kiểm toán hiện tại:</strong></p><table><colgroup><col style="width: 24%" /><col style="width: 35%" /><col style="width: 40%" /></colgroup><thead><tr class="header"><th>Công cụ</th><th>Phương pháp</th><th>Hạn chế chính</th></tr></thead><tbody><tr class="odd"><td>Slither (Feist et al., 2019)</td><td>Static analysis / pattern matching</td><td>False Positive cao; bỏ sót semantic flaw</td></tr><tr class="even"><td>Mythril (ConsenSys, 2018)</td><td>Symbolic execution</td><td>Chậm; path explosion; bỏ sót logic lỗi</td></tr><tr class="odd"><td>Manticore / Echidna</td><td>Symbolic exec / Fuzzing</td><td>Không cover được DeFi-specific patterns</td></tr><tr class="even"><td>GPTScan (Sun et al., 2023)</td><td>AST + single LLM</td><td>F1=0.88 nhưng không đánh giá exploitability</td></tr><tr class="odd"><td>Manual audit</td><td>Human expert</td><td>$50K–$200K/contract; không scale được</td></tr></tbody></table><p><strong>Research Gap:</strong><br />
+Chưa có hệ thống nào kết hợp <strong>(a)</strong> đa góc nhìn chuyên môn song song, <strong>(b)</strong> cơ chế kiểm chứng khả năng khai thác (exploitability validation), và <strong>(c)</strong> grounding vào knowledge graph để giảm hallucination — trong một pipeline tự động thống nhất.</p><hr /><h2 id="phát-biểu-bài-toán">2. Phát biểu bài toán</h2><h3 id="định-nghĩa-hình-thức">2.1 Định nghĩa hình thức</h3><p>Bài toán được phát biểu như sau: <strong>cho đầu vào là một smart contract viết bằng Solidity, hệ thống cần trả về danh sách các lỗ hổng bảo mật được phát hiện</strong> — mỗi lỗ hổng bao gồm:</p><table><thead><tr class="header"><th>Thuộc tính</th><th>Ý nghĩa</th></tr></thead><tbody><tr class="odd"><td>Tên/mô tả</td><td>Mô tả ngắn gọn bản chất lỗ hổng</td></tr><tr class="even"><td>Mã SWC</td><td>Phân loại theo SWC Registry (chuẩn quốc tế)</td></tr><tr class="odd"><td>Mức độ nghiêm trọng</td><td>Critical / High / Medium / Low</td></tr><tr class="even"><td>Vị trí</td><td>Tên function và dòng code chứa lỗ hổng</td></tr><tr class="odd"><td>Độ tin cậy</td><td>Điểm từ 0–1 do cơ chế đồng thuận tính toán</td></tr><tr class="even"><td>Đề xuất vá</td><td>Đoạn code Solidity gợi ý để khắc phục</td></tr></tbody></table><h3 id="tiêu-chí-thành-công">2.2 Tiêu chí thành công</h3><p>Hệ thống được đánh giá trên tập SmartBugs Curated (143 contracts, 10 SWC categories) với ground truth gán nhãn thủ công. Để đạt yêu cầu, kết quả phải đồng thời thỏa mãn:</p><ul><li><strong>Macro F1 ≥ 0.75</strong> — đo hiệu năng trung bình qua tất cả các contracts, không trọng số theo category</li><li><strong>Precision ≥ 0.60</strong> — kiểm soát tỷ lệ báo động nhầm (False Positive)</li><li><strong>Recall ≥ 0.80</strong> — đảm bảo không bỏ sót lỗ hổng thực sự</li></ul><h3 id="giả-thuyết-nghiên-cứu">2.3 Giả thuyết nghiên cứu</h3><blockquote><p><strong>H1</strong>: Kiến trúc multi-agent với đa góc nhìn chuyên môn đạt Macro F1 cao hơn đáng kể so với single-agent approach trên cùng dataset.</p></blockquote><blockquote><p><strong>H2</strong>: Knowledge Graph grounding giảm tỷ lệ findings không có evidence (hallucination rate) so với phiên bản không có KG.</p></blockquote><blockquote><p><strong>H3</strong>: Attacker profiles cải thiện Precision thông qua việc loại bỏ các lỗ hổng không thực sự khai thác được.</p></blockquote><hr /><h2 id="mục-tiêu-nghiên-cứu">3. Mục tiêu nghiên cứu</h2><h3 id="mục-tiêu-tổng-quát">3.1 Mục tiêu tổng quát</h3><p>Xây dựng hệ thống tự động phát hiện lỗ hổng logic và đề xuất bản vá cho smart contract trên nền tảng EVM, ứng dụng kiến trúc đa tác nhân LLM (Multi-Expert Panel) kết hợp Knowledge Graph để nâng cao độ chính xác và giảm tỷ lệ False Positive so với các công cụ hiện có.</p><h3 id="mục-tiêu-cụ-thể">3.2 Mục tiêu cụ thể</h3><table><colgroup><col style="width: 9%" /><col style="width: 31%" /><col style="width: 59%" /></colgroup><thead><tr class="header"><th>#</th><th>Mục tiêu</th><th>Tiêu chí đánh giá</th></tr></thead><tbody><tr class="odd"><td><strong>MT1</strong></td><td>Xây dựng pipeline phân tích end-to-end: Solidity source → audit report</td><td>Pipeline hoàn chỉnh, chạy được trên SmartBugs dataset</td></tr><tr class="even"><td><strong>MT2</strong></td><td>Thiết kế cơ chế đồng thuận 3 lớp để lọc False Positive</td><td>Precision ≥ 0.60 trên SmartBugs Curated</td></tr><tr class="odd"><td><strong>MT3</strong></td><td>Tích hợp 5 attacker profiles để xác nhận exploitability</td><td>Attacker profiles cải thiện F1 so với V3 (no attacker)</td></tr><tr class="even"><td><strong>MT4</strong></td><td>Đề xuất bản vá tự động cho các lỗ hổng được phát hiện</td><td>Patch suggestions áp dụng được vào source code</td></tr><tr class="odd"><td><strong>MT5</strong></td><td>Đánh giá hệ thống trên SmartBugs Curated (143 contracts)</td><td>Macro F1 ≥ 0.75, vượt baseline Slither (F1=0.67)</td></tr></tbody></table><blockquote><p><strong>Tại sao baseline là Slither (F1=0.67) chứ không phải GPTScan (F1=0.88)?</strong></p><p>GPTScan báo cáo F1=0.88 nhưng con số này được đo trên một <strong>tập con tự chọn</strong> — cụ thể là các “logic vulnerability” contracts mà GPTScan dùng template để lọc trước. Khi chỉ đánh giá trên những contracts phù hợp template của nó, kết quả tự nhiên cao hơn. Trong khi đó, <strong>Slither F1=0.67 được đo trên toàn bộ SmartBugs Curated 143 contracts</strong> — đúng dataset mà MECAP sẽ được đánh giá — tạo ra so sánh công bằng (apples-to-apples). Ngoài ra, MECAP nhắm đến phủ rộng nhiều SWC category (không chỉ logic bugs), nên mục tiêu F1 ≥ 0.75 vượt Slither trên cùng dataset là tiêu chí thực tế và có ý nghĩa học thuật.</p></blockquote><h3 id="phạm-vi-nghiên-cứu">3.3 Phạm vi nghiên cứu</h3><ul><li><strong>Trong phạm vi</strong>: Smart contract Solidity, EVM-compatible chains; phát hiện trước khi deploy (pre-deployment audit)</li><li><strong>Ngoài phạm vi</strong>: Bytecode đã deploy; non-EVM chains (Solana, Cardano); tự động deploy patch lên blockchain</li></ul><hr /><h2 id="phạm-vi-nền-tảng">4. Phạm vi nền tảng</h2><h3 id="phân-tích-kiến-trúc-off-chain-vs-on-chain">4.1 Phân tích kiến trúc: Off-chain vs On-chain</h3><p>Hệ thống chạy hoàn toàn <strong>off-chain</strong> — không deploy lên blockchain:</p><pre><code>Input:   Solidity source code (.sol file)
+          ↓
+Process: Off-chain pipeline (Python + LLM + Knowledge Graph)
+          ↓
+Output:  Audit Report (.json / .md)</code></pre><p><strong>Lý do chọn off-chain:</strong> Smart contract sau khi deploy là immutable. Công cụ audit phải chạy <strong>trước khi deploy</strong> (pre-deployment), nằm ngoài blockchain. Chạy on-chain sẽ yêu cầu <strong>gas fee</strong> — phí giao dịch trả cho network để thực thi code trên blockchain; mỗi lần gọi hàm smart contract on-chain đều tiêu tốn ETH, không thực tế cho automated pipeline cần phân tích hàng trăm contracts liên tục.</p><h3 id="nền-tảng-blockchain-được-hỗ-trợ">4.2 Nền tảng Blockchain được hỗ trợ</h3><blockquote><p><strong>EVM (Ethereum Virtual Machine)</strong> là máy ảo thực thi code smart contract trên Ethereum và các blockchain tương thích. EVM định nghĩa bytecode format, instruction set, và mô hình thực thi — tất cả smart contract Solidity đều biên dịch xuống EVM bytecode. Các blockchain “EVM-compatible” chia sẻ cùng môi trường thực thi này, có nghĩa smart contract Solidity chạy giống hệt nhau trên Ethereum, BNB Chain, Polygon, v.v. mà không cần sửa code.</p></blockquote><p>Phân tích Solidity source code → nhắm đến <strong>EVM-compatible chains</strong>:</p><table><thead><tr class="header"><th>Blockchain</th><th>EVM</th><th>Solidity</th><th>Hỗ trợ</th></tr></thead><tbody><tr class="odd"><td>Ethereum (Mainnet, Sepolia)</td><td><span style="color:#22a839;font-weight:bold">✓</span></td><td><span style="color:#22a839;font-weight:bold">✓</span></td><td><span style="color:#22a839;font-weight:bold">✓</span> Primary target</td></tr><tr class="even"><td>BNB Smart Chain (BSC)</td><td><span style="color:#22a839;font-weight:bold">✓</span></td><td><span style="color:#22a839;font-weight:bold">✓</span></td><td><span style="color:#22a839;font-weight:bold">✓</span></td></tr><tr class="odd"><td>Polygon (MATIC)</td><td><span style="color:#22a839;font-weight:bold">✓</span></td><td><span style="color:#22a839;font-weight:bold">✓</span></td><td><span style="color:#22a839;font-weight:bold">✓</span></td></tr><tr class="even"><td>Avalanche C-Chain</td><td><span style="color:#22a839;font-weight:bold">✓</span></td><td><span style="color:#22a839;font-weight:bold">✓</span></td><td><span style="color:#22a839;font-weight:bold">✓</span></td></tr><tr class="odd"><td>Arbitrum / Optimism (L2)</td><td><span style="color:#22a839;font-weight:bold">✓</span></td><td><span style="color:#22a839;font-weight:bold">✓</span></td><td><span style="color:#22a839;font-weight:bold">✓</span></td></tr><tr class="even"><td>Solana</td><td><span style="color:#d32f2f;font-weight:bold">✗</span> (SVM)</td><td><span style="color:#d32f2f;font-weight:bold">✗</span> (Rust)</td><td><span style="color:#d32f2f;font-weight:bold">✗</span></td></tr><tr class="odd"><td>Cardano</td><td><span style="color:#d32f2f;font-weight:bold">✗</span></td><td><span style="color:#d32f2f;font-weight:bold">✗</span> (Plutus)</td><td><span style="color:#d32f2f;font-weight:bold">✗</span></td></tr><tr class="even"><td>Cosmos / NEAR</td><td><span style="color:#d32f2f;font-weight:bold">✗</span></td><td><span style="color:#d32f2f;font-weight:bold">✗</span> (Rust/Go)</td><td><span style="color:#d32f2f;font-weight:bold">✗</span></td></tr></tbody></table><p><strong>Tại sao Solana, Cardano, Cosmos không được hỗ trợ?</strong></p><p>Các nền tảng non-EVM không tương thích với hệ thống ở <strong>3 lớp cơ bản</strong>:</p><ol type="1"><li><p><strong>Ngôn ngữ lập trình khác hoàn toàn</strong>: Solana dùng Rust, Cardano dùng Plutus (Haskell), Cosmos dùng Rust/Go — không phải Solidity. Parser của MECAP được xây dựng cho Solidity AST, không thể đọc được code Rust hay Plutus.</p></li><li><p><strong>Mô hình lỗ hổng không áp dụng được</strong>: SWC Registry (bộ taxonomy lỗ hổng mà MECAP dùng) chỉ định nghĩa lỗ hổng cho EVM/Solidity. Reentrancy (SWC-107), tx.origin (SWC-115)… là khái niệm đặc thù EVM — không tồn tại trên Solana hay Cardano vì họ có execution model hoàn toàn khác.</p></li><li><p><strong>Dataset đánh giá (SmartBugs Curated) là 100% Solidity contracts</strong>: Không có benchmark tương đương cho Rust/Plutus-based smart contracts.</p></li></ol><p><strong>Hướng mở rộng:</strong> Hỗ trợ non-EVM chains đòi hỏi xây dựng lại toàn bộ parser, định nghĩa vulnerability taxonomy riêng, và có dataset labeled mới — ngoài phạm vi luận án này.</p><hr /><h2 id="ý-tưởng-cốt-lõi">5. Ý tưởng cốt lõi</h2><p><strong>MECAP — Multi-Expert Contract Audit Panel</strong> (Hội đồng Kiểm toán Hợp đồng Đa Chuyên gia) — Áp dụng kiến trúc hội đồng đa chuyên gia LLM để phân tích smart contract từ nhiều góc nhìn song song, sau đó dùng cơ chế đồng thuận 3 lớp để lọc False Positive và xếp hạng lỗ hổng.</p><ul><li><strong>Multi-Expert</strong>: 22 agents với vai trò chuyên biệt (AppSec, DeFi Security, Cryptography, Governance, Attacker…) — không ai nhìn contract từ một góc duy nhất</li><li><strong>Contract Audit</strong>: kiểm toán toàn diện smart contract, từ lỗi code-level đến lỗ hổng logic nghiệp vụ</li><li><strong>Panel</strong>: hội đồng tranh luận — các experts challenge, validate, và phản biện lẫn nhau qua 3 phase và 10 rounds</li></ul><pre><code>Nguồn cảm hứng (MiroFish — mô phỏng xã hội):
+  Multi-agent LLM → Mô phỏng lan truyền thông tin trên mạng xã hội
+                     ↕ transfer kiến trúc multi-agent
+Ứng dụng vào smart contract audit:
+  Multi-agent LLM → Phân tích lỗ hổng từ đa góc nhìn chuyên môn</code></pre><p><strong>Điểm khác biệt then chốt:</strong></p><table><thead><tr class="header"><th>Yếu tố</th><th>Công cụ hiện có</th><th>MECAP</th></tr></thead><tbody><tr class="odd"><td>Số góc nhìn</td><td>1 (single tool/LLM)</td><td>22 agents × 7 domains</td></tr><tr class="even"><td>Knowledge grounding</td><td>Không</td><td>Zep KG với contract entities</td></tr><tr class="odd"><td>Exploitability check</td><td>Không (GPTScan)</td><td>5 attacker profiles</td></tr><tr class="even"><td>Consensus mechanism</td><td>LLM threshold / rule</td><td>3-layer weighted voting</td></tr><tr class="odd"><td>DeFi coverage</td><td>Hạn chế</td><td>DeFi domain group chuyên biệt</td></tr></tbody></table><p><strong>Novelty statement:</strong> &gt; <em>To the best of our knowledge, MECAP is the first framework to apply structured multi-domain agent debate with Knowledge Graph grounding and attacker-perspective corroboration specifically to smart contract vulnerability detection.</em></p><hr /><h2 id="cơ-sở-lý-thuyết">6. Cơ sở lý thuyết</h2><h3 id="các-khái-niệm-nền-tảng">6.1 Các khái niệm nền tảng</h3><h4 id="large-language-model-llm">Large Language Model (LLM)</h4><p>LLM là mô hình ngôn ngữ dựa trên kiến trúc <strong>Transformer</strong> (Vaswani et al., 2017), được huấn luyện trên corpus văn bản khổng lồ qua self-supervised learning. Các khả năng quan trọng:</p><table><colgroup><col style="width: 24%" /><col style="width: 18%" /><col style="width: 56%" /></colgroup><thead><tr class="header"><th>Khả năng</th><th>Mô tả</th><th>Ứng dụng trong MECAP</th></tr></thead><tbody><tr class="odd"><td><strong>In-context learning</strong></td><td>Học từ few-shot examples trong prompt</td><td>Agent nhận diện SWC pattern qua examples</td></tr><tr class="even"><td><strong>Instruction following</strong></td><td>Thực hiện tác vụ theo mô tả ngôn ngữ tự nhiên</td><td>System prompt định nghĩa expert role</td></tr><tr class="odd"><td><strong>Code generation/analysis</strong></td><td>Hiểu và sinh Solidity code</td><td>Phân tích source code, đề xuất patch</td></tr><tr class="even"><td><strong>Chain-of-Thought</strong></td><td>Suy luận từng bước có giải thích</td><td>Agents trình bày reasoning cho mỗi finding</td></tr></tbody></table><p>Mô hình sử dụng: <strong>Google Gemini 2.5 Flash</strong> (Vertex AI) — long context 1M tokens, cost-effective, strong code analysis.</p><h4 id="prompt-engineering">Prompt Engineering</h4><p>Kỹ thuật thiết kế đầu vào để định hướng hành vi LLM:</p><ul><li><strong>System prompt</strong>: Định nghĩa vai trò, kiến thức miền, format output cố định</li><li><strong>Role-playing</strong>: Gán nhân vật chuyên gia để kích hoạt domain knowledge</li><li><strong>Structured output</strong>: Yêu cầu JSON schema cụ thể để parse findings tự động</li><li><strong>Context injection</strong>: Inject relevant KG nodes vào prompt trước khi agent phân tích</li></ul><h4 id="retrieval-augmented-generation-rag">Retrieval-Augmented Generation (RAG)</h4><p>Kỹ thuật kết hợp LLM với external knowledge base — agent query knowledge graph trước khi sinh response. Giảm hallucination và tăng factual accuracy (Lewis et al., 2020). MECAP áp dụng RAG bằng cách inject KG context (functions, state variables, call graph) vào mỗi agent prompt.</p><h3 id="smart-contract-và-swc-registry">6.2 Smart Contract và SWC Registry</h3><p><strong>Smart Contract Weakness Classification (SWC) Registry</strong> — taxonomy chuẩn gồm 40 loại lỗ hổng (tương tự CWE cho software security):</p><table><thead><tr class="header"><th>SWC ID</th><th>Tên</th><th>Ví dụ thực tế</th></tr></thead><tbody><tr class="odd"><td>SWC-107</td><td>Reentrancy</td><td>The DAO hack — $60M</td></tr><tr class="even"><td>SWC-101</td><td>Integer Overflow/Underflow</td><td>BEC Token — $900M</td></tr><tr class="odd"><td>SWC-115</td><td>Authorization via tx.origin</td><td>Phishing attack vector</td></tr><tr class="even"><td>SWC-116</td><td>Block Timestamp Manipulation</td><td>Lottery/randomness exploit</td></tr><tr class="odd"><td>SWC-120</td><td>Weak Randomness</td><td>On-chain PRNG games</td></tr><tr class="even"><td>SWC-132</td><td>Unexpected ETH via Selfdestruct</td><td>Invariant violation</td></tr></tbody></table><p><strong>DeFi-specific attack patterns</strong> (ngoài SWC Registry):</p><table><colgroup><col style="width: 23%" /><col style="width: 21%" /><col style="width: 55%" /></colgroup><thead><tr class="header"><th>Pattern</th><th>Cơ chế</th><th>Điều kiện xuất hiện</th></tr></thead><tbody><tr class="odd"><td>Flash Loan Attack</td><td>Vay không cần tài sản đảm bảo trong 1 tx</td><td>AMM pool + oracle phụ thuộc spot price</td></tr><tr class="even"><td>Price Oracle Manipulation</td><td>Thao túng AMM pool → giá sai → liquidation</td><td>Contract dùng DEX price làm oracle</td></tr><tr class="odd"><td>Governance Attack</td><td>Vay token governance → vote proposal độc hại</td><td>Governance không có timelock</td></tr><tr class="even"><td>Sandwich Attack</td><td>Front-run và back-run giao dịch lớn trên DEX</td><td>MEV-enabled environment</td></tr></tbody></table><h3 id="multi-agent-llm-systems">6.3 Multi-Agent LLM Systems</h3><p><strong>Emergent behavior trong multi-agent debate</strong>: Khi nhiều agents với góc nhìn khác nhau challenge và validate lẫn nhau, độ chính xác tổng hợp vượt bất kỳ agent đơn lẻ nào — được chứng minh bởi:</p><ul><li><strong>Society of Mind</strong> (Minsky, 1986): Intelligence emerges from interaction of simple agents</li><li><strong>LLM Debate</strong> (Du et al., 2023): Multi-agent debate cải thiện factual accuracy +15% vs single-agent</li><li><strong>AgentVerse</strong> (Chen et al., 2023): Adversarial agent roles cải thiện solution quality</li></ul><p><strong>Phân biệt với single-agent approaches:</strong></p><pre><code>GPTScan (single-agent):          MECAP (multi-agent):
+  1 LLM call                       22 agents × 10 rounds
+  1 góc nhìn                       7 domains × 3 phases
+  Không debate                     Challenge + validate
+  Không exploitability             Attacker corroboration</code></pre><h4 id="oasis-và-kiến-trúc-nền-tảng-của-mecap">OASIS và kiến trúc nền tảng của MECAP</h4><p><strong>OASIS</strong> (Yang et al., 2024) là framework mô phỏng mạng xã hội đa tác nhân xây dựng trên CAMEL-AI. Trong OASIS, mỗi agent đại diện một user mạng xã hội với profile riêng (tính cách, hành vi, quan điểm), tương tác qua shared action bus theo vòng lặp có cấu trúc — mô phỏng cách thông tin lan truyền và hình thành đồng thuận trong cộng đồng.</p><p><strong>MiroFish</strong> là hệ thống fork OASIS, ứng dụng cho bài toán dự đoán lan truyền thông tin và mô phỏng hành vi xã hội. MECAP là bước transfer kiến trúc này sang security domain — thay vì mô phỏng xã hội, các agents đóng vai chuyên gia bảo mật tranh luận về lỗ hổng.</p><table><colgroup><col style="width: 25%" /><col style="width: 38%" /><col style="width: 35%" /></colgroup><thead><tr class="header"><th>Yếu tố kiến trúc</th><th>OASIS (social simulation)</th><th>MECAP (security audit)</th></tr></thead><tbody><tr class="odd"><td>Agent persona</td><td>User profile (tính cách, quan điểm)</td><td>Expert profile (domain, attack style)</td></tr><tr class="even"><td>Interaction model</td><td>Post / React / Comment trên social feed</td><td>POST_FINDING / CHALLENGE / VALIDATE trong audit session</td></tr><tr class="odd"><td>Consensus mechanism</td><td>Thông tin được lan truyền nếu đủ engagement</td><td>Lỗ hổng được giữ lại nếu đủ cross-domain validation</td></tr><tr class="even"><td>Structured rounds</td><td>Turn-based simulation rounds</td><td>3-phase, 10-round audit session</td></tr><tr class="odd"><td>Shared state</td><td>Social feed (posts, reactions)</td><td>Audit session feed (findings, challenges)</td></tr></tbody></table><p><strong>Giá trị của domain transfer này:</strong> MECAP không xây dựng multi-agent framework từ đầu — nó kế thừa một kiến trúc đã được validate trên bài toán social dynamics, nơi cơ chế debate và hình thành đồng thuận giữa các agents đã được chứng minh hoạt động. Việc mapping thành công từ social simulation sang security audit cho thấy kiến trúc dạng này có tính tổng quát cao, không bị giới hạn trong một domain cụ thể — đây là đóng góp học thuật bổ sung bên cạnh các đóng góp kỹ thuật chính của MECAP.</p><h3 id="knowledge-graph-cho-agent-grounding">6.4 Knowledge Graph cho Agent Grounding</h3><p><strong>Vấn đề hallucination</strong>: LLM agents có thể sinh findings không có cơ sở trong source code.</p><p><strong>Giải pháp — Contract Knowledge Graph:</strong></p><pre><code>Solidity source → Parser → Extract entities → Zep Graph DB
+
+Entities:  functions, state_variables, modifiers, events, external_calls
+Relations: CALLS, MODIFIES_STATE, READS_STATE, INHERITS, EMITS, EXTERNAL_CALL_TO</code></pre><p>Agents query KG khi cần evidence → findings phải có anchor cụ thể (function name, line number, state variable) → có thể kiểm chứng độc lập. Đây là ứng dụng RAG (Lewis et al., 2020) vào security domain.</p><h3 id="consensus-mechanism">6.5 Consensus Mechanism</h3><p><strong>3-layer weighted confidence</strong> (tương tự voting ensemble trong ML — Dietterich, 2000):</p><pre><code>Layer 1 — Intra-domain agreement   (weight = 0.30)
+  score = agree_agents / total_agents_in_domain
+
+Layer 2 — Cross-domain validation  (weight = 0.45)  ← highest weight
+  score = validated_domain_groups / total_domain_groups
+  [ngăn group bias: 1 domain không thể tự validate mình]
+
+Layer 3 — Attacker corroboration   (weight = 0.25)
+  score = attacker_confirmations / 5
+
+confidence_final = L1×0.30 + L2×0.45 + L3×0.25
+threshold = 0.35  →  confidence &lt; 0.35: loại bỏ (likely FP)</code></pre><p><strong>Căn cứ chọn trọng số:</strong></p><table><colgroup><col style="width: 31%" /><col style="width: 36%" /><col style="width: 31%" /></colgroup><thead><tr class="header"><th>Layer</th><th>Weight</th><th>Lý do</th></tr></thead><tbody><tr class="odd"><td>Cross-domain</td><td>0.45</td><td>Independent validation từ domain khác — bằng chứng mạnh nhất, không bị group bias</td></tr><tr class="even"><td>Intra-domain</td><td>0.30</td><td>Expert consensus trong domain — cần thiết nhưng có thể bị confirmation bias</td></tr><tr class="odd"><td>Attacker</td><td>0.25</td><td>Xác nhận exploitability quan trọng nhưng chỉ là tie-breaker, không tự quyết định</td></tr></tbody></table><hr /><h2 id="kiến-trúc-hệ-thống">7. Kiến trúc hệ thống</h2><h3 id="pipeline-tổng-thể">7.1 Pipeline tổng thể</h3><div class="mermaid">flowchart TD
+    A[/"Smart Contract\n(.sol source code)"/] --> B
+
+    subgraph Phase1["Phase 1 — Data Layer"]
+        B["Contract Parser\n(Solidity → ContractEntity)"]
+        B --> C["Contract KG Builder\n(Zep Graph DB)"]
+        C --> D[("Knowledge Graph\nfunctions · state_vars\nmodifiers · events")]
+    end
+
+    subgraph Phase2["Phase 2 — Agent Setup"]
+        E["Contract Profile Generator\n(17 expert + 5 attacker profiles)"]
+        D --> E
+        E --> F1["Tier 1: 17 Domain Expert Agents\n7 domains × 2–3 personas"]
+        E --> F2["Tier 2: 5 Attacker Profile Agents\nFlash Loan · Reentrancy · Governance\nAccess Control · Logic"]
+    end
+
+    subgraph Phase3["Phase 3 — Multi-Expert Audit Session"]
+        F1 & F2 --> G
+        D --> G["Cyber Session Orchestrator\n(10 rounds · 3 phases)"]
+        G --> H1["Phase A — Intra-domain\nRounds 1–3"]
+        H1 --> H2["Phase B — Cross-domain\nRounds 4–7"]
+        H2 --> H3["Phase C — Attacker Challenge\nRounds 8–10"]
+    end
+
+    subgraph Phase4["Phase 4 — Consensus & Report"]
+        H3 --> I["Consensus Engine\n3-layer weighted confidence"]
+        I --> J["Contract Audit Report Agent\n(ReACT pattern)"]
+        J --> K[/"Audit Report\nvulnerabilities · severity\nexploit scenario · patch"/]
+    end
+
+    style Phase1 fill:#1e3a5f,color:#fff
+    style Phase2 fill:#1a4a2e,color:#fff
+    style Phase3 fill:#4a2a1a,color:#fff
+    style Phase4 fill:#3a1a4a,color:#fff</div><h3 id="cấu-trúc-agent-22-agents">7.2 Cấu trúc Agent (22 agents)</h3><div class="mermaid">flowchart TD
+    subgraph Tier1["Tier 1 — Domain Expert Matrix (17 agents)"]
+        subgraph Grp1["Security Analysis"]
+            A1["AppSec\nOffensive · Defensive · Auditor"]
+            A2["Blockchain Security\nOffensive · Defensive · Auditor"]
+            A3["Cryptography\nOffensive · Defensive"]
+        end
+        subgraph Grp2["Protocol & Economics"]
+            A4["DeFi Security\nOffensive · Defensive · Analyst"]
+            A5["Governance\nOffensive · Defensive"]
+            A6["SC Economics\nEconomist · Protocol Designer"]
+            A7["Supply Chain\nDependency Auditor · Build Analyst"]
+        end
+    end
+
+    subgraph Tier2["Tier 2 — Attacker Profiles (5 agents)"]
+        B1["Reentrancy Exploiter\nCEI violation · Cross-function attack"]
+        B2["Flash Loan Attacker\nOracle manip · Single-tx exploit"]
+        B3["Governance Attacker\nVote manipulation · Proposal exploit"]
+        B4["Access Control Exploiter\ntx.origin · Missing modifier"]
+        B5["Logic Exploiter\nBusiness logic flaw · State inconsistency"]
+    end
+
+    Tier1 -->|"Phase A+B: Findings"| C["Audit Session Feed\n(Rounds 1–7)"]
+    Tier2 -->|"Phase C: Corroboration"| C
+    C --> D["Consensus Engine\n3-layer weighted confidence"]
+
+    style Tier1 fill:#1e3a5f,color:#fff
+    style Tier2 fill:#5f1e1e,color:#fff
+    style Grp1 fill:#1a3055,color:#fff
+    style Grp2 fill:#143a28,color:#fff</div><h3 id="luồng-3-phase-session">7.3 Luồng 3-phase session</h3><div class="mermaid">sequenceDiagram
+    participant KG as Knowledge Graph
+    participant E as Expert Agents (17)
+    participant A as Attacker Agents (5)
+    participant CE as Consensus Engine
+
+    Note over E,A: Phase A — Intra-domain (Rounds 1–3)
+    KG-->>E: Contract context + SWC focus
+    E->>E: Domain experts analyze internally
+    E->>E: POST_FINDING / CHALLENGE / VALIDATE
+    Note right of E: GAP declarations → route to other domains
+
+    Note over E,A: Phase B — Cross-domain (Rounds 4–7)
+    E->>E: CROSS_VALIDATE / CROSS_CHALLENGE
+    E->>E: ESCALATE_TO_DEFI / REQUEST_GOVERNANCE
+    Note right of E: Findings debated across domains
+
+    Note over E,A: Phase C — Attacker Challenge (Rounds 8–10)
+    KG-->>A: All expert findings
+    A->>CE: ATTACKER_CONFIRM (+0.15 confidence)
+    A->>CE: ATTACKER_DISMISS (−0.20 confidence)
+    A->>CE: ATTACKER_ADD_PATH (new finding, base 0.60)
+    A->>CE: ATTACKER_ESCALATE / DOWNGRADE
+
+    CE->>CE: Compute 3-layer confidence
+    CE->>CE: Filter confidence < 0.35 (FP removal)
+    CE-->>CE: Ranked vulnerability list</div><h3 id="cơ-chế-đồng-thuận-3-lớp">7.4 Cơ chế đồng thuận 3 lớp</h3><div class="mermaid">flowchart LR
+    F["Finding X\n(title, SWC, severity)"]
+
+    subgraph L1["Layer 1 — Intra-domain (w=0.30)"]
+        direction TB
+        L1A["Agents cùng domain\nđồng ý / không đồng ý"]
+        L1B["intra_score = agree/total"]
+    end
+
+    subgraph L2["Layer 2 — Cross-domain (w=0.45)"]
+        direction TB
+        L2A["Domain groups KHÁC\nvalidate finding"]
+        L2B["cross_score = validated_groups/total_groups"]
+    end
+
+    subgraph L3["Layer 3 — Attacker (w=0.25)"]
+        direction TB
+        L3A["5 attacker profiles\nCONFIRM / DISMISS"]
+        L3B["attacker_score = confirmations/5"]
+    end
+
+    F --> L1A --> L1B
+    F --> L2A --> L2B
+    F --> L3A --> L3B
+
+    L1B & L2B & L3B --> CALC["confidence =\nL1×0.30 + L2×0.45 + L3×0.25"]
+
+    CALC --> FILTER{"> 0.35?"}
+    FILTER -->|Yes| KEEP["Giữ lại\n→ Audit Report"]
+    FILTER -->|No| DROP["Loại bỏ\n(likely FP)"]
+
+    style L1 fill:#1a3a5f,color:#fff
+    style L2 fill:#1a4a2e,color:#fff
+    style L3 fill:#5f1a1a,color:#fff
+    style KEEP fill:#1a5f1a,color:#fff
+    style DROP fill:#5f1a1a,color:#fff</div><h3 id="technology-stack">7.5 Technology Stack</h3><table><colgroup><col style="width: 23%" /><col style="width: 36%" /><col style="width: 40%" /></colgroup><thead><tr class="header"><th>Layer</th><th>Công nghệ</th><th>Lý do chọn</th></tr></thead><tbody><tr class="odd"><td>LLM Backend</td><td>Google Gemini 2.5 Flash (Vertex AI)</td><td>Long context 1M tokens, cost-effective, strong code analysis</td></tr><tr class="even"><td>Agent Framework</td><td>CAMEL-AI / OASIS (fork)</td><td>Multi-agent social simulation, adapted cho security domain</td></tr><tr class="odd"><td>Knowledge Graph</td><td>Zep Cloud (vector + graph DB)</td><td>Entity memory + relationship tracking, RAG-ready</td></tr><tr class="even"><td>Contract Parser</td><td>Solidity AST (solc + slither)</td><td>Mature parser, extract functions/state vars/modifiers</td></tr><tr class="odd"><td>Backend</td><td>Python + Flask</td><td>Rich ML ecosystem, rapid prototyping</td></tr><tr class="even"><td>Evaluation Dataset</td><td>SmartBugs Curated</td><td>Industry-standard, 143 labeled contracts, 10 SWC categories</td></tr></tbody></table><hr /><h2 id="công-trình-liên-quan">8. Công trình liên quan</h2><h3 id="static-analysis-tools">8.1 Static Analysis Tools</h3><p><strong>Slither</strong> (Feist et al., 2019) là static analyzer phổ biến nhất cho Solidity, sử dụng data flow analysis và taint tracking. Đạt F1≈0.67 trên SmartBugs Curated nhưng bỏ sót lỗi logic phức tạp không biểu hiện qua pattern đơn giản.</p><p><strong>Mythril</strong> (Mueller, ConsenSys, 2018) dùng symbolic execution và SMT solving, cho phép deep path analysis nhưng bị path explosion với contracts lớn. Runtime có thể lên tới hàng giờ cho complex contracts.</p><p><strong>Khoảng cách:</strong> Static tools không có semantic understanding về business intent — không thể phát hiện logic flaws như oracle manipulation hay governance attacks.</p><h3 id="llm-based-approaches">8.2 LLM-based Approaches</h3><p><strong>GPTScan</strong> (Sun et al., 2023) kết hợp GPT-4 với static AST analysis, matching logic vulnerabilities với pre-defined templates. Precision=0.91, Recall=0.86, F1=0.88 trên logic vulnerabilities. Tuy nhiên GPTScan: (1) chỉ dùng 1 LLM call, (2) không kiểm tra exploitability, (3) phụ thuộc template cố định.</p><p><strong>AuditGPT</strong> (Zhou et al., 2024) fine-tune LLM trên audit report corpus. Cải thiện recall nhưng vẫn single-perspective, không có cross-domain debate.</p><p><strong>SmartInv</strong> (Wang et al., 2024) dùng LLM để synthesize contract invariants và kiểm tra vi phạm. Complementary approach với MECAP (invariant-based vs. vulnerability-focused).</p><p><strong>Khoảng cách:</strong> Tất cả LLM-based approaches hiện tại đều single-perspective, không có multi-domain debate hay exploitability validation.</p><h3 id="multi-agent-systems">8.3 Multi-Agent Systems</h3><p><strong>CAMEL</strong> (Li et al., 2023) giới thiệu role-playing framework cho LLM agents — two-agent architecture (AI User + AI Assistant) cho collaborative task solving. MECAP mở rộng sang 22-agent, multi-domain, adversarial debate.</p><p><strong>AgentVerse</strong> (Chen et al., 2023) đề xuất multi-agent collaborative problem-solving với dynamic team composition. MECAP áp dụng insight về adversarial agents (attacker profiles) để cải thiện consensus.</p><p><strong>LLM Debate</strong> (Du et al., 2023): Multi-agent debate cải thiện factual accuracy — lý thuyết nền tảng cho Phase B (cross-domain debate) của MECAP.</p><h3 id="dataset-và-benchmark">8.4 Dataset và Benchmark</h3><p><strong>SmartBugs</strong> (Durieux et al., 2020) cung cấp framework đánh giá tools và <strong>SmartBugs Curated</strong> — 143 contracts được gán nhãn thủ công theo SWC. Đây là benchmark chuẩn được sử dụng rộng rãi nhất, cho phép so sánh trực tiếp với Slither, Mythril, GPTScan.</p><h3 id="tổng-hợp-so-sánh">8.5 Tổng hợp so sánh</h3><div class="mermaid">quadrantChart
+    title Smart Contract Audit Tool Comparison
+    x-axis Low Automation --> High Automation
+    y-axis Low Accuracy --> High Accuracy
+    quadrant-1 Ideal
+    quadrant-2 Accurate but Manual
+    quadrant-3 Insufficient
+    quadrant-4 Fast but High FP
+    Slither: [0.75, 0.40]
+    Mythril: [0.65, 0.50]
+    Manual Audit: [0.10, 0.90]
+    GPTScan: [0.80, 0.75]
+    MECAP: [0.70, 0.85]</div><table><thead><tr class="header"><th>Tiêu chí</th><th>Slither</th><th>GPTScan</th><th>Manual Audit</th><th><strong>MECAP</strong></th></tr></thead><tbody><tr class="odd"><td>Phương pháp</td><td>Static analysis</td><td>AST + 1 LLM</td><td>Human expert</td><td>Multi-agent LLM + KG</td></tr><tr class="even"><td>Số góc nhìn</td><td>1</td><td>1</td><td>1–3</td><td>22 (17 expert + 5 attacker)</td></tr><tr class="odd"><td>Exploitability check</td><td>Không</td><td>Không</td><td>Có</td><td>Có (attacker profiles)</td></tr><tr class="even"><td>FP reduction</td><td>Rule threshold</td><td>LLM filter</td><td>Human judgment</td><td>3-layer consensus</td></tr><tr class="odd"><td>DeFi logic coverage</td><td>Hạn chế</td><td>Trung bình</td><td>Tốt</td><td>Tốt (DeFi domain group)</td></tr><tr class="even"><td>Chi phí / contract</td><td>~$0</td><td>~$0.10</td><td>$50K–$200K</td><td>~$1–5</td></tr><tr class="odd"><td>F1 (SmartBugs Reentrancy)</td><td>0.67</td><td>0.88*</td><td>—</td><td><em>đang đánh giá</em></td></tr></tbody></table><p><em>GPTScan F1=0.88 đo trên tập con logic vulnerabilities, không phải toàn bộ SmartBugs Curated.</em></p><hr /><h2 id="đóng-góp-khoa-học">9. Đóng góp khoa học</h2><table><colgroup><col style="width: 16%" /><col style="width: 41%" /><col style="width: 41%" /></colgroup><thead><tr class="header"><th>ID</th><th>Đóng góp</th><th>Chi tiết</th></tr></thead><tbody><tr class="odd"><td><strong>C1</strong></td><td><strong>Kiến trúc mới — MECAP</strong></td><td>First multi-domain, multi-persona agent panel for smart contract audit. Khác biệt với GPTScan (single LLM) và CAMEL (two-agent)</td></tr><tr class="even"><td><strong>C2</strong></td><td><strong>KG Grounding</strong></td><td>Contract Knowledge Graph anchors agent reasoning → findings có evidence cụ thể (function name, line number) → giảm hallucination đo được</td></tr><tr class="odd"><td><strong>C3</strong></td><td><strong>Exploitability Validation</strong></td><td>Attacker profiles phân biệt “lỗ hổng tồn tại” vs “thực sự khai thác được” — không có trong bất kỳ automated tool nào hiện tại</td></tr><tr class="even"><td><strong>C4</strong></td><td><strong>FP Reduction</strong></td><td>3-layer consensus (intra + cross-domain + attacker) lọc False Positive hiệu quả hơn single-LLM threshold hay rule-based filter</td></tr><tr class="odd"><td><strong>C5</strong></td><td><strong>DeFi Coverage</strong></td><td>Phát hiện lỗi logic DeFi (flash loan, oracle manipulation, governance attack) — bị bỏ sót bởi static analysis do thiếu semantic understanding</td></tr></tbody></table><hr /><h2 id="thiết-kế-thực-nghiệm">10. Thiết kế thực nghiệm</h2><h3 id="dataset">10.1 Dataset</h3><p><strong>SmartBugs Curated</strong> — 143 contracts được gán nhãn thủ công theo SWC:</p><table><thead><tr class="header"><th>SWC Category</th><th>Số contracts</th><th>Phase đánh giá</th></tr></thead><tbody><tr class="odd"><td>SWC-107 Reentrancy</td><td>31</td><td><span style="color:#22a839;font-weight:bold">✓</span> Phase 5b (đang chạy)</td></tr><tr class="even"><td>SWC-101 Integer Overflow</td><td>21</td><td>Phase 5c</td></tr><tr class="odd"><td>SWC-115 tx.origin</td><td>17</td><td>Phase 5c</td></tr><tr class="even"><td>SWC-116 Timestamp</td><td>10</td><td>Phase 5c</td></tr><tr class="odd"><td>SWC-120 Weak Randomness</td><td>8</td><td>Phase 5c</td></tr><tr class="even"><td>Các SWC khác (5 categories)</td><td>56</td><td>Phase 5c</td></tr></tbody></table><h3 id="evaluation-metrics">10.2 Evaluation Metrics</h3><table><colgroup><col style="width: 28%" /><col style="width: 39%" /><col style="width: 32%" /></colgroup><thead><tr class="header"><th>Metric</th><th>Cách tính</th><th>Ý nghĩa</th></tr></thead><tbody><tr class="odd"><td>Precision</td><td>TP / (TP + FP)</td><td>Tỷ lệ findings đúng trong tổng số findings được báo cáo</td></tr><tr class="even"><td>Recall</td><td>TP / (TP + FN)</td><td>Tỷ lệ lỗ hổng thực được phát hiện</td></tr><tr class="odd"><td>F1-score</td><td>2 × P × R / (P + R)</td><td>Trung bình điều hòa giữa Precision và Recall</td></tr><tr class="even"><td>Macro F1</td><td>Trung bình F1 không trọng số qua N contracts</td><td>Đánh giá công bằng không thiên về contract phổ biến</td></tr><tr class="odd"><td>Hallucination Rate</td><td>Số findings không có KG anchor / tổng số findings</td><td>Đo chất lượng KG grounding (RQ4)</td></tr></tbody></table><p><strong>Pass criteria:</strong></p><table><thead><tr class="header"><th>Phase</th><th>Macro F1</th><th>Precision</th><th>Recall</th></tr></thead><tbody><tr class="odd"><td>Phase 5b (SWC-107)</td><td>≥ 0.75</td><td>≥ 0.60</td><td>≥ 0.80</td></tr><tr class="even"><td>Phase 5c (all SWC)</td><td>≥ 0.75</td><td>≥ 0.60</td><td>≥ 0.80</td></tr></tbody></table><h3 id="ablation-study">10.3 Ablation Study</h3><table><colgroup><col style="width: 20%" /><col style="width: 31%" /><col style="width: 48%" /></colgroup><thead><tr class="header"><th>Variant</th><th>Thành phần bỏ</th><th>Hypothesis kiểm chứng</th></tr></thead><tbody><tr class="odd"><td><strong>V1</strong> — Full system</td><td>— (baseline đề xuất)</td><td>—</td></tr><tr class="even"><td><strong>V2</strong> — No KG</td><td>Bỏ Knowledge Graph, chỉ dùng source code text</td><td>H2: KG giảm hallucination</td></tr><tr class="odd"><td><strong>V3</strong> — No Attacker</td><td>Bỏ Tier 2 (5 attacker profiles)</td><td>H3: Attacker improves Precision</td></tr><tr class="even"><td><strong>V4</strong> — No Cross-domain</td><td>Chỉ Phase A (intra-domain), bỏ Phase B</td><td>H1: Cross-domain debate cần thiết</td></tr><tr class="odd"><td><strong>V5</strong> — Single Agent</td><td>1 LLM call duy nhất (GPTScan-style)</td><td>H1: Multi-agent &gt; single-agent</td></tr></tbody></table><h3 id="research-questions">10.4 Research Questions</h3><table><colgroup><col style="width: 11%" /><col style="width: 25%" /><col style="width: 37%" /><col style="width: 25%" /></colgroup><thead><tr class="header"><th>RQ</th><th>Câu hỏi</th><th>Phương pháp</th><th>Variant</th></tr></thead><tbody><tr class="odd"><td><strong>RQ1</strong></td><td>Multi-agent có phát hiện đa dạng hơn single-agent?</td><td>F1 per SWC category</td><td>V1 vs V5</td></tr><tr class="even"><td><strong>RQ2</strong></td><td>3-layer consensus có giảm FP rate?</td><td>Precision comparison</td><td>V1 vs V5</td></tr><tr class="odd"><td><strong>RQ3</strong></td><td>Attacker profiles cải thiện DeFi vulnerability detection?</td><td>F1 trên DeFi contracts</td><td>V1 vs V3</td></tr><tr class="even"><td><strong>RQ4</strong></td><td>KG grounding giảm hallucination?</td><td>% findings có function/line anchor</td><td>V1 vs V2</td></tr></tbody></table><h3 id="baseline-comparison-protocol">10.5 Baseline Comparison Protocol</h3><p>Tất cả tools chạy trên cùng SmartBugs Curated dataset, cùng ground truth labels:</p><table><thead><tr class="header"><th>Tool</th><th>Version</th><th>Configuration</th><th>Notes</th></tr></thead><tbody><tr class="odd"><td>Slither</td><td>0.10.x</td><td>Default detectors, all severity</td><td>SmartBugs automated runner</td></tr><tr class="even"><td>Mythril</td><td>0.24.x</td><td>Timeout 300s/contract</td><td>SmartBugs automated runner</td></tr><tr class="odd"><td>GPTScan</td><td>v1 (2023 paper)</td><td>Default templates</td><td>Reproduce từ paper</td></tr><tr class="even"><td><strong>MECAP V1</strong></td><td>Current</td><td>22 agents, 10 rounds, threshold=0.35</td><td>Đề xuất — full system</td></tr><tr class="odd"><td><strong>MECAP V5</strong></td><td>Ablation</td><td>1 agent, 1 round</td><td>Single-agent baseline</td></tr></tbody></table><hr /><h2 id="kết-quả-kỳ-vọng">11. Kết quả kỳ vọng</h2><table><thead><tr class="header"><th>Metric</th><th>Slither</th><th>Mythril</th><th>GPTScan*</th><th><strong>MECAP V1 (kỳ vọng)</strong></th></tr></thead><tbody><tr class="odd"><td>Macro F1</td><td>0.67</td><td>~0.60</td><td>0.88*</td><td><strong>≥ 0.80</strong></td></tr><tr class="even"><td>Precision</td><td>~0.60</td><td>~0.55</td><td>~0.91</td><td><strong>≥ 0.60</strong></td></tr><tr class="odd"><td>Recall</td><td>~0.75</td><td>~0.65</td><td>~0.86</td><td><strong>≥ 0.80</strong></td></tr><tr class="even"><td>DeFi coverage</td><td>Thấp</td><td>Thấp</td><td>Trung bình</td><td><strong>Cao</strong></td></tr><tr class="odd"><td>Exploitability info</td><td>Không</td><td>Không</td><td>Không</td><td><strong>Có</strong></td></tr><tr class="even"><td>Patch suggestion</td><td>Không</td><td>Không</td><td>Không</td><td><strong>Có</strong></td></tr></tbody></table><p><em>GPTScan F1=0.88 đo trên tập con logic vulnerabilities, không phải toàn bộ SmartBugs Curated 143 contracts.</em></p><p><strong>Ablation expectations:</strong></p><table><thead><tr class="header"><th>Variant</th><th>Dự đoán so với V1</th></tr></thead><tbody><tr class="odd"><td>V2 (no KG)</td><td>Hallucination rate tăng ~20–30%; F1 giảm nhẹ</td></tr><tr class="even"><td>V3 (no attacker)</td><td>FP tăng; Precision giảm ~10–15%</td></tr><tr class="odd"><td>V4 (no cross-domain)</td><td>Recall giảm; bỏ sót nhiều edge cases</td></tr><tr class="even"><td>V5 (single agent)</td><td>F1 thấp hơn đáng kể, đặc biệt với DeFi contracts</td></tr></tbody></table><hr /><h2 id="threats-to-validity">12. Threats to Validity</h2><h3 id="internal-validity">12.1 Internal Validity</h3><table><colgroup><col style="width: 36%" /><col style="width: 23%" /><col style="width: 40%" /></colgroup><thead><tr class="header"><th>Mối đe dọa</th><th>Mô tả</th><th>Mitigation</th></tr></thead><tbody><tr class="odd"><td><strong>LLM non-determinism</strong></td><td>Temperature &gt; 0 → kết quả khác nhau giữa các lần chạy</td><td>Chạy mỗi contract 3 lần, báo cáo mean ± std</td></tr><tr class="even"><td><strong>Prompt sensitivity</strong></td><td>Thay đổi nhỏ trong system prompt → findings thay đổi</td><td>Version control prompts; reproducibility check trên 10 contracts</td></tr><tr class="odd"><td><strong>Consensus threshold bias</strong></td><td>Ngưỡng 0.35 được chọn empirically</td><td>Ablation trên threshold: {0.25, 0.35, 0.45, 0.55}</td></tr><tr class="even"><td><strong>Weight calibration</strong></td><td>Trọng số 0.30/0.45/0.25 chưa tối ưu hóa</td><td>Grid search trên SWC-107 validation set</td></tr></tbody></table><h3 id="external-validity">12.2 External Validity</h3><table><colgroup><col style="width: 36%" /><col style="width: 23%" /><col style="width: 40%" /></colgroup><thead><tr class="header"><th>Mối đe dọa</th><th>Mô tả</th><th>Mitigation</th></tr></thead><tbody><tr class="odd"><td><strong>Dataset size</strong></td><td>SmartBugs Curated 143 contracts — nhỏ</td><td>Ghi rõ giới hạn; kế hoạch mở rộng với contracts từ Etherscan</td></tr><tr class="even"><td><strong>SWC distribution bias</strong></td><td>Dataset tập trung vào một số SWC nhất định</td><td>Báo cáo per-category results riêng biệt</td></tr><tr class="odd"><td><strong>Solidity version</strong></td><td>Nhiều contracts là Solidity 0.4.x–0.5.x — cũ</td><td>Phân tích performance theo Solidity version</td></tr><tr class="even"><td><strong>LLM model dependency</strong></td><td>Kết quả phụ thuộc Gemini 2.5 Flash</td><td>Test thêm với GPT-4o để assess model generalizability</td></tr><tr class="odd"><td><strong>DeFi pattern evolution</strong></td><td>Attack patterns mới liên tục xuất hiện</td><td>Ghi rõ temporal scope; SmartBugs snapshot tháng 2020</td></tr></tbody></table><h3 id="construct-validity">12.3 Construct Validity</h3><table><colgroup><col style="width: 36%" /><col style="width: 23%" /><col style="width: 40%" /></colgroup><thead><tr class="header"><th>Mối đe dọa</th><th>Mô tả</th><th>Mitigation</th></tr></thead><tbody><tr class="odd"><td><strong>Ground truth quality</strong></td><td>SmartBugs labels có thể có labeling errors</td><td>Cross-validate với 2 independent experts cho subset 20 contracts</td></tr><tr class="even"><td><strong>Severity-agnostic F1</strong></td><td>Macro F1 không phân biệt Critical vs Low</td><td>Báo cáo thêm Weighted F1 theo severity</td></tr><tr class="odd"><td><strong>Matching criteria</strong></td><td>Finding khớp SWC nhưng sai location → TP hay FP?</td><td>Định nghĩa rõ: TP = SWC match + function-level location match</td></tr></tbody></table><hr /><h2 id="hướng-mở-rộng">13. Hướng mở rộng</h2><ol type="1"><li><strong>Incremental audit</strong>: Chỉ re-audit functions bị thay đổi khi contract upgrade — giảm cost từ ~$3/audit xuống ~$0.5</li><li><strong>Cross-contract analysis</strong>: Phát hiện lỗ hổng chỉ xuất hiện khi nhiều contracts tương tác (composability risks trong DeFi)</li><li><strong>Automated PoC generation</strong>: Agents tự viết PoC exploit bằng Foundry/Hardhat để xác nhận exploitability thực tế</li><li><strong>Real-time monitoring</strong>: Áp dụng pipeline cho bytecode deployed contracts (decompile + audit)</li><li><strong>Non-EVM extension</strong>: Hỗ trợ Rust-based chains (Solana, NEAR) với parser riêng và Move/Rust-specific vulnerability patterns</li><li><strong>CI/CD integration</strong>: Plugin cho GitHub Actions — tự động audit mỗi khi có commit thay đổi .sol file</li></ol>
+
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script>
+  window.mermaidReady = false;
+  window.addEventListener('load', function() {
+    mermaid.initialize({
+      startOnLoad: false,
+      theme: 'default',
+      securityLevel: 'loose',
+      flowchart: { htmlLabels: true, curve: 'basis' },
+      fontSize: 14,
+    });
+    mermaid.run({ querySelector: '.mermaid' })
+      .then(function() { window.mermaidReady = true; })
+      .catch(function(e) { console.error('mermaid error', e); window.mermaidReady = true; });
+  });
+</script>
+</body>
+</html>

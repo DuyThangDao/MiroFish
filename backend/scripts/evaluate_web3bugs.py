@@ -1,30 +1,36 @@
 """
-evaluate_web3bugs.py — Dual-metric evaluation of MiroFish on Web3Bugs benchmark.
+evaluate_web3bugs.py — Two-track evaluation per docs/web3bugs-evaluation-protocol.md
+
+Track L  : L* bugs → matched via SWC IDs in consensus_vulns / unvalidated_swc_gaps
+Track S  : S1–S6 bugs → matched via category in semantic_results (Policy A default)
+Out-of-scope: SE*, SC, O* — excluded from G_L and G_S denominators
+
+Policy A (default): S-track uses only semantic_results.category
+Policy B (--policy-b): S-track also allows SWC→category fallback from consensus_vulns
+                       — report as secondary/sensitivity analysis when used
+Policy Gap (--policy-gap): S-track also allows unvalidated_swc_gaps when
+                           semantic_category_from_gap() returns a bucket (source_count
+                           ≥ threshold; see semantic_taxonomy.py) — sensitivity only
+
+FP counting (§6 Cách 2 / script-style upper bound):
+  FP_L = max(0, n_L_pool_findings − TP_L)   where L-pool = consensus_vulns + swc_gaps
+  FP_S = max(0, n_S_pool_findings − TP_S)   where S-pool = semantic_results
+                                             (+ consensus w/ SWC→semantic under Policy B)
+                                             (+ gap rows w/ derived category under Policy Gap)
 
 Usage:
-    python evaluate_web3bugs.py \
-        --results  backend/results/web3bugs_trial/ \
-        --bugs-csv /path/to/web3bugs/results/bugs.csv \
-        [--contest 19] \
+    python3 evaluate_web3bugs.py \\
+        --results  backend/results/web3bugs_trial/ \\
+        --bugs-csv /path/to/web3bugs/results/bugs.csv \\
+        [--contest 19] \\
+        [--policy-b] \\
+        [--policy-gap] \\
         [--verbose]
-
-Output: per-contest table + aggregate F1 (strict + lenient).
-
-Metric definitions
-------------------
-Strict TP  : ground-truth bug label maps to the tool's finding AND function name overlaps.
-Lenient TP : ground-truth bug label maps to the tool's finding category/SWC (no function check).
-FP         : tool finding has no GT match (precision denominator).
-FN         : GT bug has no tool match (recall denominator).
-
-Two finding pools are evaluated:
-  L-category  → matched against consensus_vulns via mitre_techniques (SWC IDs)
-                 + unvalidated_swc_gaps (secondary, single-domain)
-  S/SE/SC cat → matched against semantic_results via category field
 """
 
 import argparse
 import csv
+import importlib.util
 import json
 import os
 import re
@@ -33,8 +39,19 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Dict, FrozenSet, List, NamedTuple, Optional, Set, Tuple
 
+_BACKEND_ROOT = Path(__file__).resolve().parent.parent
+_TAXONOMY_PATH = _BACKEND_ROOT / "app" / "services" / "semantic_taxonomy.py"
+_spec = importlib.util.spec_from_file_location("semantic_taxonomy", _TAXONOMY_PATH)
+if _spec is None or _spec.loader is None:
+    raise RuntimeError(f"Cannot load semantic taxonomy: {_TAXONOMY_PATH}")
+_semantic_taxonomy = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_semantic_taxonomy)
+SWC_TO_SEMANTIC = _semantic_taxonomy.SWC_TO_SEMANTIC
+normalize_semantic_category = _semantic_taxonomy.normalize_semantic_category
+semantic_category_from_gap = _semantic_taxonomy.semantic_category_from_gap
+
 # ──────────────────────────────────────────────────────────────────────────────
-# Label → detection target mappings
+# Label → detection target mappings  (publish as appendix / Table X in paper)
 # ──────────────────────────────────────────────────────────────────────────────
 
 L_TO_SWC: Dict[str, FrozenSet[str]] = {
@@ -51,22 +68,7 @@ L_TO_SWC: Dict[str, FrozenSet[str]] = {
     "LB":  frozenset({"SWC-115"}),
 }
 
-# SWC IDs that semantically correspond to S-category classes.
-# Used to credit consensus_vulns findings when they capture an S-bug via SWC path.
-SWC_TO_SEMANTIC: Dict[str, str] = {
-    # Access control (S2)
-    "SWC-100": "access_control",   # Function Default Visibility
-    "SWC-105": "access_control",   # Unprotected Ether Withdrawal
-    "SWC-106": "access_control",   # Unprotected Self-Destruct
-    "SWC-115": "access_control",   # tx.origin auth
-    "SWC-113": "access_control",   # DoS by admin
-    # Price oracle / flash loan (S1)
-    "SWC-119": "price_oracle",     # Shadowing State Variables (oracle context)
-    # Governance (S5)
-    "SWC-108": "governance_attack",
-    # Incorrect accounting / state machine (S3/S6)
-    "SWC-132": "incorrect_accounting",
-}
+# SWC_TO_SEMANTIC imported from app.services.semantic_taxonomy (single source).
 
 S_TO_CATEGORIES: Dict[str, FrozenSet[str]] = {
     "S1":    frozenset({"price_oracle", "flash_loan"}),
@@ -79,17 +81,12 @@ S_TO_CATEGORIES: Dict[str, FrozenSet[str]] = {
     "S4":    frozenset({"business_flow"}),
     "S5":    frozenset({"governance_attack"}),
     "S6":    frozenset({"incorrect_accounting"}),
-    "SE":    frozenset({"other"}),
-    "SE-1":  frozenset({"other"}),
-    "SE-2":  frozenset({"other"}),
-    "SE-3":  frozenset({"other"}),
-    "SE-4":  frozenset({"other"}),
-    "SC":    frozenset({"other"}),
 }
 
-# Semantic categories that are fundamentally undetectable from source alone
-# (cross-chain state, spec intent) — flagged separately
-OUT_OF_SCOPE_LABELS: FrozenSet[str] = frozenset({"SE", "SE-1", "SE-2", "SE-3", "SE-4", "SC"})
+# Excluded from G_L and G_S (both denominators) per §3
+OUT_OF_SCOPE_LABELS: FrozenSet[str] = frozenset({
+    "SE", "SE-1", "SE-2", "SE-3", "SE-4", "SC",
+})
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -105,22 +102,22 @@ class GTBug(NamedTuple):
 
 
 class ToolFinding:
-    """Normalised representation of one tool output finding."""
+    """One normalised finding from the audit report."""
     def __init__(
         self,
         finding_id: str,
-        swc_ids: Set[str],           # for L-category matching
-        category: Optional[str],     # for S-category matching
-        functions: Set[str],         # normalised function names
+        swc_ids: Set[str],
+        category: Optional[str],    # from semantic_results (Policy A) or derived (Policy B)
+        functions: Set[str],
         confidence: float,
-        is_secondary: bool = False,  # True = unvalidated_swc_gap
+        source: str,                # "consensus" | "semantic" | "gap"
     ):
         self.finding_id = finding_id
         self.swc_ids = swc_ids
         self.category = category
         self.functions = functions
         self.confidence = confidence
-        self.is_secondary = is_secondary
+        self.source = source
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -128,7 +125,6 @@ class ToolFinding:
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _norm_fn(name: str) -> str:
-    """Normalise function name: strip (), lowercase, strip whitespace."""
     return re.sub(r'\(.*\)', '', name).strip().lower()
 
 
@@ -141,6 +137,17 @@ def _f1(tp: int, fp: int, fn: int) -> Tuple[float, float, float]:
     recall    = tp / (tp + fn) if (tp + fn) else 0.0
     f1        = 2 * precision * recall / (precision + recall) if (precision + recall) else 0.0
     return precision, recall, f1
+
+
+def _label_type(label: str) -> str:
+    """Returns 'L', 'S', 'OOS', or 'O'."""
+    if label.startswith("L"):
+        return "L"
+    if label in OUT_OF_SCOPE_LABELS or label.startswith("SE-") or label.startswith("SC-"):
+        return "OOS"
+    if label.startswith("S"):
+        return "S"
+    return "O"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -175,62 +182,91 @@ def load_audit_report(report_path: str) -> Optional[Dict]:
         return None
 
 
-def extract_findings(report: Dict) -> List[ToolFinding]:
+def extract_findings(
+    report: Dict,
+    policy_b: bool = False,
+    policy_gap: bool = False,
+) -> List[ToolFinding]:
+    """
+    Build finding pool.
+
+    Policy A (policy_b=False — default):
+      - consensus_vulns → source="consensus", swc_ids set, category=None
+        (NOT eligible for S-track matching; only L-track)
+      - semantic_results → source="semantic", category from field
+        (only eligible for S-track matching)
+      - unvalidated_swc_gaps → source="gap", swc_ids set, category=None
+        (only L-track unless policy_gap)
+
+    Policy B (policy_b=True):
+      - consensus_vulns also get derived category via SWC_TO_SEMANTIC
+        → eligible for S-track matching as well as L-track
+
+    Policy Gap (policy_gap=True):
+      - gaps with strong corroboration get category via semantic_category_from_gap
+        → eligible for S-track (sensitivity)
+    """
     findings: List[ToolFinding] = []
 
-    # 1) consensus_vulns — primary L-category signal
-    # Also derive semantic category from SWC IDs so S-category bugs found via
-    # consensus path (e.g. SWC-100/105 for access_control) are credited correctly.
     for cv in report.get("consensus_vulns", []):
         swcs = set(cv.get("mitre_techniques", []))
         fns  = _norm_fn_set(cv.get("affected_assets", []))
-        # Derive best semantic category from SWC→semantic mapping
-        derived_category: Optional[str] = None
-        for swc in swcs:
-            if swc in SWC_TO_SEMANTIC:
-                derived_category = SWC_TO_SEMANTIC[swc]
-                break
+        derived: Optional[str] = None
+        if policy_b:
+            for swc in swcs:
+                if swc in SWC_TO_SEMANTIC:
+                    derived = normalize_semantic_category(SWC_TO_SEMANTIC[swc])
+                    break
         findings.append(ToolFinding(
             finding_id=cv.get("vuln_id", "?"),
             swc_ids=swcs,
-            category=derived_category,
+            category=derived,
             functions=fns,
             confidence=cv.get("confidence_score", 0.0),
+            source="consensus",
         ))
 
-    # 2) semantic_results — S-category signal
     for sr in report.get("semantic_results", []):
         fns = _norm_fn_set(sr.get("affected_functions", []))
         findings.append(ToolFinding(
             finding_id=sr.get("semantic_vuln_id", "?"),
             swc_ids=set(),
-            category=sr.get("category"),
+            category=normalize_semantic_category(sr.get("category")),
             functions=fns,
             confidence=sr.get("confidence_score", 0.0),
+            source="semantic",
         ))
 
-    # 3) unvalidated_swc_gaps — secondary L-category signal
     for gap in report.get("unvalidated_swc_gaps", []):
-        swcs = {gap.get("swc_id", "")} if gap.get("swc_id") else set()
+        swc_raw = (gap.get("swc_id") or "").strip()
+        swcs = {swc_raw} if swc_raw else set()
         fns  = _norm_fn_set(gap.get("affected_functions", []))
+        gap_cat: Optional[str] = None
+        if policy_gap:
+            gap_cat = semantic_category_from_gap(
+                gap.get("swc_category"),
+                gap.get("swc_id"),
+                int(gap.get("source_count") or 0),
+            )
         findings.append(ToolFinding(
-            finding_id=f"gap_{gap.get('swc_id', '?')}",
+            finding_id=f"gap_{gap.get('swc_category', '?')}_{swc_raw or 'noswc'}",
             swc_ids=swcs,
-            category=gap.get("swc_category"),
+            category=gap_cat,
             functions=fns,
             confidence=0.3,
-            is_secondary=True,
+            source="gap",
         ))
 
     return findings
 
 
 def find_latest_report(contest_results_dir: str) -> Optional[str]:
-    """Return path to audit_report.json in the most recent run subdirectory."""
+    """Return audit_report.json in the most recently modified run subdirectory."""
     base = Path(contest_results_dir)
     if not base.is_dir():
         return None
-    runs = sorted(base.iterdir(), reverse=True)
+    # Sort by mtime descending — avoids alphabetical edge cases (e.g. 'w' > 'T')
+    runs = sorted(base.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)
     for run in runs:
         candidate = run / "audit_report.json"
         if candidate.exists():
@@ -242,51 +278,53 @@ def find_latest_report(contest_results_dir: str) -> Optional[str]:
 # Matching logic
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _label_type(label: str) -> str:
-    if label.startswith("L"):
-        return "L"
-    if label.startswith("S") or label in ("SE", "SC") or label.startswith("SE-") or label.startswith("SC-"):
-        return "S"
-    return "O"
+def _match_l(bug: GTBug, findings: List[ToolFinding]) -> bool:
+    """L-track lenient match: any finding in L-pool (consensus/gap) with SWC overlap."""
+    expected_swcs = L_TO_SWC.get(bug.label, frozenset())
+    if not expected_swcs:
+        return False
+    for f in findings:
+        if f.source in ("consensus", "gap") and f.swc_ids & expected_swcs:
+            return True
+    return False
 
 
-def match_bug(bug: GTBug, findings: List[ToolFinding]) -> Tuple[bool, bool]:
+def _match_s(
+    bug: GTBug,
+    findings: List[ToolFinding],
+    policy_b: bool,
+    policy_gap: bool,
+) -> bool:
     """
-    Returns (strict_tp, lenient_tp).
-    strict  = category/SWC match AND at least one function name overlap
-    lenient = category/SWC match only
+    S-track lenient match.
+    Policy A: only semantic_results findings (source="semantic").
+    Policy B: also consensus findings that have a derived category (source="consensus", category set).
+    Policy Gap: also gap findings with derived category (source="gap", category set).
+    All: finding.category must be in S_TO_CATEGORIES[label] (canonical buckets).
     """
-    ltype = _label_type(bug.label)
-
-    if ltype == "O":
-        return False, False
-
-    if ltype == "L":
-        expected_swcs = L_TO_SWC.get(bug.label, frozenset())
-        if not expected_swcs:
-            return False, False
-        for f in findings:
-            if f.swc_ids & expected_swcs:          # any overlap in SWC IDs
-                lenient = True
-                strict  = bool(f.functions)        # if tool reported functions, require overlap
-                # For strict: tool must name at least one function (even if we can't verify exact match
-                # without ground-truth function labels — see note below)
-                # Since bugs.csv doesn't carry GT function names, strict-L = lenient-L for now.
-                # Strict-L is reserved for future when GT function labels are available.
-                return lenient, lenient
-        return False, False
-
-    # S / SE / SC
     expected_cats = S_TO_CATEGORIES.get(bug.label, frozenset())
     if not expected_cats:
-        return False, False
+        return False
+    expected_lower = {c.lower() for c in expected_cats}
     for f in findings:
-        if f.category and f.category.lower() in {c.lower() for c in expected_cats}:
-            lenient = True
-            strict  = bool(f.functions)
-            # Same note as above — GT function names not in bugs.csv.
-            return lenient, lenient
-    return False, False
+        eligible = (
+            f.source == "semantic"
+            or (policy_b and f.source == "consensus" and f.category is not None)
+            or (policy_gap and f.source == "gap" and f.category is not None)
+        )
+        if eligible and f.category and f.category.lower() in expected_lower:
+            return True
+    return False
+
+
+def _in_s_pool(f: ToolFinding, policy_b: bool, policy_gap: bool) -> bool:
+    if f.source == "semantic":
+        return True
+    if policy_b and f.source == "consensus" and f.category is not None:
+        return True
+    if policy_gap and f.source == "gap" and f.category is not None:
+        return True
+    return False
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -295,65 +333,64 @@ def match_bug(bug: GTBug, findings: List[ToolFinding]) -> Tuple[bool, bool]:
 
 class ContestResult(NamedTuple):
     contest_id: int
+    # Ground truth counts
     gt_total: int
-    gt_l: int
-    gt_s: int
-    gt_oos: int           # out-of-scope (SE/SC)
-    tool_findings: int
-    l_strict_tp: int
-    l_lenient_tp: int
-    s_strict_tp: int
-    s_lenient_tp: int
-    strict_fp: int
-    lenient_fp: int
+    gt_l: int       # |G_L| — L* bugs in scope
+    gt_s: int       # |G_S| — S1–S6 bugs in scope
+    gt_oos: int     # SE*/SC/O* — excluded from denominators
+    # Finding pool sizes (denominator of precision)
+    n_l_pool: int   # consensus + gap findings
+    n_s_pool: int   # semantic findings (+ Policy-B consensus findings)
+    # Track L
+    tp_l: int
+    fp_l: int
+    fn_l: int
+    # Track S
+    tp_s: int
+    fp_s: int
+    fn_s: int
 
 
 def evaluate_contest(
     contest_id: int,
     gt_bugs: List[GTBug],
     findings: List[ToolFinding],
+    policy_b: bool = False,
+    policy_gap: bool = False,
     verbose: bool = False,
 ) -> ContestResult:
+
     gt_l   = [b for b in gt_bugs if _label_type(b.label) == "L"]
     gt_s   = [b for b in gt_bugs if _label_type(b.label) == "S"]
-    gt_oos = [b for b in gt_bugs if b.label in OUT_OF_SCOPE_LABELS]
-    gt_in_scope = gt_l + gt_s
+    gt_oos = [b for b in gt_bugs if _label_type(b.label) in ("OOS", "O")]
 
-    l_strict_tp = l_lenient_tp = 0
-    s_strict_tp = s_lenient_tp = 0
+    # L-pool: consensus + gap findings
+    l_pool = [f for f in findings if f.source in ("consensus", "gap")]
+    s_pool = [f for f in findings if _in_s_pool(f, policy_b, policy_gap)]
 
-    matched_finding_ids_strict:  Set[str] = set()
-    matched_finding_ids_lenient: Set[str] = set()
+    tp_l = sum(1 for b in gt_l if _match_l(b, findings))
+    tp_s = sum(1 for b in gt_s if _match_s(b, findings, policy_b, policy_gap))
 
-    for bug in gt_l:
-        strict, lenient = match_bug(bug, findings)
-        if strict:
-            l_strict_tp += 1
-        if lenient:
-            l_lenient_tp += 1
-        if verbose:
-            tag = ("✓" if lenient else "✗") + ("s" if strict else " ")
-            print(f"    [{tag}] {bug.bug_id} ({bug.label}) — {bug.description[:60]}")
+    fn_l = len(gt_l) - tp_l
+    fn_s = len(gt_s) - tp_s
 
-    for bug in gt_s:
-        strict, lenient = match_bug(bug, findings)
-        if strict:
-            s_strict_tp += 1
-        if lenient:
-            s_lenient_tp += 1
-        if verbose:
-            tag = ("✓" if lenient else "✗") + ("s" if strict else " ")
-            print(f"    [{tag}] {bug.bug_id} ({bug.label}) — {bug.description[:60]}")
+    fp_l = max(0, len(l_pool) - tp_l)
+    fp_s = max(0, len(s_pool) - tp_s)
 
-    if verbose and gt_oos:
-        for bug in gt_oos:
-            print(f"    [--] {bug.bug_id} ({bug.label}) — OUT-OF-SCOPE: {bug.description[:60]}")
-
-    total_strict_tp  = l_strict_tp  + s_strict_tp
-    total_lenient_tp = l_lenient_tp + s_lenient_tp
-    n_findings = len(findings)
-    strict_fp  = max(0, n_findings - total_strict_tp)
-    lenient_fp = max(0, n_findings - total_lenient_tp)
+    if verbose:
+        print(f"    ── Track L (G_L={len(gt_l)}, L-pool={len(l_pool)}) ──")
+        for b in gt_l:
+            hit = _match_l(b, findings)
+            print(f"      [{'✓' if hit else '✗'}] {b.bug_id} ({b.label}) — {b.description[:70]}")
+        pol = ("B" if policy_b else "A") + ("+gap" if policy_gap else "")
+        print(f"    ── Track S (G_S={len(gt_s)}, S-pool={len(s_pool)}, Policy {pol}) ──")
+        for b in gt_s:
+            hit = _match_s(b, findings, policy_b, policy_gap)
+            print(f"      [{'✓' if hit else '✗'}] {b.bug_id} ({b.label}) — {b.description[:70]}")
+        if gt_oos:
+            print(f"    ── Out-of-scope ({len(gt_oos)} bugs, excluded from denominators) ──")
+            for b in gt_oos:
+                print(f"      [--] {b.bug_id} ({b.label}) — {b.description[:70]}")
 
     return ContestResult(
         contest_id=contest_id,
@@ -361,100 +398,102 @@ def evaluate_contest(
         gt_l=len(gt_l),
         gt_s=len(gt_s),
         gt_oos=len(gt_oos),
-        tool_findings=n_findings,
-        l_strict_tp=l_strict_tp,
-        l_lenient_tp=l_lenient_tp,
-        s_strict_tp=s_strict_tp,
-        s_lenient_tp=s_lenient_tp,
-        strict_fp=strict_fp,
-        lenient_fp=lenient_fp,
+        n_l_pool=len(l_pool),
+        n_s_pool=len(s_pool),
+        tp_l=tp_l, fp_l=fp_l, fn_l=fn_l,
+        tp_s=tp_s, fp_s=fp_s, fn_s=fn_s,
     )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Aggregate + display
+# Display
 # ──────────────────────────────────────────────────────────────────────────────
 
-def print_table(results: List[ContestResult], verbose: bool = False) -> None:
-    hdr = (
-        f"{'Ctest':>5} │ {'GT':>4} {'L':>3} {'S':>3} {'OOS':>3} │"
-        f" {'Fnd':>4} │"
-        f" {'L-TP':>5} {'S-TP':>5} {'TP':>4} {'FP':>4} {'FN':>4} │"
-        f" {'Prec':>6} {'Rec':>6} {'F1':>6} │ (lenient)"
-    )
-    sep = "─" * len(hdr)
-
-    print()
-    print("  STRICT metric (function overlap required when GT functions available)")
-    print(sep)
-    print(hdr)
-    print(sep)
-
-    agg_gt_l = agg_gt_s = 0
-    agg_l_tp = agg_s_tp = agg_fp = 0
-
-    for r in results:
-        tp = r.l_strict_tp + r.s_strict_tp
-        fn = (r.gt_l - r.l_strict_tp) + (r.gt_s - r.s_strict_tp)
-        fp = r.strict_fp
-        P, R, F = _f1(tp, fp, fn)
-        agg_gt_l += r.gt_l
-        agg_gt_s += r.gt_s
-        agg_l_tp += r.l_strict_tp
-        agg_s_tp += r.s_strict_tp
-        agg_fp   += fp
-        print(
-            f"  {r.contest_id:>5} │ {r.gt_total:>4} {r.gt_l:>3} {r.gt_s:>3} {r.gt_oos:>3} │"
-            f" {r.tool_findings:>4} │"
-            f" {r.l_strict_tp:>5} {r.s_strict_tp:>5} {tp:>4} {fp:>4} {fn:>4} │"
-            f" {P:6.3f} {R:6.3f} {F:6.3f}"
-        )
-
-    print(sep)
-    agg_tp = agg_l_tp + agg_s_tp
-    agg_fn = (agg_gt_l - agg_l_tp) + (agg_gt_s - agg_s_tp)
-    P, R, F = _f1(agg_tp, agg_fp, agg_fn)
-    print(
-        f"  {'AGG':>5} │ {sum(r.gt_total for r in results):>4}"
-        f" {agg_gt_l:>3} {agg_gt_s:>3} {sum(r.gt_oos for r in results):>3} │"
-        f" {sum(r.tool_findings for r in results):>4} │"
-        f" {agg_l_tp:>5} {agg_s_tp:>5} {agg_tp:>4} {agg_fp:>4} {agg_fn:>4} │"
-        f" {P:6.3f} {R:6.3f} {F:6.3f}  ← STRICT F1"
+def _row_l(r: ContestResult) -> str:
+    P, R, F = _f1(r.tp_l, r.fp_l, r.fn_l)
+    return (
+        f"  {r.contest_id:>5} │ G_L={r.gt_l:>3} pool={r.n_l_pool:>3} │"
+        f" TP={r.tp_l:>3} FP={r.fp_l:>3} FN={r.fn_l:>3} │"
+        f" P={P:.3f} R={R:.3f} F1={F:.3f}"
     )
 
-    # ── lenient table ──────────────────────────────────────────────────────────
+
+def _row_s(r: ContestResult, policy_b: bool, policy_gap: bool) -> str:
+    P, R, F = _f1(r.tp_s, r.fp_s, r.fn_s)
+    tag = ("B" if policy_b else "A") + ("+gap" if policy_gap else "")
+    return (
+        f"  {r.contest_id:>5} │ G_S={r.gt_s:>3} pool={r.n_s_pool:>3} │"
+        f" TP={r.tp_s:>3} FP={r.fp_s:>3} FN={r.fn_s:>3} │"
+        f" P={P:.3f} R={R:.3f} F1={F:.3f}  (Policy {tag})"
+    )
+
+
+def print_table(
+    results: List[ContestResult],
+    policy_b: bool = False,
+    policy_gap: bool = False,
+) -> None:
+    sep = "─" * 72
+
+    # ── Track L ───────────────────────────────────────────────────────────────
     print()
-    print("  LENIENT metric (category/SWC match only)")
+    print("  ══ TRACK L  (L* bugs, SWC-match via consensus_vulns + swc_gaps) ══")
     print(sep)
-    print(hdr)
-    print(sep)
-
-    agg_l_tp = agg_s_tp = agg_fp = 0
     for r in results:
-        tp = r.l_lenient_tp + r.s_lenient_tp
-        fn = (r.gt_l - r.l_lenient_tp) + (r.gt_s - r.s_lenient_tp)
-        fp = r.lenient_fp
-        P, R, F = _f1(tp, fp, fn)
-        agg_l_tp += r.l_lenient_tp
-        agg_s_tp += r.s_lenient_tp
-        agg_fp   += fp
-        print(
-            f"  {r.contest_id:>5} │ {r.gt_total:>4} {r.gt_l:>3} {r.gt_s:>3} {r.gt_oos:>3} │"
-            f" {r.tool_findings:>4} │"
-            f" {r.l_lenient_tp:>5} {r.s_lenient_tp:>5} {tp:>4} {fp:>4} {fn:>4} │"
-            f" {P:6.3f} {R:6.3f} {F:6.3f}"
-        )
-
+        print(_row_l(r))
     print(sep)
-    agg_tp = agg_l_tp + agg_s_tp
-    agg_fn = (agg_gt_l - agg_l_tp) + (agg_gt_s - agg_s_tp)
-    P, R, F = _f1(agg_tp, agg_fp, agg_fn)
+
+    # Aggregate L
+    agg_gt_l   = sum(r.gt_l    for r in results)
+    agg_tp_l   = sum(r.tp_l    for r in results)
+    agg_fp_l   = sum(r.fp_l    for r in results)
+    agg_fn_l   = sum(r.fn_l    for r in results)
+    agg_pool_l = sum(r.n_l_pool for r in results)
+    P, R, F = _f1(agg_tp_l, agg_fp_l, agg_fn_l)
     print(
-        f"  {'AGG':>5} │ {sum(r.gt_total for r in results):>4}"
-        f" {agg_gt_l:>3} {agg_gt_s:>3} {sum(r.gt_oos for r in results):>3} │"
-        f" {sum(r.tool_findings for r in results):>4} │"
-        f" {agg_l_tp:>5} {agg_s_tp:>5} {agg_tp:>4} {agg_fp:>4} {agg_fn:>4} │"
-        f" {P:6.3f} {R:6.3f} {F:6.3f}  ← LENIENT F1"
+        f"  {'AGG':>5} │ G_L={agg_gt_l:>3} pool={agg_pool_l:>3} │"
+        f" TP={agg_tp_l:>3} FP={agg_fp_l:>3} FN={agg_fn_l:>3} │"
+        f" P={P:.3f} R={R:.3f} F1={F:.3f}  ← F1_L (micro)"
+    )
+
+    # ── Track S ───────────────────────────────────────────────────────────────
+    base = "Policy B (SWC→semantic fallback)" if policy_b else "Policy A (semantic_results only; primary)"
+    if policy_gap:
+        policy_label = base + " + Gap (unvalidated_swc_gaps→S when mapped; sensitivity)"
+    else:
+        policy_label = base
+    print()
+    print(f"  ══ TRACK S  (S1–S6 bugs, category-match) — {policy_label} ══")
+    print(sep)
+    for r in results:
+        print(_row_s(r, policy_b, policy_gap))
+    print(sep)
+
+    agg_gt_s   = sum(r.gt_s    for r in results)
+    agg_tp_s   = sum(r.tp_s    for r in results)
+    agg_fp_s   = sum(r.fp_s    for r in results)
+    agg_fn_s   = sum(r.fn_s    for r in results)
+    agg_pool_s = sum(r.n_s_pool for r in results)
+    P, R, F = _f1(agg_tp_s, agg_fp_s, agg_fn_s)
+    print(
+        f"  {'AGG':>5} │ G_S={agg_gt_s:>3} pool={agg_pool_s:>3} │"
+        f" TP={agg_tp_s:>3} FP={agg_fp_s:>3} FN={agg_fn_s:>3} │"
+        f" P={P:.3f} R={R:.3f} F1={F:.3f}  ← F1_S (micro)"
+    )
+
+    # ── Combined (for reference) ───────────────────────────────────────────────
+    agg_gt_in  = agg_gt_l  + agg_gt_s
+    agg_tp     = agg_tp_l  + agg_tp_s
+    agg_fp     = agg_fp_l  + agg_fp_s
+    agg_fn     = agg_fn_l  + agg_fn_s
+    P, R, F = _f1(agg_tp, agg_fp, agg_fn)
+    agg_oos = sum(r.gt_oos for r in results)
+    print()
+    print("  ══ COMBINED (L+S, reference only) ══")
+    print(
+        f"  GT_in-scope={agg_gt_in}  OOS_excluded={agg_oos} │"
+        f" TP={agg_tp} FP={agg_fp} FN={agg_fn} │"
+        f" P={P:.3f} R={R:.3f} F1={F:.3f}"
     )
     print()
 
@@ -464,13 +503,17 @@ def print_table(results: List[ContestResult], verbose: bool = False) -> None:
 # ──────────────────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    default_bugs = str(Path(__file__).parent.parent.parent.parent / "web3bugs" / "results" / "bugs.csv")
+    default_bugs    = str(Path(__file__).parent.parent.parent.parent / "web3bugs" / "results" / "bugs.csv")
     default_results = str(Path(__file__).parent.parent / "results" / "web3bugs_trial")
 
-    parser = argparse.ArgumentParser(description="Evaluate MiroFish on Web3Bugs benchmark")
+    parser = argparse.ArgumentParser(description="Evaluate MiroFish on Web3Bugs (two-track)")
     parser.add_argument("--results",  default=default_results, help="Path to web3bugs_trial results dir")
     parser.add_argument("--bugs-csv", default=default_bugs,    help="Path to bugs.csv")
     parser.add_argument("--contest",  type=int, default=None,  help="Evaluate single contest ID")
+    parser.add_argument("--policy-b", action="store_true",
+                        help="Enable Policy B: allow SWC→semantic fallback for S-track (sensitivity analysis)")
+    parser.add_argument("--policy-gap", action="store_true",
+                        help="Enable Policy Gap: allow unvalidated_swc_gaps into S-pool when category maps (sensitivity)")
     parser.add_argument("--verbose",  action="store_true",     help="Print per-bug match details")
     args = parser.parse_args()
 
@@ -510,17 +553,28 @@ def main() -> None:
             print(f"  [SKIP] Contest {cid}: no GT bugs in bugs.csv")
             continue
 
-        findings = extract_findings(report)
+        findings = extract_findings(report, policy_b=args.policy_b, policy_gap=args.policy_gap)
+        gt_l_n = sum(1 for b in gt_bugs if _label_type(b.label) == "L")
+        gt_s_n = sum(1 for b in gt_bugs if _label_type(b.label) == "S")
+        gt_oos_n = sum(1 for b in gt_bugs if _label_type(b.label) in ("OOS", "O"))
+        l_pool_n = sum(1 for f in findings if f.source in ("consensus", "gap"))
+        s_pool_n = sum(1 for f in findings if _in_s_pool(f, args.policy_b, args.policy_gap))
 
-        print(f"\n  Contest {cid} │ GT bugs: {len(gt_bugs)} │ Tool findings: {len(findings)}")
+        print(
+            f"\n  Contest {cid} │ GT: total={len(gt_bugs)} L={gt_l_n} S={gt_s_n} OOS={gt_oos_n}"
+            f" │ Findings: L-pool={l_pool_n} S-pool={s_pool_n}"
+        )
         if args.verbose:
             print(f"    Report: {report_path}")
 
-        result = evaluate_contest(cid, gt_bugs, findings, verbose=args.verbose)
+        result = evaluate_contest(
+            cid, gt_bugs, findings,
+            policy_b=args.policy_b, policy_gap=args.policy_gap, verbose=args.verbose,
+        )
         all_results.append(result)
 
     if all_results:
-        print_table(all_results, verbose=args.verbose)
+        print_table(all_results, policy_b=args.policy_b, policy_gap=args.policy_gap)
     else:
         print("[WARN] No contests evaluated.")
 

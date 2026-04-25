@@ -26,7 +26,7 @@ from ..models.task import TaskManager, TaskStatus
 from ..models.cyber_models import (
     ExpertFinding, AttackerFinding, AttackerCorroboration, CyberSessionState
 )
-from ..utils.llm_client import LLMClient
+from ..utils.llm_client import LLMClient, LLMClientPool
 from ..utils.logger import get_logger
 from .cyber_expert_profile_generator import CyberAgentProfile, CyberExpertProfileGenerator
 from .cyber_oasis_env import (
@@ -254,7 +254,21 @@ class CyberSessionOrchestrator:
         llm_client: Optional[LLMClient] = None,
         boost_llm_client: Optional[LLMClient] = None,
     ):
-        self.llm = llm_client or LLMClient()
+        if llm_client is not None:
+            self.llm = llm_client
+        elif Config.LLM2_VERTEX_AI_KEY_FILE and Config.LLM2_BASE_URL:
+            client1 = LLMClient(rpm_slot_file="/tmp/mirofish_rpm_0.json")
+            client2 = LLMClient(
+                vertex_key_file=Config.LLM2_VERTEX_AI_KEY_FILE,
+                base_url=Config.LLM2_BASE_URL,
+                model=Config.LLM_MODEL_NAME,
+                rpm_slot_file="/tmp/mirofish_rpm_1.json",
+                rpm_limit=Config.LLM2_GLOBAL_RPM_LIMIT,
+            )
+            self.llm = LLMClientPool([client1, client2])
+            logger.info("LLMClientPool: 2 Vertex AI accounts active, pool_size=2")
+        else:
+            self.llm = LLMClient()
         # boost_llm dùng cho expensive operations (Phase C attacker reasoning)
         self.boost_llm = boost_llm_client or self._try_build_boost_client()
         self.env_builder = CyberOasisEnvBuilder()
@@ -588,10 +602,12 @@ class CyberSessionOrchestrator:
 
         active_profiles = env_builder.get_active_agents_for_phase(profiles, phase)
         prior_context = self._build_prior_context(session_state, mode=mode)
-        max_workers = int(os.environ.get("LLM_MAX_WORKERS", "1"))
+        pool_size = getattr(self.llm, "pool_size", 1)
+        max_workers = max(int(os.environ.get("LLM_MAX_WORKERS", "1")), pool_size)
 
         def _call_one(profile):
             """Single agent call — thread-safe (no shared mutable state written here)."""
+            import time as _time
             gap_context = ""
             if profile.tier == 1 and phase in ("A", "B"):
                 if mode == "contract_audit":
@@ -614,6 +630,7 @@ class CyberSessionOrchestrator:
             _rate_limiter.acquire()
             # RC1: attacker Phase C → keep raw text (think blocks intact) for tag rescue
             is_attacker_phase_c = (profile.tier == 2 and phase == "C")
+            _t0 = _time.time()
             response = self._call_agent(
                 profile=profile,
                 phase=phase,
@@ -623,6 +640,11 @@ class CyberSessionOrchestrator:
                 network_summary=network_summary,
                 mode=mode,
                 strip_think=not is_attacker_phase_c,
+            )
+            _elapsed = _time.time() - _t0
+            logger.info(
+                f"[TIMING] Phase={phase} R{round_num} agent={profile.agent_id} "
+                f"tier={profile.tier} latency={_elapsed:.1f}s"
             )
             return profile, gap_context, response
 
@@ -642,8 +664,11 @@ class CyberSessionOrchestrator:
                     except Exception as e:
                         logger.warning(f"Agent {futures[future].agent_id} round {round_num} error: {e}")
         else:
+            submit_delay = float(os.environ.get("LLM_SUBMIT_DELAY_S", "0.0"))
             results = []
-            for profile in active_profiles:
+            for i, profile in enumerate(active_profiles):
+                if i > 0 and submit_delay > 0:
+                    import time as _t; _t.sleep(submit_delay)
                 try:
                     results.append(_call_one(profile))
                 except Exception as e:
@@ -1040,15 +1065,23 @@ class CyberSessionOrchestrator:
         Includes Published Registry (Solution A for Weakness #4):
         agents see unique titles already reported → instructed to CHALLENGE
         or EXPAND rather than re-report the same finding.
+
+        Sliding window (CONTEXT_WINDOW_ROUNDS, default 3): only findings/gaps from the
+        last N rounds are shown in detail, keeping prompt size stable across all rounds.
         """
         lines = []
 
+        # Sliding window: cap detailed context to the last N rounds
+        window = int(os.environ.get("CONTEXT_WINDOW_ROUNDS", "3"))
+        current_round = session_state.current_round
+        min_round = max(1, current_round - window + 1)
+
         if mode == "contract_audit":
             cm = _get_contract_modules()
-            registry = cm["published_registry"](session_state.expert_findings, max_entries=20)
+            registry = cm["published_registry"](session_state.expert_findings, max_entries=10)
         else:
             from .cyber_oasis_env import build_published_registry
-            registry = build_published_registry(session_state.expert_findings, max_entries=20)
+            registry = build_published_registry(session_state.expert_findings, max_entries=10)
 
         # Published Registry — shown first so agents read it before anything else
         if registry:
@@ -1056,43 +1089,50 @@ class CyberSessionOrchestrator:
             lines.append("")  # blank line separator
 
         if session_state.expert_findings:
-            lines.append(f"=== RECENT FINDINGS (last 6) ===")
-            # Reduced from 10 to 6 — registry already covers all unique titles
-            recent = session_state.expert_findings[-6:]
-            for f in recent:
-                corr_count = len(f.get("attacker_corroborations", []))
-                if mode == "contract_audit":
-                    author_key = "author_domain"
-                    swc_info = f"[{f.get('swc_id', '?')}] " if f.get("swc_id") else ""
-                else:
-                    author_key = "author_group"
-                    swc_info = ""
-                lines.append(
-                    f"[{f.get('severity','?').upper()}] {swc_info}{f.get('title','Untitled')} "
-                    f"(by {f.get(author_key,'?')}/{f.get('author_persona','?')}, "
-                    f"confidence: {f.get('confidence', 0.5):.2f}"
-                    + (f", {corr_count} attacker reactions" if corr_count else "") + ")"
-                )
+            windowed = [f for f in session_state.expert_findings if f.get("round_number", 0) >= min_round]
+            recent = windowed[-6:]
+            if recent:
+                lines.append(f"=== RECENT FINDINGS (rounds {min_round}–{current_round}, last {len(recent)}) ===")
+                for f in recent:
+                    corr_count = len(f.get("attacker_corroborations", []))
+                    if mode == "contract_audit":
+                        author_key = "author_domain"
+                        swc_info = f"[{f.get('swc_id', '?')}] " if f.get("swc_id") else ""
+                    else:
+                        author_key = "author_group"
+                        swc_info = ""
+                    lines.append(
+                        f"[{f.get('severity','?').upper()}] {swc_info}{f.get('title','Untitled')} "
+                        f"(by {f.get(author_key,'?')}/{f.get('author_persona','?')}, "
+                        f"confidence: {f.get('confidence', 0.5):.2f}"
+                        + (f", {corr_count} attacker reactions" if corr_count else "") + ")"
+                    )
 
         if session_state.attacker_findings:
-            lines.append(f"\n=== ATTACKER FINDINGS ({len(session_state.attacker_findings)}) ===")
-            for f in session_state.attacker_findings[-5:]:
-                lines.append(
-                    f"[ATTACKER:{f.get('attacker_profile','?')}] "
-                    f"{f.get('title','Untitled')} (base confidence: {f.get('base_confidence', 0.6):.2f})"
-                )
+            windowed_atk = [f for f in session_state.attacker_findings if f.get("round_number", 0) >= min_round]
+            recent_atk = windowed_atk[-5:]
+            if recent_atk:
+                lines.append(f"\n=== ATTACKER FINDINGS (rounds {min_round}+, {len(recent_atk)}) ===")
+                for f in recent_atk:
+                    lines.append(
+                        f"[ATTACKER:{f.get('attacker_profile','?')}] "
+                        f"{f.get('title','Untitled')} (base confidence: {f.get('base_confidence', 0.6):.2f})"
+                    )
 
-        # Show gap registry summary (all rounds) so agents understand coverage state
+        # Gap registry: sliding window — only recent gaps to focus agent attention
         all_gaps = session_state.gap_registry
         if all_gaps:
-            lines.append(f"\n=== DECLARED KNOWLEDGE GAPS ({len(all_gaps)} total) ===")
-            lines.append("Areas experts could not verify — still open for investigation:")
-            author_key = "author_domain" if mode == "contract_audit" else "author_group"
-            for g in all_gaps[-8:]:  # show last 8 to avoid overflow
-                lines.append(
-                    f"  [{g.get(author_key,'?')}] Area: {g.get('analyzed','?')} — "
-                    f"{g.get('gap_text','')[:100]}"
-                )
+            windowed_gaps = [g for g in all_gaps if g.get("round_number", 0) >= min_round]
+            recent_gaps = windowed_gaps[-8:]
+            if recent_gaps:
+                lines.append(f"\n=== DECLARED KNOWLEDGE GAPS (rounds {min_round}+, {len(recent_gaps)}) ===")
+                lines.append("Areas experts could not verify — still open for investigation:")
+                author_key = "author_domain" if mode == "contract_audit" else "author_group"
+                for g in recent_gaps:
+                    lines.append(
+                        f"  [{g.get(author_key,'?')}] Area: {g.get('analyzed','?')} — "
+                        f"{g.get('gap_text','')[:100]}"
+                    )
 
         return "\n".join(lines) if lines else "No findings yet — be the first to identify vulnerabilities."
 
@@ -1104,25 +1144,26 @@ class CyberSessionOrchestrator:
             severity.lower(), 0.50
         )
 
-    def _try_build_boost_client(self) -> LLMClient:
+    def _try_build_boost_client(self):
         """Thử dùng BOOST LLM config nếu có, fallback về primary LLM.
 
         Mode A — Claude trên Vertex AI:
           BOOST_VERTEX_CLAUDE_REGION set + BOOST_MODEL_NAME=claude-*
         Mode B — Gemini Pro trên Vertex AI (cùng endpoint, đổi model):
           BOOST_MODEL_NAME=google/... (không set BOOST_VERTEX_CLAUDE_REGION)
+          → Dùng LLMClientPool 2 accounts nếu LLM2_* được set
         Mode C — Anthropic API key riêng:
           BOOST_API_KEY set
         """
         try:
-            boost_key           = getattr(Config, "BOOST_API_KEY",              None)
-            boost_url           = getattr(Config, "BOOST_BASE_URL",             None)
-            boost_model         = getattr(Config, "BOOST_MODEL_NAME",           None)
-            claude_region       = getattr(Config, "BOOST_VERTEX_CLAUDE_REGION", None)
-            vertex_key_file     = getattr(Config, "LLM_VERTEX_AI_KEY_FILE",     None)
+            boost_key       = getattr(Config, "BOOST_API_KEY",              None)
+            boost_url       = getattr(Config, "BOOST_BASE_URL",             None)
+            boost_model     = getattr(Config, "BOOST_MODEL_NAME",           None)
+            claude_region   = getattr(Config, "BOOST_VERTEX_CLAUDE_REGION", None)
+            vertex_key_file = getattr(Config, "LLM_VERTEX_AI_KEY_FILE",     None)
 
             if claude_region and boost_model:
-                # Mode A: Claude trên Vertex AI
+                # Mode A: Claude trên Vertex AI — single client (Claude không có multi-account pool)
                 return LLMClient(
                     model=boost_model,
                     vertex_key_file=vertex_key_file,
@@ -1130,16 +1171,30 @@ class CyberSessionOrchestrator:
                 )
 
             if boost_key:
-                # Mode C: Anthropic / OpenAI external key
+                # Mode C: Anthropic / OpenAI external key — single client
                 return LLMClient(api_key=boost_key, base_url=boost_url, model=boost_model)
 
             if boost_model and boost_model != Config.LLM_MODEL_NAME:
-                # Mode B: Vertex AI, đổi model
-                return LLMClient(
+                # Mode B: Vertex AI, đổi model sang Pro
+                # Dùng pool 2 accounts nếu LLM2_* được cấu hình
+                client1 = LLMClient(
                     base_url=boost_url or Config.LLM_BASE_URL,
                     model=boost_model,
                     vertex_key_file=vertex_key_file,
+                    rpm_slot_file="/tmp/mirofish_boost_rpm_0.json",
                 )
+                if Config.LLM2_VERTEX_AI_KEY_FILE and Config.LLM2_BASE_URL:
+                    client2 = LLMClient(
+                        base_url=Config.LLM2_BASE_URL,
+                        model=boost_model,
+                        vertex_key_file=Config.LLM2_VERTEX_AI_KEY_FILE,
+                        rpm_limit=Config.LLM2_GLOBAL_RPM_LIMIT,
+                        rpm_slot_file="/tmp/mirofish_boost_rpm_1.json",
+                    )
+                    pool = LLMClientPool([client1, client2])
+                    logger.info(f"BoostLLM pool: 2 Vertex AI accounts, model={boost_model}")
+                    return pool
+                return client1
         except Exception:
             pass
         return self.llm

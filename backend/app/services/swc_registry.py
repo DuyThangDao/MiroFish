@@ -600,8 +600,8 @@ DEFI_ATTACK_PATTERNS: Dict[str, Dict[str, Any]] = {
 
 SWC_BY_DOMAIN: Dict[str, List[str]] = {
     "appsec": [
-        "SWC-100", "SWC-104", "SWC-105", "SWC-106", "SWC-107", "SWC-110",
-        "SWC-113", "SWC-115", "SWC-123", "SWC-129", "SWC-131", "SWC-134", "SWC-135",
+        "SWC-104", "SWC-105", "SWC-106", "SWC-107",
+        "SWC-113", "SWC-115", "SWC-128", "SWC-134",
     ],
     "blockchain": [
         "SWC-102", "SWC-103", "SWC-106", "SWC-107", "SWC-109", "SWC-112",

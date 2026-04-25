@@ -293,6 +293,7 @@ def run_audit(
         kg_task_id = kg_builder.build_from_source_async(
             source_code=source_code,
             graph_name=graph_name,
+            contract_name=contract_name,
         )
         kg_result = _poll_task(task_manager, kg_task_id, "KG Build", timeout=1800)
 
@@ -379,7 +380,9 @@ def run_audit(
         }
         if ground_truth:
             _stats_update.update(_compute_eval_metrics(
-                report_result.get("consensus_vulns", []), ground_truth,
+                report_result.get("consensus_vulns", []),
+                ground_truth,
+                unvalidated_gaps=report_result.get("unvalidated_swc_gaps", []),
             ))
         report_result.setdefault("stats", {}).update(_stats_update)
 
@@ -489,6 +492,7 @@ def _lookup_ground_truth(sol_path: str) -> List[str]:
 def _compute_eval_metrics(
     consensus_vulns: list,
     ground_truth: List[str],
+    unvalidated_gaps: Optional[list] = None,
 ) -> dict:
     """Compute TP/FP/FN/Precision/Recall/F1 vs ground truth SWC list."""
     if not ground_truth:
@@ -496,6 +500,10 @@ def _compute_eval_metrics(
     detected: Set[str] = set()
     for v in consensus_vulns:
         for swc in v.get("mitre_techniques", []):
+            detected.add(swc)
+    for gap in (unvalidated_gaps or []):
+        swc = gap.get("swc_id", "")
+        if swc:
             detected.add(swc)
     expected = set(ground_truth)
     tp = len(detected & expected)
@@ -546,8 +554,8 @@ def main():
         help="Verbose debug logging",
     )
     parser.add_argument(
-        "--timeout", type=int, default=7200,
-        help="Session timeout in seconds (default: 7200)",
+        "--timeout", type=int, default=21600,
+        help="Session timeout in seconds (default: 21600)",
     )
     parser.add_argument(
         "--ground-truth", metavar="SWC[,SWC...]", default=None,

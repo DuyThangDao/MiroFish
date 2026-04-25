@@ -27,18 +27,23 @@ C1 — Framework: Multi-Expert Contract Audit Panel (first in smart contract dom
 C2 — Grounding: Contract KG anchors agent reasoning, reduces hallucination
 C3 — Exploitability: Attacker profiles validate "exists" vs "actually exploitable"
 C4 — Consensus: 3-layer confidence reduces FP rate vs GPTScan baseline
-C5 — Coverage: Detects logic vulnerability missed by static analysis tools
+C5 — Semantic track: Parallel SEMANTIC_FINDING pipeline detects business logic /
+     semantic vulnerabilities (Web3Bugs S-category) — static tools achieve 0% recall
 ```
 
 ### Tiến độ tổng quan
 
 ```
-Phase 1 — Data Layer          (Tuần 1–2):  Models, SWC Registry, Contract Parser, KG Builder
-Phase 2 — Agent Layer         (Tuần 3–4):  Profile generator, OASIS audit environment
-Phase 3 — Session & Consensus (Tuần 5):    Minimal changes từ Hướng B
-Phase 4 — Report & API        (Tuần 6–7):  ContractAuditReportAgent, patch tool, endpoints
-Phase 5 — Evaluation          (Tuần 8–10): SmartBugs benchmark, ablation study, baselines
-Phase 6 — Paper Writing       (Tuần 11–14):Introduction → Methodology → Evaluation → Conclusion
+Phase 1 — Data Layer          (Tuần 1–2):  Models, SWC Registry, Contract Parser, KG Builder  ✅
+Phase 2 — Agent Layer         (Tuần 3–4):  Profile generator, OASIS audit environment          ✅
+Phase 3 — Session & Consensus (Tuần 5):    Minimal changes từ Hướng B                         ✅
+Phase 4 — Report & API        (Tuần 6–7):  ContractAuditReportAgent, patch tool, endpoints     ✅
+Phase 5a/b — Eval debug/validate           SmartBugs samples + reentrancy category             ⬜ In progress
+Phase 5 — Semantic Track      (Tuần N):    SemanticFinding + taxonomy normalization            ✅ Core done (2026-04)
+Phase 5c — Full SmartBugs Eval             143 contracts, Recall per SWC type                  ⬜ Pending
+Phase 5d — Web3Bugs Eval                   10 contests, L/S two-track + policies               ✅ Script + taxonomy (trials ongoing)
+Phase 5 — Ablation Study                   V1–V5 variants                                      ⬜ Pending
+Phase 6 — Paper Writing       (Tuần 11–14):Introduction → Methodology → Evaluation → Conclusion ⬜
 ```
 
 ---
@@ -61,6 +66,7 @@ SỬA NHỎ (thêm mode, không xóa gì):
 
 TẠO MỚI HOÀN TOÀN:
   models/contract_models.py        ← ContractEntity, ContractFinding, AuditResult
+  services/semantic_taxonomy.py    ← Canonical S-categories, aliases, SWC→semantic, gap→S rules
   services/swc_registry.py         ← SWC weakness library (thay mitre_reference.py)
   services/contract_parser.py      ← Solidity → ContractEntity list
   services/contract_kg_builder.py  ← Build Zep KG từ contract structure
@@ -838,43 +844,106 @@ POST /api/contract/interview
 ## Phase 5 — Evaluation (Tuần 8–10)
 
 ### Mục tiêu
-Thu thập số liệu cho 5 đóng góp trong paper.
+Thu thập số liệu cho 5 đóng góp trong paper trên 2 tầng đánh giá.
+
+### Dataset strategy (cập nhật 2026-04-21)
+
+```
+Tầng 1 — Recall per SWC type:
+  SmartBugs Curated 143 contracts
+  Citation: Durieux et al. ICSE 2020
+  Metric: Recall per vulnerability type, so sánh Slither/Mythril
+
+Tầng 2 — Multi-SWC + Semantic bug detection:
+  Web3Bugs (Code4rena) 10 contests đã chọn (xem bảng bên dưới)
+  Citation: ZhangZhuoSJTU/Web3Bugs + GPTScan ICSE 2024
+  Metric: L-recall (SWC pattern) + S-recall (semantic/logic)
+  Prerequisite: semantic finding track phải implemented trước
+
+Datasets DROPPED:
+  SolidiFI-bench — redundant với SmartBugs, cùng single-SWC per contract
+  DeFiHackLabs  — 100% Foundry test files, không chạy standalone được
+```
 
 ### Chi phí ước tính (Gemini 2.5 Flash)
 
-| Run | LLM calls | Chi phí |
-|-----|-----------|---------|
-| SmartBugs 143 contracts (full) | ~28,600 | ~$8.5 |
-| Ablation V1–V4 | ~17,000 | ~$5 |
-| DeFiHackLabs 20 contracts | ~4,000 | ~$1.5 |
-| **Tổng Phase 5** | | **~$15** |
-
-Thời gian: ~2–3 giờ nếu chạy parallel 5 contracts cùng lúc.
+| Run | Chi phí | Thời gian |
+|-----|---------|-----------|
+| SmartBugs 143 contracts | ~$8.5 | ~3 giờ |
+| Web3Bugs 10 contests | ~$6 | ~5 giờ |
+| Ablation V1–V5 | ~$6 | ~3 giờ |
+| **Tổng Phase 5** | **~$21** | **~11 giờ** |
 
 ---
 
 ### Bước 5.1 — Setup Dataset
 
-**SmartBugs Curated** (primary benchmark):
+**SmartBugs Curated** (Tầng 1 — primary benchmark):
 ```bash
-git clone https://github.com/smartbugs/smartbugs-curated
-# 143 contracts với known vulnerabilities, classified theo SWC
-# Ground truth: biết chính xác vulnerability nào ở đây
-
+# Đã clone tại: /home/thangdd/repos/smartbugs-curated
 ls smartbugs-curated/dataset/
-# reentrancy/          (20 contracts)   ← Phase 5b bắt đầu ở đây
-# access_control/      (18 contracts)
-# arithmetic/          (22 contracts)
-# unchecked_calls/     (23 contracts)
-# other/               (60 contracts)
+# reentrancy/ access_control/ arithmetic/ unchecked_calls/ ...
+# 143 contracts, single-SWC per contract, line-level annotations
 ```
 
-**DeFiHackLabs** (secondary — real exploited contracts):
+**Web3Bugs** (Tầng 2 — multi-SWC + semantic):
 ```bash
-git clone https://github.com/SunWeb3Sec/DeFiHackLabs
-# Real incidents với POC exploit code
-# Dùng để validate exploitability assessment (C3)
+# Đã clone tại: /home/thangdd/repos/web3bugs
+# Ground truth: results/bugs.csv (492 HIGH findings across 104 contests)
+# L-category (~17%): L1=reentrancy, L4=gas, L7=overflow, LB=tx.origin, ...
+# S-category (~77%): S1=price oracle, S3=wrong state, S6=bad accounting, SE=unexpected flow
+# O-category (~6%): out-of-scope — excluded from evaluation
+
+# Pre-process: python scripts/flatten_contest.py /path/to/contracts/<id>
+# → topological sort .sol files → strip pragma/SPDX/imports → single 260K-char string
 ```
+
+**10 Contests đã chọn cho Phase 5d** (coverage tất cả 8 S-types, tổng ~114 L/S bugs):
+
+| ID | Tên | Bugs (L/S) | .sol | S-types covered |
+|----|-----|-----------|------|-----------------|
+| 19 | Connext | 5 (1L/4S) | 6 | S2-1, S3-1, SC, SE-2 |
+| 3 | Marginswap | 9 (3L/6S) | 19 | S1-1, S3-1, S6-2, S6-4, SC, SE-4 |
+| 20 | Spartan Protocol | 10 (1L/9S) | 29 | S1-1, S1-2, S2-2, SC |
+| 29 | Sushi Trident (ph2) | 11 (4L/7S) | 31 | S6-3, S6-4, SC |
+| 51 | Boot Finance | 7 (1L/6S) | 23 | S2-1, S3-1, S6-3, S6-4, SE-3 |
+| 62 | Streaming Protocol | 7 (1L/6S) | 15 | S3-1, S6-3, S6-4, SC, SE-4 |
+| 71 | InsureDAO | 6 (1L/5S) | 21 | S2-1, S4-1, S5-2, S6-4, SE-2 |
+| 78 | Behodler | 7 (0L/7S) | 40 | S1-1, S3-2, S4-1, S5-1, S6-3, SC |
+| 83 | Concur Finance | 8 (0L/8S) | 15 | S1-1, S2-2, S3-1, S5-2, S6-1, SC, SE-3 |
+| 14 | PoolTogether | 5 (2L/3S) | 10 | S3-2, S6-3 |
+
+**Lý do chọn**:
+- Contest 19 (Connext): **trial contest**, chạy đầu tiên để calibrate, size nhỏ (38K chars)
+- Contest 3 (Marginswap): đa dạng type (S1+S3+S6+SE), size vừa
+- Contest 20 (Spartan): price oracle focus (S1), 10 bugs
+- Contest 83 (Concur Finance): pure S-bugs, size nhỏ (15 .sol), good signal
+- Contest 14 (PoolTogether): nhỏ nhất (10 .sol), warm-up cho tầng 1 tool baseline
+- Còn lại: coverage S4 (business atomicity), S5 (privilege), SE (unexpected flow)
+
+**S-type coverage map** (tổng 10 contests):
+
+| S-type | Description | # contests |
+|--------|-------------|------------|
+| S1 | Price oracle manipulation | 3 (20, 78, 83) |
+| S2 | ID/resource violations | 4 (19, 51, 71, 83) |
+| S3 | Erroneous state updates | 6 (3, 19, 51, 62, 78, 83) |
+| S4 | Business-flow atomicity | 2 (71, 78) |
+| S5 | Privilege escalation | 2 (71, 78) |
+| S6 | Erroneous accounting | 6 (3, 29, 51, 62, 71, 83) |
+| SE | Unexpected operations | 5 (3, 19, 51, 62, 71) |
+| SC | Contract-specific | 5 (3, 19, 20, 29, 62) |
+
+> **Scope limitation — SE/SC bugs**: Nhóm SE (unexpected external interaction) và SC (contract-specific cross-chain flow) yêu cầu kiến thức về cross-chain state và protocol intent không có trong source code. Tool không thể detect được chúng từ source-level analysis. Trong metric báo cáo:
+> - **In-scope recall**: tính trên L + S1–S6 only (loại SE/SC khỏi denominator)
+> - **Full recall**: tính trên toàn bộ GT (SE/SC tính là FN nếu không tìm được)
+> - Nếu tool "tình cờ" match SE/SC (qua `other` category), vẫn đếm là TP
+
+**Evaluation script**: `backend/scripts/evaluate_web3bugs.py`
+- Track L: SWC match trên `consensus_vulns` + `unvalidated_swc_gaps`
+- Track S: category match trên `semantic_results` (Policy A); tùy chọn Policy B (SWC→semantic từ consensus) và Policy Gap (`--policy-gap`: gap có `source_count` đủ và map được → S-pool) — xem `docs/web3bugs-evaluation-protocol.md`
+- Taxonomy chuẩn: `backend/app/services/semantic_taxonomy.py` (đồng bộ parser, consensus vote, eval)
+- Output: per-contest breakdown + aggregate (chạy bằng `python3`, không cần Flask)
 
 ---
 
@@ -899,8 +968,10 @@ Config:
   - Prompt: full contract source + system_prompt của agent đó
   - Output: list of findings (SWC ID + severity + description)
 
-So sánh với GPTScan: cite số F1=0.88 từ paper gốc (họ dùng SmartBugs),
-không cần rerun GPTScan.
+So sánh với GPTScan (ICSE 2024): paper báo trên **Web3Bugs** recall ~83.33% và **F1 ~67.8%**
+(trích từ bản PDF chính thức); dataset DefiHacks F1 ~80%. **Không** trích F1=0.88 trên SmartBugs —
+đó là benchmark khác / có thể nhầm với số liệu tool khác. Khi viết paper: trích đúng bảng GPTScan
+theo dataset (Web3Bugs vs SmartBugs vs Top200).
 ```
 
 Tạo `scripts/run_baselines.py`:
@@ -911,66 +982,49 @@ Tạo `scripts/run_baselines.py`:
 
 ---
 
-### Bước 5.3 — Chiến lược chạy (3 giai đoạn)
+### Bước 5.3 — Chiến lược chạy
 
-Chạy từ nhỏ đến lớn — chỉ mở rộng khi F1 đã ổn:
+Chạy từ nhỏ đến lớn — chỉ mở rộng khi kết quả đã ổn:
 
 ```
-Phase 5a — Debug (~$0.10, ~30 phút):
+Phase 5a — Debug (~$0.10, ~30 phút):       ✅ Scripts done (evaluate_phase5a.py)
   3 contracts: dao + erc20 + defi_vault (built-in samples)
-  Mục đích: pipeline chạy end-to-end, không lỗi
-  Tiêu chí qua: tất cả 3 samples cho output hợp lệ
+  Tiêu chí: pipeline không crash, ≥1 expected SWC per sample
 
-Phase 5b — Validate (~$3, ~2 giờ):
-  20 contracts: smartbugs-curated/dataset/reentrancy/ (toàn bộ category)
-  Mục đích: F1 đầu tiên trên real labeled data
-  Tiêu chí qua: F1 ≥ 0.75 → tiến Phase 5c
-               F1 < 0.75 → tune prompts/consensus rồi rerun
+Phase 5b — Validate (~$3, ~2 giờ):         ✅ Scripts done (evaluate_phase5b.py)
+  20 contracts: smartbugs-curated/dataset/reentrancy/
+  Tiêu chí: Recall ≥ 0.80 → tiến 5c
 
-Phase 5c — Full (~$8.5, ~3 giờ parallel):
+Phase 5c — Full SmartBugs (~$8.5, ~3 giờ): ⬜ Pending
   143 contracts: toàn bộ SmartBugs Curated
-  Mục đích: primary benchmark numbers — F1/P/R per SWC type cho paper
-  Chỉ chạy sau khi Phase 5b confirm F1 tốt
+  Metric: Recall per SWC type, macro Recall, so sánh Slither/Mythril
+  Dùng: scripts/run_cohort_b.sh (batch runner đã có)
 
-Phase 5d — Real-World (~$1.5, ~1 giờ):
-  15–20 contracts: DeFiHackLabs real hacked production contracts
-  Mục đích: generalizability — chứng minh MECAP hoạt động trên production code
-  Ground truth: PoC exploit code → chính xác vulnerability bị khai thác
-  Pass criteria: F1 ≥ 0.60, Precision ≥ 0.50, Recall ≥ 0.70
-  Chạy sau Phase 5c
+Phase 5 — Semantic Track:                   ✅ Core (parser + consensus + taxonomy + prompts)
+  Chi tiết: `semantic_taxonomy.py`, `contract_oasis_env.py`, `consensus_engine.py`, `contract_profile_generator.py`
+  Xem: docs/smart-contract-audit-progress.md
+
+Phase 5d — Web3Bugs (~$3, ~1.5 giờ):       ✅ Script sẵn; chạy cohort 10 contest theo tiến độ
+  Pre-process: flatten contest .sol
+  Metric: L-recall (SWC) + S-recall (semantic categories; Policy A/B/Gap)
+  Tiêu chí: L-recall ≥ 0.60, S-recall > 0% (calibrate trên contest 19 trước)
 ```
 
 ```bash
-# Phase 5a — 3 built-in samples
-python scripts/run_contract_audit.py --sample dao --output ./results/debug/
-python scripts/run_contract_audit.py --sample erc20 --output ./results/debug/
-python scripts/run_contract_audit.py --sample defi_vault --output ./results/debug/
+# Phase 5c — full SmartBugs
+bash scripts/run_cohort_b.sh   # batch runner có sẵn
 
-# Phase 5b — reentrancy category
-python scripts/evaluate_smartbugs.py \
-    --dataset smartbugs-curated/dataset/reentrancy/ \
-    --output ./results/phase5b/ \
-    --parallel 3
-
-# Phase 5c — full SmartBugs (sau khi 5b tốt)
-python scripts/evaluate_smartbugs.py \
-    --dataset smartbugs-curated/dataset/ \
-    --output ./results/smartbugs_full/ \
-    --parallel 5
-
-# Phase 5d — DeFiHackLabs real production contracts (sau khi 5c tốt)
-python scripts/evaluate_phase5d.py \
-    --dataset /path/to/DeFiHackLabs \
-    --output ./results/phase5d/ \
-    --ground-truth ./data/defihacklabs_ground_truth.json \
-    --parallel 1 --cooldown 30
+# Phase 5d — Web3Bugs (từ backend/)
+python3 scripts/evaluate_web3bugs.py \
+    --results results/web3bugs_trial/ \
+    --bugs-csv /path/to/web3bugs/results/bugs.csv \
+    [--contest 19] [--policy-b] [--policy-gap] [--verbose]
 ```
 
-Cần tạo:
-- `scripts/evaluate_smartbugs.py` — batch runner + metrics (thêm `--dataset DIR` flag)
-- `scripts/run_baselines.py` — Slither + Mythril + Single-LLM baseline
-- `scripts/ablation_study.py` — chạy V1–V5 variants
-- `scripts/evaluate_phase5d.py` — DeFiHackLabs batch runner, ground truth từ PoC exploits
+Scripts còn lại (optional):
+- `scripts/run_baselines.py` — Slither + Mythril + Single-LLM Option B
+- `scripts/ablation_study.py` — V1–V5 variants
+- `scripts/evaluate_web3bugs.py` — Web3Bugs L+S (đã có)
 
 ---
 
@@ -1020,7 +1074,11 @@ F1        = 2 * Precision * Recall / (Precision + Recall)
 # Aggregate: macro-F1 trên 143 contracts
 # Per-SWC-type: F1 riêng cho reentrancy, access_control, arithmetic...
 
-# Với DeFiHackLabs:
+# Với Web3Bugs (Tầng 2):
+# L-recall = TP_L / (TP_L + FN_L)   — SWC-mappable bugs (L-category)
+# S-recall = TP_S / (TP_S + FN_S)   — Semantic/logic bugs (S-category)
+# TP_S = SEMANTIC_FINDING của hệ thống khớp với S-finding trong bugs.csv
+#         (keyword match trên function name + description)
 # Exploitability Precision = [CONFIRMED EXPLOITABLE] matches real exploit
 #                            / total [CONFIRMED EXPLOITABLE] findings
 ```
@@ -1059,11 +1117,12 @@ Abstract (150 words)
    4.1 Experimental setup (datasets, baselines, metrics)
    4.2 RQ1: Overall performance vs baselines (Table)
    4.3 RQ2: Ablation study (mỗi component đóng góp bao nhiêu)
-   4.4 RQ3: Logic vulnerability detection (case study)
-   4.5 RQ4: Exploitability validation (DeFiHackLabs)
+   4.4 RQ3: Semantic/logic bug detection on Web3Bugs S-category
+   4.5 RQ4: Exploitability validation + L-recall (Web3Bugs)
 
 5. Related Work (0.5 trang)
-   Slither, Mythril, GPTScan, LLM4SmartContract, multi-agent audit
+   Slither, Mythril, GPTScan (ICSE 2024), LLM-SmartAudit (TSE 2025),
+   SmartInv (S&P 2024), iAudit (ICSE 2025), multi-agent audit
 
 6. Conclusion (0.3 trang)
    Contributions tóm tắt + future work (Attack Graph cho contracts)
@@ -1101,7 +1160,8 @@ Phase 5 — Evaluation:
   [ ] Phase 5c: full SmartBugs 143 contracts (chỉ sau khi 5b tốt)
   [ ] Ablation study 5 variants V1–V5 (scripts/ablation_study.py)
   [ ] Metrics: Precision/Recall/F1 per SWC type + macro (scripts/evaluate_smartbugs.py)
-  [ ] Phase 5d: DeFiHackLabs 15–20 contracts — F1 ≥ 0.60, P ≥ 0.50, R ≥ 0.70 (scripts/evaluate_phase5d.py)
+  [ ] Semantic Track: SemanticFinding dataclass + agent prompt + orchestrator + consensus + report tool
+  [ ] Phase 5d: Web3Bugs 15–20 contracts — L-recall ≥ 0.60, S-recall > 0% (scripts/evaluate_web3bugs.py)
 
 Phase 6 — Paper:
   [ ] Abstract + Introduction
@@ -1140,17 +1200,18 @@ RQ1: Multi-Expert Panel có Precision/Recall/F1 cao hơn
 RQ2: Mỗi component trong kiến trúc đóng góp bao nhiêu?
      → Ablation study 5 variants
 
-RQ3: Logic vulnerability detection rate của panel
-     vs static tools trên contracts không có pattern rõ ràng?
-     → Subset "logic_error" trong SmartBugs
+RQ3: MECAP có phát hiện được semantic/logic bugs mà static tools bỏ qua không?
+     → Web3Bugs S-category: so sánh S-recall của MECAP vs Slither (0%) vs Mythril (0%)
+     → MECAP phải > 0% để đây là đóng góp có ý nghĩa (C5)
 
 RQ4: Attacker profile validation có cải thiện
      exploitability precision không?
-     → DeFiHackLabs real incident validation
+     → Web3Bugs L-category: [CONFIRMED EXPLOITABLE] vs ground truth
+     → So sánh V4 (no Phase C) vs V5 (full) trên L-category bugs
 
 RQ5: Contract KG grounding có giảm FP rate
      so với agent không có KG context không?
-     → Variant 4 vs Variant 5 trong ablation study
+     → Variant 2 (single agent + KG) vs Variant 1 (no KG) trong ablation study
 ```
 
 ---

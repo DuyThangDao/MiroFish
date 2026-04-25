@@ -43,6 +43,7 @@ from ..models.cyber_models import (
     ConsensusVulnerability, SeverityLevel
 )
 from ..utils.logger import get_logger
+from .semantic_taxonomy import normalize_semantic_category
 
 logger = get_logger("mirofish.consensus_engine")
 
@@ -67,15 +68,19 @@ SWC_ANCHOR_KEYWORDS: Dict[str, List[str]] = {
     "selfdestruct":   ["selfdestruct", "suicide", "SWC-106"],
     "delegatecall":   ["delegatecall", "delegate call", "SWC-112", "proxy"],
     "signature":      ["signature", "ecrecover", "replay", "SWC-121", "SWC-122"],
+    "dos_gas":        ["SWC-128", "block gas limit", "unbounded array", "unbounded loop", "gas exhaustion", "DoS with Block Gas"],
+    "front_running":  ["SWC-114", "front-run", "frontrunning", "front running", "MEV", "transaction order", "sandwich attack"],
 }
 
 # Semantic category anchors for S-category (Web3Bugs) findings.
 SEMANTIC_ANCHOR_KEYWORDS: Dict[str, List[str]] = {
+    "access_control":        ["access control", "missing restriction", "unauthorized", "anyone can", "arbitrary caller", "privilege", "onlyOwner"],
     "price_oracle":          ["oracle", "price manipulation", "spot price", "TWAP", "stale price", "Chainlink"],
     "flash_loan":            ["flash loan", "flashloan", "flash attack", "FLASH_LOAN"],
     "governance_attack":     ["governance", "voting", "proposal", "vote manipulation", "quorum"],
     "incorrect_accounting":  ["accounting", "balance", "share", "reward", "rounding", "precision", "incorrect"],
-    "state_machine_bug":     ["state machine", "state transition", "invariant", "locked", "stuck"],
+    "state_machine_bug":     ["state machine", "state transition", "invariant", "locked", "stuck", "approval not reset", "not cleaned up", "ERC20 approval"],
+    "business_flow":         ["business logic", "protocol invariant", "double", "spec mismatch"],
     "incentive_misalignment":["incentive", "misalignment", "griefing", "sandwich", "MEV", "economic"],
     "reentrancy_logic":      ["reentrancy", "re-entrancy", "reentrant", "callback", "cross-contract"],
     "other":                 [],
@@ -269,14 +274,23 @@ class ConsensusEngine:
         """
         Cluster findings theo tiêu đề tương đồng.
 
-        Two passes:
-          Pass 1 (original): ≥2 shared significant title tokens → same cluster
-          Pass 2 (B-dynamic): shared semantic anchor in title → same cluster
-                              catches "No centralized logging" + "Absence of SIEM"
-                              which share anchor "siem" but differ in title tokens
+        contract_audit mode — SWC-first clustering:
+          Rule 1: same SWC ID → always cluster (same vulnerability type by taxonomy)
+          Rule 2: both have SWC IDs but different → never cluster (different vuln types)
+          Rule 3: one or both lack SWC ID → fall back to title-token (semantic findings)
+          This prevents cross-SWC contamination where e.g. SWC-106 findings get merged
+          into a SWC-113 cluster because they share the same affected function name in
+          their titles, which dilutes intra_score and hides the true per-SWC consensus.
+
+        network_security mode — title-token clustering:
+          Pass 1: ≥2 shared significant title tokens → same cluster
+          Pass 2: shared semantic anchor → same cluster
         """
         if not findings:
             return []
+
+        if mode == "contract_audit":
+            return self._cluster_by_swc(findings)
 
         anchors = self._build_anchors(findings, mode=mode)
         clusters: List[List[Dict]] = []
@@ -303,6 +317,60 @@ class ConsensusEngine:
                     assigned.add(j)
 
             clusters.append(cluster)
+
+        return clusters
+
+    def _cluster_by_swc(
+        self, findings: List[Dict[str, Any]]
+    ) -> List[List[Dict[str, Any]]]:
+        """
+        contract_audit clustering: group strictly by SWC ID.
+
+        - Findings with the same SWC ID → one cluster per unique SWC ID.
+        - Findings without a SWC ID (semantic findings) → title-token fallback
+          among themselves only, never merged into an SWC cluster.
+
+        This is the root fix for cross-SWC contamination: different vulnerability
+        types (different SWC IDs) are definitionally independent findings and must
+        never share a cluster, even if they affect the same function.
+        """
+        swc_buckets: Dict[str, List[Dict]] = defaultdict(list)
+        no_swc: List[Dict] = []
+
+        for f in findings:
+            swc = f.get("swc_id", "").strip()
+            # A1: remap SWC-113 → SWC-128 when trigger is unbounded array growth
+            # SWC-113 = DoS via failed call; SWC-128 = DoS via block gas (unbounded loop)
+            if swc == "SWC-113":
+                text = (f.get("title", "") + " " + f.get("description", "")).lower()
+                if any(kw in text for kw in ("unbounded", "array growth", "grows without", "block gas", "gas limit")):
+                    swc = "SWC-128"
+                    f = dict(f, swc_id="SWC-128", swc_name="DoS with Block Gas Limit")
+            if swc:
+                swc_buckets[swc].append(f)
+            else:
+                no_swc.append(f)
+
+        clusters: List[List[Dict]] = list(swc_buckets.values())
+
+        # Title-token fallback for findings without SWC ID (rare in contract_audit)
+        if no_swc:
+            anchors = self._build_anchors(no_swc, mode="contract_audit")
+            assigned: Set[int] = set()
+            for i, f in enumerate(no_swc):
+                if i in assigned:
+                    continue
+                cluster = [f]
+                assigned.add(i)
+                tokens_i = self._title_tokens(f.get("title", ""))
+                for j, g in enumerate(no_swc):
+                    if j <= i or j in assigned:
+                        continue
+                    tokens_j = self._title_tokens(g.get("title", ""))
+                    if len(tokens_i & tokens_j) >= 2 or self._shares_anchor(f, g, anchors):
+                        cluster.append(g)
+                        assigned.add(j)
+                clusters.append(cluster)
 
         return clusters
 
@@ -409,7 +477,12 @@ class ConsensusEngine:
             # affected_functions (contract) or affected_assets (network)
             all_assets.extend(f.get("affected_functions") or f.get("affected_assets") or [])
             all_evidence.extend(f.get("evidence") or [])
-            all_recs.extend(f.get("recommendations") or f.get("patch_suggestion") or [])
+            # patch_suggestion is a string; recommendations is a list — handle both
+            _patch = f.get("recommendations") or f.get("patch_suggestion")
+            if isinstance(_patch, list):
+                all_recs.extend(_patch)
+            elif isinstance(_patch, str) and _patch.strip():
+                all_recs.append(_patch)
             if f.get("finding_id"):
                 all_source_ids.append(f["finding_id"])
             # swc_id (contract) or mitre_techniques (network)
@@ -539,7 +612,9 @@ class ConsensusEngine:
     @staticmethod
     def _shares_semantic_anchor(f1: Dict[str, Any], f2: Dict[str, Any]) -> bool:
         """True if both semantic findings share the same category or a title keyword anchor."""
-        if f1.get("category") == f2.get("category") and f1.get("category") != "other":
+        c1 = normalize_semantic_category(f1.get("category"))
+        c2 = normalize_semantic_category(f2.get("category"))
+        if c1 == c2 and c1 != "other":
             return True
         t1 = (f1.get("title", "") + " " + f1.get("evidence", "")).lower()
         t2 = (f2.get("title", "") + " " + f2.get("evidence", "")).lower()
@@ -611,11 +686,21 @@ class ConsensusEngine:
             step for f in cluster for step in f.get("attack_path", []) if step
         ]
 
-        # Category by majority vote
+        # Category by majority vote (canonical buckets)
         cat_votes: Dict[str, int] = defaultdict(int)
         for f in cluster:
-            cat_votes[f.get("category", "other")] += 1
+            cat_votes[normalize_semantic_category(f.get("category"))] += 1
         category = max(cat_votes, key=lambda k: cat_votes[k])
+
+        # Collect patch suggestions from cluster findings
+        all_patches: List[str] = []
+        for f in cluster:
+            p = f.get("patch_suggestion")
+            if isinstance(p, list):
+                all_patches.extend(p)
+            elif isinstance(p, str) and p.strip():
+                all_patches.append(p)
+        all_patches = list(dict.fromkeys(all_patches))
 
         return {
             "semantic_vuln_id":    f"sv_{uuid.uuid4().hex[:8]}",
@@ -625,6 +710,7 @@ class ConsensusEngine:
             "affected_functions":  all_funcs,
             "evidence":            rep.get("evidence", ""),
             "attack_path":         all_attack_paths[:5],
+            "patch_suggestions":   all_patches,
             "confidence_score":    min(1.0, confidence),
             "intra_score":         intra_score,
             "cross_score":         cross_score,
@@ -640,7 +726,12 @@ class ConsensusEngine:
         domain_group_count: int,
     ) -> List[Dict[str, Any]]:
         """Full semantic consensus pipeline."""
-        clusters = self._cluster_semantic_findings(semantic_findings_raw)
+        normalized_raw: List[Dict[str, Any]] = []
+        for f in semantic_findings_raw:
+            fc = dict(f)
+            fc["category"] = normalize_semantic_category(f.get("category"))
+            normalized_raw.append(fc)
+        clusters = self._cluster_semantic_findings(normalized_raw)
         results = []
         for cluster in clusters:
             sv = self._score_semantic_cluster(cluster, domain_group_count)

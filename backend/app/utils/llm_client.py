@@ -18,27 +18,31 @@ _logger = logging.getLogger("mirofish.llm_client")
 # ─── Global rate limiter (shared across all threads/processes) ────────────────
 import fcntl
 import os as _os
+import threading
 
-_GLOBAL_RPM_FILE = "/tmp/mirofish_global_rpm.json"
-_GLOBAL_RPM_LOCK = "/tmp/mirofish_global_rpm.lock"
+_GLOBAL_RPM_FILE = "/tmp/mirofish_rpm_0.json"
+_GLOBAL_RPM_LOCK = "/tmp/mirofish_rpm_0.lock"
 
 
-def _acquire_global_slot():
-    """Block until a slot is available in the global RPM window."""
-    limit = int(_os.environ.get("LLM_GLOBAL_RPM_LIMIT", "0"))
+def _acquire_global_slot(slot_file: str = _GLOBAL_RPM_FILE,
+                         lock_file: str = _GLOBAL_RPM_LOCK,
+                         limit: int = 0):
+    """Block until a slot is available in the per-account RPM window."""
+    if limit <= 0:
+        limit = int(_os.environ.get("LLM_GLOBAL_RPM_LIMIT", "0"))
     if limit <= 0:
         return  # limiter disabled
 
     while True:
         wait_for = 0.0
-        with open(_GLOBAL_RPM_LOCK, "w") as lf:
+        with open(lock_file, "w") as lf:
             fcntl.flock(lf, fcntl.LOCK_EX)
             try:
                 now = time.time()
                 cutoff = now - 60.0
                 try:
                     import json as _json
-                    with open(_GLOBAL_RPM_FILE) as f:
+                    with open(slot_file) as f:
                         data = _json.load(f)
                     ts = [t for t in data.get("ts", []) if t > cutoff]
                 except (FileNotFoundError, ValueError):
@@ -47,7 +51,7 @@ def _acquire_global_slot():
                 if len(ts) < limit:
                     ts.append(now)
                     import json as _json
-                    with open(_GLOBAL_RPM_FILE, "w") as f:
+                    with open(slot_file, "w") as f:
                         _json.dump({"ts": ts}, f)
                     return  # slot acquired
 
@@ -102,12 +106,17 @@ class LLMClient:
         model: Optional[str] = None,
         vertex_key_file: Optional[str] = None,
         anthropic_vertex_region: Optional[str] = None,
+        rpm_slot_file: Optional[str] = None,
+        rpm_limit: Optional[int] = None,
     ):
         self.base_url = base_url or Config.LLM_BASE_URL
         self.model = model or Config.LLM_MODEL_NAME
         self._is_anthropic = False
         self._is_anthropic_vertex = False
         self._av_client = None  # AnthropicVertex client instance
+        self._rpm_slot_file = rpm_slot_file or _GLOBAL_RPM_FILE
+        self._rpm_lock_file = self._rpm_slot_file.replace(".json", ".lock")
+        self._rpm_limit = rpm_limit  # None → reads LLM_GLOBAL_RPM_LIMIT from env
 
         resolved_vertex = vertex_key_file or (
             Config.LLM_VERTEX_AI_KEY_FILE if not api_key else None
@@ -196,7 +205,7 @@ class LLMClient:
         base_delay  = 15
         for attempt in range(max_retries):
             try:
-                _acquire_global_slot()
+                _acquire_global_slot(self._rpm_slot_file, self._rpm_lock_file, self._rpm_limit or 0)
                 kwargs: Dict[str, Any] = {
                     "model":       self.model,
                     "max_tokens":  max_tokens,
@@ -255,7 +264,7 @@ class LLMClient:
         base_delay  = 15
         for attempt in range(max_retries):
             try:
-                _acquire_global_slot()
+                _acquire_global_slot(self._rpm_slot_file, self._rpm_lock_file, self._rpm_limit or 0)
                 response = self.client.chat.completions.create(**kwargs)
                 break
             except Exception as e:
@@ -303,3 +312,54 @@ class LLMClient:
             return json.loads(cleaned)
         except json.JSONDecodeError:
             raise ValueError(f"LLM返回的JSON格式无效: {cleaned}")
+
+
+class LLMClientPool:
+    """Round-robin pool across multiple LLMClient instances.
+
+    Drop-in replacement for LLMClient — exposes the same chat() / chat_json()
+    interface. Each call is dispatched to the next client in rotation, spreading
+    load evenly across Vertex AI accounts. Thread-safe.
+    """
+
+    def __init__(self, clients: List[LLMClient]):
+        if not clients:
+            raise ValueError("LLMClientPool requires at least one client")
+        self._clients = clients
+        self._idx = 0
+        self._lock = threading.Lock()
+
+    def _next(self) -> LLMClient:
+        with self._lock:
+            c = self._clients[self._idx % len(self._clients)]
+            self._idx += 1
+            return c
+
+    @property
+    def pool_size(self) -> int:
+        return len(self._clients)
+
+    @property
+    def model(self) -> str:
+        return self._clients[0].model
+
+    def chat(
+        self,
+        messages: List[Dict[str, str]],
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+        response_format: Optional[Dict] = None,
+        strip_think: bool = True,
+    ) -> str:
+        return self._next().chat(
+            messages, temperature=temperature, max_tokens=max_tokens,
+            response_format=response_format, strip_think=strip_think,
+        )
+
+    def chat_json(
+        self,
+        messages: List[Dict[str, str]],
+        temperature: float = 0.3,
+        max_tokens: int = 4096,
+    ) -> Dict[str, Any]:
+        return self._next().chat_json(messages, temperature=temperature, max_tokens=max_tokens)

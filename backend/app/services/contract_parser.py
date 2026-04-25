@@ -152,9 +152,14 @@ class ContractParser:
             llm_data = {}
 
         # Step 3: Build ContractEntity
+        # Validate LLM contract_name: reject if the name doesn't appear as an actual
+        # 'contract Foo' declaration (guards against LLM hallucinating names from comments)
+        llm_name = llm_data.get("contract_name", "")
+        if llm_name and not re.search(rf'\bcontract\s+{re.escape(llm_name)}\b', source_code):
+            llm_name = ""
         contract_id = (
             contract_name
-            or llm_data.get("contract_name", "")
+            or llm_name
             or self._detect_contract_name(source_code)
             or f"Contract_{uuid.uuid4().hex[:6]}"
         )
@@ -349,8 +354,17 @@ Return ONLY valid JSON, no explanation."""
         Send source code to LLM → extract structured data.
         Returns raw dict (functions, state_vars, type, etc.)
         """
-        # Trim source if very large
-        code_snippet = source_code[:6000] if len(source_code) > 6000 else source_code
+        # For multi-contract flat files, focus on the last 'contract Foo' declaration
+        # (implementations appear after interfaces/libraries in topological order)
+        code_snippet = source_code
+        if len(source_code) > 6000:
+            last_contract = None
+            for m in re.finditer(r'\bcontract\s+\w+', source_code):
+                last_contract = m
+            if last_contract:
+                code_snippet = source_code[last_contract.start():][:8000]
+            else:
+                code_snippet = source_code[:6000]
         name_hint = f" The contract is named '{contract_name}'." if contract_name else ""
 
         prompt = f"""You are a Solidity smart contract security analyzer.{name_hint}

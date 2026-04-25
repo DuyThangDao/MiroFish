@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 
 from ..utils.logger import get_logger
 from .contract_profile_generator import ContractAgentProfile
+from .semantic_taxonomy import SEMANTIC_CATEGORY_PIPE_STRING, normalize_semantic_category
 
 logger = get_logger("mirofish.contract_oasis_env")
 
@@ -840,19 +841,14 @@ def _initial_confidence(severity: str, phase: str) -> float:
 
 # ─── Semantic Finding Parser (Web3Bugs S-category) ───────────────────────────
 
-SEMANTIC_CATEGORIES_LIST = [
-    "price_oracle", "flash_loan", "governance_attack",
-    "incorrect_accounting", "state_machine_bug", "incentive_misalignment",
-    "reentrancy_logic", "other",
-]
-
-SEMANTIC_FINDING_FORMAT = """\
+SEMANTIC_FINDING_FORMAT = f"""\
 SEMANTIC_FINDING: <title>
-CATEGORY: <price_oracle|flash_loan|governance_attack|incorrect_accounting|state_machine_bug|incentive_misalignment|reentrancy_logic|other>
+CATEGORY: <{SEMANTIC_CATEGORY_PIPE_STRING}>
 SEVERITY: <critical|high|medium|low>
 FUNCTION: <affected_function()>
 EVIDENCE: <specific code pattern or economic invariant violated>
-ATTACK_PATH: <step-by-step scenario>"""
+ATTACK_PATH: <step-by-step scenario>
+PATCH: <concrete remediation recommendation>"""
 
 _SEMANTIC_ATTACK_PATH_RE = re.compile(
     r'(?i)^(STEP\s*\d+|→|\d+[\.\)]\s)', re.MULTILINE
@@ -888,20 +884,23 @@ def parse_semantic_finding_from_text(
     affected_functions: List[str] = []
     evidence = ""
     attack_path: List[str] = []
+    patch_suggestion = None
     phase = get_phase_for_round(round_num)
 
     current_field = None
     current_value: List[str] = []
 
     def _flush():
-        nonlocal evidence, attack_path
+        nonlocal evidence, attack_path, patch_suggestion
         if current_field == "evidence" and current_value:
             evidence = " ".join(current_value)
         elif current_field == "attack_path" and current_value:
             attack_path = [v for v in current_value if v.strip()]
+        elif current_field == "patch" and current_value:
+            patch_suggestion = " ".join(current_value)
 
     _FIELD_RE = re.compile(
-        r'(?i)^(SEMANTIC_FINDING|CATEGORY|SEVERITY|FUNCTION|EVIDENCE|ATTACK_PATH)\s*:',
+        r'(?i)^(SEMANTIC_FINDING|CATEGORY|SEVERITY|FUNCTION|EVIDENCE|ATTACK_PATH|PATCH)\s*:',
         re.MULTILINE
     )
 
@@ -917,8 +916,8 @@ def parse_semantic_finding_from_text(
         if re.match(r'(?i)^SEMANTIC_FINDING\s*:', stripped):
             title = re.sub(r'(?i)^SEMANTIC_FINDING\s*:', '', stripped).strip()
         elif lower.startswith("category:"):
-            cat_raw = stripped.split(":", 1)[1].strip().lower()
-            category = cat_raw if cat_raw in SEMANTIC_CATEGORIES_LIST else "other"
+            cat_raw = stripped.split(":", 1)[1].strip()
+            category = normalize_semantic_category(cat_raw)
         elif lower.startswith("severity:"):
             sev_raw = stripped.split(":", 1)[1].strip().lower()
             if sev_raw in {"critical", "high", "medium", "low", "info"}:
@@ -933,6 +932,9 @@ def parse_semantic_finding_from_text(
             current_field = "attack_path"
             val = stripped.split(":", 1)[1].strip()
             current_value = [val] if val else []
+        elif lower.startswith("patch:"):
+            current_field = "patch"
+            current_value = [stripped.split(":", 1)[1].strip()]
         elif current_field and (line.startswith("  ") or (
             stripped and not _FIELD_RE.match(stripped)
         )):
@@ -970,6 +972,7 @@ def parse_semantic_finding_from_text(
         "affected_functions":  affected_functions,
         "evidence":            evidence,
         "attack_path":         attack_path,
+        "patch_suggestion":    patch_suggestion,
         "phase":               phase,
         "round_number":        round_num,
         "confidence":          _initial_confidence(severity, phase),

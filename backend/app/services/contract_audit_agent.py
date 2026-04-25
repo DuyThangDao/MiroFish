@@ -84,13 +84,7 @@ Use tools by writing: ACTION: tool_name({"arg": value})
 Write final report using: FINAL_ANSWER: <report content>
 """
 
-REACT_SYSTEM_PROMPT = f"""You are ContractAuditReportAgent — a senior smart contract security auditor.
-You synthesize results from a multi-expert audit panel into a comprehensive security report.
-You use a ReACT reasoning pattern: observe the data, gather details with tools, then write the report.
-
-{TOOLS_SPEC}
-
-Your report MUST include these 6 sections:
+REPORT_STRUCTURE_SPEC = """Your report MUST include these 6 sections:
 
 ## 1. EXECUTIVE SUMMARY
    - Total: X critical, Y high, Z medium vulnerabilities
@@ -326,55 +320,62 @@ class ContractAuditReportAgent:
         contract_summary: str,
         tool_context: "_ContractToolContext",
     ) -> str:
-        """ReACT loop: Thought → ACTION → OBSERVATION → ... → FINAL_ANSWER"""
-        messages = [
-            {"role": "system", "content": REACT_SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": (
-                    f"Generate a comprehensive smart contract audit report for:\n\n"
-                    f"{contract_summary}\n\n"
-                    f"Use the available tools to gather findings data, then write the complete 6-section report. "
-                    f"Start with THOUGHT: to plan your approach. "
-                    f"Call at least 4 tools before writing FINAL_ANSWER."
-                )
-            }
+        """
+        Two-phase report generation:
+          Phase 1 — data collection: call all tools deterministically in Python.
+            No LLM involved. Produces a compact, structured data packet.
+          Phase 2 — report writing: single focused LLM call with clean context.
+            Input = contract_summary + data packet (~3-4k tokens).
+            Output budget = max_tokens - input ≈ 4-5k tokens → enough for full report.
+
+        Replaces the old ReACT loop where tool calls + report writing shared one context
+        window, causing the FINAL_ANSWER to be truncated by accumulated message history.
+        """
+        data_packet = self._collect_report_data(tool_context)
+        return self._write_report_from_data(contract_summary, data_packet)
+
+    def _collect_report_data(self, tool_context: "_ContractToolContext") -> str:
+        """Call all audit tools in Python and assemble a compact data summary."""
+        sections = [
+            ("TOP VULNERABILITIES",       "get_top_vulnerabilities",       {"limit": 20}),
+            ("EXPLOITABILITY ASSESSMENT", "get_exploitable_findings",       {}),
+            ("PATCH SUGGESTIONS",         "get_patch_suggestions",          {"severity": "all"}),
+            ("SEMANTIC / LOGIC FINDINGS", "get_semantic_findings",          {"category": "all"}),
+            ("ATTACKER PROFILE SUMMARY",  "get_attacker_profile_breakdown", {"profile": "all"}),
+            ("SWC BREAKDOWN",             "get_swc_breakdown",              {}),
+            ("COVERAGE GAPS",             "get_coverage_gaps",              {}),
         ]
+        parts = []
+        for title, tool, args in sections:
+            result = tool_context.execute(tool, args)
+            parts.append(f"=== {title} ===\n{result}")
+        return "\n\n".join(parts)
 
-        for iteration in range(self.max_iterations):
-            response = self.llm.chat(messages, temperature=0.3, max_tokens=8192)
-            messages.append({"role": "assistant", "content": response})
-
-            # Check for FINAL_ANSWER
-            if "FINAL_ANSWER:" in response:
-                idx = response.index("FINAL_ANSWER:")
-                return response[idx + len("FINAL_ANSWER:"):].strip()
-
-            # Parse and execute tool call
-            action_result = self._parse_and_execute_action(response, tool_context)
-            if action_result:
-                messages.append({
-                    "role": "user",
-                    "content": f"OBSERVATION:\n{action_result}\n\nContinue your analysis."
-                })
-            else:
-                messages.append({
-                    "role": "user",
-                    "content": (
-                        "No valid tool call found. Use ACTION: tool_name({args}) format, "
-                        "or write FINAL_ANSWER: to output your audit report."
-                    )
-                })
-
-        # Fallback: force final answer
-        messages.append({
-            "role": "user",
-            "content": "Max iterations reached. Write FINAL_ANSWER: with your complete audit report now."
-        })
-        final = self.llm.chat(messages, temperature=0.3, max_tokens=8192)
-        if "FINAL_ANSWER:" in final:
-            return final[final.index("FINAL_ANSWER:") + len("FINAL_ANSWER:"):].strip()
-        return final
+    def _write_report_from_data(self, contract_summary: str, data_packet: str) -> str:
+        """Single focused LLM call: contract context + pre-collected data → full report."""
+        system_prompt = (
+            "You are a senior smart contract security auditor writing a complete audit report.\n"
+            "All audit data has been pre-collected and is provided below — do NOT call any tools.\n"
+            "Write the complete report in one response covering all 6 sections.\n\n"
+            + REPORT_STRUCTURE_SPEC
+        )
+        user_content = (
+            f"CONTRACT CONTEXT:\n{contract_summary}\n\n"
+            f"AUDIT DATA:\n{data_packet}\n\n"
+            "Write the complete 6-section audit report now. "
+            "Cover every vulnerability in Section 2. Include Solidity patch examples for critical/high issues."
+        )
+        # 16384: gemini-2.5-flash uses extended thinking which consumes output token budget.
+        # With 8192, thinking (~6k tokens) + report text (~2k) fills up leaving report truncated.
+        # 16384 gives enough headroom for both thinking and a complete 6-section report.
+        return self.llm.chat(
+            [
+                {"role": "system",  "content": system_prompt},
+                {"role": "user",    "content": user_content},
+            ],
+            temperature=0.3,
+            max_tokens=16384,
+        )
 
     def _parse_and_execute_action(
         self, text: str, tool_context: "_ContractToolContext"

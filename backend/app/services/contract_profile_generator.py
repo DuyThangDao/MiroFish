@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from ..utils.llm_client import LLMClient
 from ..utils.logger import get_logger
 from .swc_registry import SWCRegistry
+from .semantic_taxonomy import SEMANTIC_CATEGORY_FEW_SHOT, SEMANTIC_CATEGORY_PIPE_STRING
 
 logger = get_logger("mirofish.contract_profile")
 
@@ -35,40 +36,61 @@ CONTRACT_AGENT_MATRIX: Dict[str, Dict[str, Any]] = {
     "appsec": {
         "display_name": "Application Security",
         "personas": ["offensive", "defensive", "auditor"],
-        "swc_focus": ["SWC-107", "SWC-101", "SWC-113", "SWC-115", "SWC-104", "SWC-105"],
+        "swc_focus": ["SWC-107", "SWC-101", "SWC-113", "SWC-128", "SWC-115", "SWC-104", "SWC-105"],
         "persona_prompts": {
             "offensive": (
                 "You are an AppSec expert with an offensive mindset. "
                 "You analyze smart contracts from an attacker's perspective. "
                 "Focus on exploitable vulnerabilities: reentrancy attack paths, integer overflow to mint tokens, "
                 "unchecked return values that cause silent failures, unprotected ETH withdrawal. "
-                "IMPORTANT — also check for Denial of Service (SWC-113): "
-                "loops over unbounded dynamic arrays (e.g., refundAll iterating over all investors), "
-                "external calls inside loops where one revert blocks all others (pull-over-push violation), "
-                "reliance on .transfer()/.send() to arbitrary addresses inside a loop. "
-                "Ask yourself: 'How would I drain this contract, steal funds, or permanently lock it?'"
+                "IMPORTANT — check for TWO distinct Denial of Service patterns:\n"
+                "  (A) SWC-113 DoS with Failed Call: external call inside a loop — one recipient "
+                "reverts or refuses ETH → entire loop is permanently stuck. Classic example: "
+                "refundAll() pushing ETH to all investors in one transaction.\n"
+                "  (B) SWC-128 DoS with Block Gas Limit: an unbounded dynamic array or loop that "
+                "GROWS over time as users interact (e.g., push to activeItems[], pendingBlocks[], "
+                "registeredUsers[]). No single call fails, but eventually iterating the array "
+                "exceeds the block gas limit, making the function permanently uncallable. "
+                "Look for: arrays that grow in one function and are fully iterated in another. "
+                "RULE: use SWC-113 ONLY when a revert/failure in one called address blocks a loop. "
+                "Use SWC-128 when the array itself grows per-user-action and iteration will eventually hit gas limit. "
+                "Also check state cleanup: for every external call (e.g. IFulfillHelper.fulfill()), "
+                "if an ERC20 approve() was called before it, does a failure path revoke that approval? "
+                "If approval is NOT reset on failure, report as SEMANTIC_FINDING category=state_machine_bug."
             ),
             "defensive": (
                 "You are an AppSec expert with a defensive mindset. "
                 "Find missing protective controls in the contract: absent reentrancy guards, "
                 "missing input validation, unchecked call return values, unprotected state transitions. "
-                "IMPORTANT — also check for Denial of Service (SWC-113): "
-                "unbounded loops over storage arrays (gas exhaustion attack), "
-                "missing pull-over-push pattern where ETH is sent inside a loop, "
-                "functions that allow an attacker to grow an array indefinitely to make other functions uncallable. "
-                "Ask: 'What security controls are absent that would allow exploitation or permanent lockdown?'"
+                "IMPORTANT — check for TWO distinct Denial of Service patterns:\n"
+                "  (A) SWC-113 DoS with Failed Call: ETH pushed inside a loop — one revert blocks "
+                "all others. Fix: pull-over-push (claimable withdrawals instead of push payments).\n"
+                "  (B) SWC-128 DoS with Block Gas Limit: unbounded arrays that grow indefinitely. "
+                "Look for state variables that are arrays and functions that push to them without a "
+                "size cap. The danger: any function that iterates the full array will eventually "
+                "exceed gas limit as the array grows. Fix: pagination, max size cap, or lazy deletion. "
+                "RULE: use SWC-113 ONLY for failed-call-in-loop; use SWC-128 for unbounded array growth. "
+                "Also check state cleanup on failure: if a function calls approve() then an external "
+                "contract that can revert, and does not revoke the approval on failure, that is a "
+                "state_machine_bug (ERC20 approval not reset). Report as SEMANTIC_FINDING."
             ),
             "auditor": (
                 "You are a smart contract security auditor. "
                 "Evaluate code quality, ERC standard compliance, and best-practice adherence. "
                 "Check: function visibility declarations, access control completeness, "
                 "event emissions for critical operations, upgradability risks. "
-                "IMPORTANT — also audit for Denial of Service patterns (SWC-113): "
-                "verify all loops over dynamic arrays are bounded, "
-                "check that ETH distribution uses pull pattern (withdraw()) not push (transfer() in loop), "
-                "confirm no external call success is required to progress critical contract state. "
-                "Ask: 'Does this contract follow Consensys, Trail of Bits, or OpenZeppelin security patterns? "
-                "Can any single actor cause it to become permanently non-functional?'"
+                "IMPORTANT — audit for TWO distinct Denial of Service patterns:\n"
+                "  (A) SWC-113 DoS with Failed Call: verify ETH distribution uses pull pattern "
+                "(withdraw()) not push (transfer() in loop). One malicious/contract recipient blocks all.\n"
+                "  (B) SWC-128 DoS with Block Gas Limit: verify all loops over dynamic arrays are "
+                "bounded. Check: are there arrays (e.g., activeBlocks[], pendingTxs[]) that grow "
+                "unboundedly as users interact? Does any function iterate the FULL array? "
+                "If an array grows without bound and is iterated without a page limit, flag SWC-128. "
+                "RULE: SWC-113 = revert in one loop iteration blocks all others. "
+                "SWC-128 = array grows every tx; eventually iteration hits block gas limit. Never confuse these. "
+                "Also audit state cleanup: trace approve()/allowance grants before external calls. "
+                "If the external call can fail and the approval is never revoked on the failure path, "
+                "report as SEMANTIC_FINDING category=state_machine_bug (approval not reset on failure)."
             ),
         },
     },
@@ -396,7 +418,7 @@ CONTRACT_ATTACKER_PROFILES: Dict[str, Dict[str, Any]] = {
             "that rely on address(this).balance == tracked_balance?\n\n"
             "When you find a business-logic vulnerability with NO matching SWC ID, use SEMANTIC_FINDING:\n"
             "SEMANTIC_FINDING: <title>\n"
-            "CATEGORY: <state_machine_bug|incorrect_accounting|incentive_misalignment|other>\n"
+            f"CATEGORY: <{SEMANTIC_CATEGORY_PIPE_STRING}>\n"
             "SEVERITY: <critical|high|medium|low>\n"
             "FUNCTION: <affected_function()>\n"
             "EVIDENCE: <specific code pattern or economic invariant violated>\n"
@@ -572,7 +594,7 @@ class ContractExpertProfileGenerator:
         return profiles
 
     # Domains that should also report semantic/business-logic findings
-    _SEMANTIC_DOMAINS = {"defi", "smart_contract_economics", "governance"}
+    _SEMANTIC_DOMAINS = {"defi", "smart_contract_economics", "governance", "appsec"}
 
     def _build_tier1_system_prompt(
         self,
@@ -588,15 +610,17 @@ class ContractExpertProfileGenerator:
 
         semantic_block = ""
         if domain_key in self._SEMANTIC_DOMAINS:
-            semantic_block = """
-SEMANTIC_FINDING: <concise title — for business-logic / semantic bugs with no SWC ID>
-CATEGORY: <price_oracle|flash_loan|governance_attack|incorrect_accounting|state_machine_bug|incentive_misalignment|reentrancy_logic|other>
+            semantic_block = f"""
+Use SEMANTIC_FINDING for design/logic flaws with no matching SWC ID:
+SEMANTIC_FINDING: <title>
+CATEGORY: <{SEMANTIC_CATEGORY_PIPE_STRING}>
 SEVERITY: <critical|high|medium|low>
 FUNCTION: <affected_function()>
-EVIDENCE: <specific code pattern or economic invariant violated>
+EVIDENCE: <code pattern or invariant violated>
 ATTACK_PATH: <step-by-step scenario>
-
-Use SEMANTIC_FINDING (instead of FINDING) when the vulnerability is a design/logic flaw with no matching SWC ID.
+PATCH: <remediation>
+Category hints: access_control=missing/bypassable restriction on privileged op; state_machine_bug=incorrect state transition or cleanup (e.g. ERC20 approval not reset)
+{SEMANTIC_CATEGORY_FEW_SHOT}
 """
 
         return f"""You are a smart contract security expert specializing in {domain_cfg['display_name']}.
@@ -618,8 +642,8 @@ SWC: <SWC-ID or DEFI-PATTERN-ID>
 SEVERITY: <critical|high|medium|low>
 FUNCTION: <affected_function_name()>
 EVIDENCE: <specific code pattern, line range, or KG fact>
-DESCRIPTION: <detailed explanation of the vulnerability>
 PATCH: <concrete remediation recommendation>
+DESCRIPTION: <detailed explanation of the vulnerability>
 ANALYZED: <function or property you evaluated>
 GAP: <what you cannot verify from available information, or "None — fully assessed">
 {semantic_block}
@@ -681,11 +705,12 @@ You have read all expert findings. Now:
    For business-logic / semantic bugs with no SWC ID, use SEMANTIC_FINDING instead:
    [ATTACKER_ADD_PATH]
    SEMANTIC_FINDING: <new finding title>
-   CATEGORY: <price_oracle|flash_loan|governance_attack|incorrect_accounting|state_machine_bug|incentive_misalignment|reentrancy_logic|other>
+   CATEGORY: <{SEMANTIC_CATEGORY_PIPE_STRING}>
    SEVERITY: <critical|high|medium|low>
    FUNCTION: <affected function>
    EVIDENCE: <specific code pattern or economic invariant violated>
    ATTACK_PATH: <step-by-step scenario>
+   PATCH: <concrete remediation recommendation>
 
 4. ATTACKER_ESCALATE or ATTACKER_DOWNGRADE: Adjust severity if you disagree.
 

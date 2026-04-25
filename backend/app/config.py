@@ -33,6 +33,10 @@ class Config:
     LLM_MODEL_NAME = os.environ.get('LLM_MODEL_NAME', 'gpt-4o-mini')
     # Vertex AI: đường dẫn tới service account JSON (nếu set thì bỏ qua LLM_API_KEY)
     LLM_VERTEX_AI_KEY_FILE = os.environ.get('LLM_VERTEX_AI_KEY_FILE')
+    # Vertex AI account 2 — khi set sẽ kích hoạt 2-worker pool
+    LLM2_VERTEX_AI_KEY_FILE = os.environ.get('LLM2_VERTEX_AI_KEY_FILE')
+    LLM2_BASE_URL           = os.environ.get('LLM2_BASE_URL')
+    LLM2_GLOBAL_RPM_LIMIT   = int(os.environ.get('LLM2_GLOBAL_RPM_LIMIT', '18'))
 
     # Boost LLM — dùng cho Phase C attacker agents + invariant extraction
     # Mode A — Claude trên Vertex AI (cùng service account):
