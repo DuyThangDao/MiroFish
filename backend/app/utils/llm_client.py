@@ -246,6 +246,7 @@ class LLMClient:
         max_tokens: int = 4096,
         response_format: Optional[Dict] = None,
         strip_think: bool = True,
+        extra_body: Optional[Dict] = None,
     ) -> str:
         """发送聊天请求"""
         if self._is_anthropic_vertex:
@@ -259,6 +260,8 @@ class LLMClient:
         }
         if response_format:
             kwargs["response_format"] = response_format
+        if extra_body:
+            kwargs["extra_body"] = extra_body
 
         max_retries = 5
         base_delay  = 15
@@ -350,10 +353,12 @@ class LLMClientPool:
         max_tokens: int = 4096,
         response_format: Optional[Dict] = None,
         strip_think: bool = True,
+        extra_body: Optional[Dict] = None,
     ) -> str:
         return self._next().chat(
             messages, temperature=temperature, max_tokens=max_tokens,
             response_format=response_format, strip_think=strip_think,
+            extra_body=extra_body,
         )
 
     def chat_json(

@@ -556,6 +556,11 @@ class CyberSessionOrchestrator:
                         time.sleep(cooldown)
 
             session_state.current_phase = "done"
+
+            # P8: Attacker gate — finalize confidence với net vote ratio sau Phase C
+            if mode == "contract_audit":
+                self._apply_attacker_gate(session_state)
+
             self._save_session_state(session_state)
 
             # Serialize findings cho result
@@ -592,10 +597,10 @@ class CyberSessionOrchestrator:
         phase_c_review_list: str = "",
     ):
         """
-        Chạy 1 round: gọi LLM cho từng active agent → parse findings + GAP declarations.
+        Chạy 1 round: dispatcher cho two-stage (Phase A/B contract_audit) hoặc single-stage.
 
-        GAP declarations từ round này sẽ được route và inject vào round tiếp theo,
-        cho phép experts nhận diện điểm mù của nhau và lấp đầy coverage gaps.
+        Two-stage: Stage 1 (free-form analysis + CLAIMs) → Stage 2 (FINDINGs + CHALLENGE/VALIDATE).
+        Single-stage: Phase C attackers và network_security mode dùng luồng cũ.
         """
         if env_builder is None:
             env_builder = self.env_builder
@@ -605,6 +610,88 @@ class CyberSessionOrchestrator:
         pool_size = getattr(self.llm, "pool_size", 1)
         max_workers = max(int(os.environ.get("LLM_MAX_WORKERS", "1")), pool_size)
 
+        two_stage = (
+            os.environ.get("TWO_STAGE_ROUNDS", "true").lower() == "true"
+            and mode == "contract_audit"
+            and phase in ("A", "B")
+        )
+
+        if two_stage:
+            logger.info(f"[Round {round_num}] Two-stage mode: Phase={phase}, {len(active_profiles)} agents")
+
+            # Stage 1: free-form analysis + CLAIM declarations
+            stage1_posts = self._run_stage1(
+                round_num=round_num, phase=phase,
+                active_profiles=active_profiles,
+                session_state=session_state,
+                prior_context=prior_context,
+                network_summary=network_summary,
+                mode=mode, env_builder=env_builder,
+                known_functions=known_functions,
+                max_workers=max_workers,
+            )
+            stage1_claims = self._parse_stage1_claims(stage1_posts)
+            session_state.round_stage1_posts[round_num] = stage1_posts
+            logger.info(
+                f"[Round {round_num}] Stage 1 done: {len(stage1_posts)} posts, "
+                f"{len(stage1_claims)} CLAIMs extracted"
+            )
+
+            # Inter-stage cooldown — let Vertex AI TPM window recover after Stage 1 burst
+            inter_stage_cooldown = float(os.environ.get("LLM_INTER_STAGE_COOLDOWN_S", "30"))
+            if inter_stage_cooldown > 0:
+                logger.info(f"[Round {round_num}] Inter-stage cooldown {inter_stage_cooldown:.0f}s...")
+                time.sleep(inter_stage_cooldown)
+
+            # Stage 2: structured findings with shared feed + CHALLENGE/VALIDATE
+            feed_context = self._build_feed_context(round_num, stage1_posts, stage1_claims=stage1_claims)
+            stage2_prior = feed_context + "\n\n" + prior_context
+
+            logger.info(f"[Round {round_num}] Stage 2 starting: {len(active_profiles)} agents")
+            self._run_stage2(
+                round_num=round_num, phase=phase,
+                active_profiles=active_profiles,
+                session_state=session_state,
+                prior_context=stage2_prior,
+                network_summary=network_summary,
+                mode=mode, env_builder=env_builder,
+                known_functions=known_functions,
+                phase_c_review_list=phase_c_review_list,
+                stage1_claims=stage1_claims,
+                max_workers=max_workers,
+            )
+            return  # two-stage path complete
+
+        # ── Single-stage path (Phase C, network_security, or TWO_STAGE_ROUNDS=false) ──
+        self._run_single_stage(
+            round_num=round_num, phase=phase,
+            active_profiles=active_profiles,
+            session_state=session_state,
+            prior_context=prior_context,
+            network_summary=network_summary,
+            mode=mode, env_builder=env_builder,
+            known_functions=known_functions,
+            phase_c_review_list=phase_c_review_list,
+            max_workers=max_workers,
+        )
+
+    def _run_single_stage(
+        self,
+        round_num: int,
+        phase: str,
+        active_profiles: List,
+        session_state: CyberSessionState,
+        prior_context: str,
+        network_summary: str,
+        mode: str,
+        env_builder,
+        known_functions,
+        phase_c_review_list: str,
+        max_workers: int,
+    ):
+        """
+        Luồng single-stage gốc — dùng cho Phase C, network_security, và TWO_STAGE_ROUNDS=false.
+        """
         def _call_one(profile):
             """Single agent call — thread-safe (no shared mutable state written here)."""
             import time as _time
@@ -649,7 +736,6 @@ class CyberSessionOrchestrator:
             return profile, gap_context, response
 
         if max_workers > 1:
-            # Parallel LLM calls within the round; process findings sequentially after
             submit_delay = float(os.environ.get("LLM_SUBMIT_DELAY_S", "1.0"))
             results = []
             with ThreadPoolExecutor(max_workers=max_workers) as pool:
@@ -678,7 +764,6 @@ class CyberSessionOrchestrator:
         _think_re = re.compile(r'<think>[\s\S]*?</think>')
         for profile, gap_context, response in results:
             # RC1: attacker Phase C responses are raw (think blocks intact for tag rescue).
-            # Strip think blocks for feed storage to keep UI content clean.
             is_attacker_phase_c = (profile.tier == 2 and phase == "C")
             feed_content = _think_re.sub('', response).strip() if is_attacker_phase_c else response
             self._append_feed_post(session_state.session_id, {
@@ -704,7 +789,205 @@ class CyberSessionOrchestrator:
                 # Pass raw response (may contain think blocks) — parse_from_text uses last-tag logic
                 self._process_attacker_response(response, profile, round_num, session_state, mode=mode)
 
-        # After all agents in round complete: mark injected gaps as routed
+        if phase in ("A", "B"):
+            self._mark_gaps_as_routed(session_state)
+
+    def _run_stage1(
+        self,
+        round_num: int,
+        phase: str,
+        active_profiles: List,
+        session_state: CyberSessionState,
+        prior_context: str,
+        network_summary: str,
+        mode: str,
+        env_builder,
+        known_functions,
+        max_workers: int,
+    ) -> List[Dict[str, Any]]:
+        """
+        Stage 1: tất cả tier-1 agents viết free-form analysis song song.
+        max_tokens=STAGE1_MAX_TOKENS (default 400) — ngắn hơn, không parse FINDING.
+        Returns: list of stage1 post dicts (saved to feed.jsonl với stage=1).
+        """
+        def _call_stage1(profile):
+            import time as _time
+            gap_context = ""
+            if mode == "contract_audit":
+                cm = _get_contract_modules()
+                gap_context = cm["gap_context"](
+                    pending_gaps=session_state.pending_gaps(),
+                    agent_domain=profile.domain_group,
+                )
+            phase_instruction = env_builder.build_phase_instruction(
+                phase, round_num, gap_context=gap_context, stage=1,
+            )
+            _rate_limiter.acquire()
+            t0 = _time.time()
+            response = self._call_agent(
+                profile=profile, phase=phase, round_num=round_num,
+                phase_instruction=phase_instruction, prior_context=prior_context,
+                network_summary=network_summary, mode=mode, strip_think=True,
+                max_tokens=self._STAGE1_MAX_TOKENS,
+            )
+            logger.info(
+                f"[TIMING] Phase={phase} R{round_num} S1 agent={profile.agent_id} "
+                f"latency={_time.time()-t0:.1f}s"
+            )
+            return profile, response
+
+        submit_delay = float(os.environ.get("LLM_SUBMIT_DELAY_S", "1.0"))
+        results = []
+        if max_workers > 1:
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                futures = {}
+                for i, p in enumerate(active_profiles):
+                    if i > 0 and submit_delay > 0:
+                        import time as _t; _t.sleep(submit_delay)
+                    futures[pool.submit(_call_stage1, p)] = p
+                for future in as_completed(futures):
+                    try:
+                        results.append(future.result())
+                    except Exception as e:
+                        logger.warning(f"Stage1 {futures[future].agent_id} R{round_num}: {e}")
+        else:
+            for i, p in enumerate(active_profiles):
+                if i > 0 and submit_delay > 0:
+                    import time as _t; _t.sleep(submit_delay)
+                try:
+                    results.append(_call_stage1(p))
+                except Exception as e:
+                    logger.warning(f"Stage1 {p.agent_id} R{round_num}: {e}")
+
+        stage1_posts = []
+        for profile, response in results:
+            post = {
+                "round_num":    round_num,
+                "phase":        phase,
+                "stage":        1,
+                "agent_id":     profile.agent_id,
+                "agent_display": profile.display_name,
+                "domain_group": profile.domain_group,
+                "persona":      profile.persona,
+                "content":      response.strip(),
+                "timestamp":    datetime.now().isoformat(),
+            }
+            stage1_posts.append(post)
+            self._append_feed_post(session_state.session_id, post)
+        return stage1_posts
+
+    def _run_stage2(
+        self,
+        round_num: int,
+        phase: str,
+        active_profiles: List,
+        session_state: CyberSessionState,
+        prior_context: str,
+        network_summary: str,
+        mode: str,
+        env_builder,
+        known_functions,
+        phase_c_review_list: str,
+        stage1_claims: List[Dict[str, Any]],
+        max_workers: int,
+    ):
+        """
+        Stage 2: structured findings (FINDING/SEMANTIC_FINDING) + CHALLENGE/VALIDATE.
+        prior_context đã bao gồm feed_context từ Stage 1.
+        Sau parse findings, gọi _parse_challenge_validate() với stage1_claims.
+        """
+        # P4: Designated skeptic — 1 offensive tier-1 agent per round
+        import random as _random
+        offensive_agents = [p for p in active_profiles if p.persona == "offensive" and p.tier == 1]
+        skeptic_id = _random.choice(offensive_agents).agent_id if offensive_agents else None
+        _SKEPTIC_INSTRUCTION = (
+            "\n\n--- YOUR ROLE THIS ROUND: SKEPTIC ---"
+            "\nYour PRIMARY task is to challenge at least 2 CLAIMs or findings you believe are "
+            "incorrect or overstated. Write CHALLENGE_FINDING blocks FIRST, then any new FINDING "
+            "the group missed. Do not validate claims you are not certain about."
+        )
+
+        def _call_stage2(profile):
+            import time as _time
+            gap_context = ""
+            if mode == "contract_audit":
+                cm = _get_contract_modules()
+                gap_context = cm["gap_context"](
+                    pending_gaps=session_state.pending_gaps(),
+                    agent_domain=profile.domain_group,
+                )
+            phase_instruction = env_builder.build_phase_instruction(
+                phase, round_num, gap_context=gap_context, stage=2,
+            )
+            if profile.agent_id == skeptic_id:
+                phase_instruction += _SKEPTIC_INSTRUCTION
+            _rate_limiter.acquire()
+            t0 = _time.time()
+            response = self._call_agent(
+                profile=profile, phase=phase, round_num=round_num,
+                phase_instruction=phase_instruction, prior_context=prior_context,
+                network_summary=network_summary, mode=mode, strip_think=True, stage=2,
+            )
+            logger.info(
+                f"[TIMING] Phase={phase} R{round_num} S2 agent={profile.agent_id}"
+                + (" [SKEPTIC]" if profile.agent_id == skeptic_id else "")
+                + f" latency={_time.time()-t0:.1f}s"
+            )
+            return profile, gap_context, response
+
+        # Stage 2 có thể cần delay dài hơn Stage 1 nếu STAGE2_MAX_TOKENS lớn
+        submit_delay = float(os.environ.get("LLM_STAGE2_SUBMIT_DELAY_S",
+                                            os.environ.get("LLM_SUBMIT_DELAY_S", "1.0")))
+        results = []
+        if max_workers > 1:
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                futures = {}
+                for i, p in enumerate(active_profiles):
+                    if i > 0 and submit_delay > 0:
+                        import time as _t; _t.sleep(submit_delay)
+                    futures[pool.submit(_call_stage2, p)] = p
+                for future in as_completed(futures):
+                    try:
+                        results.append(future.result())
+                    except Exception as e:
+                        logger.warning(f"Stage2 {futures[future].agent_id} R{round_num}: {e}")
+        else:
+            for i, p in enumerate(active_profiles):
+                if i > 0 and submit_delay > 0:
+                    import time as _t; _t.sleep(submit_delay)
+                try:
+                    results.append(_call_stage2(p))
+                except Exception as e:
+                    logger.warning(f"Stage2 {p.agent_id} R{round_num}: {e}")
+
+        for profile, gap_context, response in results:
+            self._append_feed_post(session_state.session_id, {
+                "round_num":   round_num,
+                "phase":       phase,
+                "stage":       2,
+                "agent_id":    profile.agent_id,
+                "agent_display": profile.display_name,
+                "tier":        profile.tier,
+                "domain_group": profile.domain_group,
+                "persona":     profile.persona,
+                "content":     response,
+                "timestamp":   datetime.now().isoformat(),
+                "gap_context_injected": bool(gap_context),
+            })
+            if profile.tier == 1:
+                self._process_expert_response(
+                    response, profile, round_num, session_state,
+                    mode=mode, known_functions=known_functions,
+                )
+                if phase in ("A", "B"):
+                    self._process_gap_declarations(response, profile, round_num, session_state, mode=mode)
+                # CHALLENGE/VALIDATE parsing — updates confidence on claims and prior-round findings
+                self._parse_challenge_validate(
+                    text=response, profile=profile,
+                    round_num=round_num, session_state=session_state,
+                    stage1_claims=stage1_claims,
+                )
+
         if phase in ("A", "B"):
             self._mark_gaps_as_routed(session_state)
 
@@ -718,6 +1001,8 @@ class CyberSessionOrchestrator:
         network_summary: str,
         mode: str = "network_security",
         strip_think: bool = True,
+        max_tokens: Optional[int] = None,
+        stage: int = 0,
     ) -> str:
         """Gọi LLM cho 1 agent và trả về response text."""
         # Chọn LLM (boost cho attacker Phase C)
@@ -744,10 +1029,20 @@ class CyberSessionOrchestrator:
             }
         ]
 
-        # Phase C attacker agents use boost LLM (Pro) with extended thinking — needs more tokens
+        # Stage 2: token override via env var + optional thinking disable
         is_attacker_phase_c = (profile.tier == 2 and phase == "C")
-        max_tok = 4096 if is_attacker_phase_c else 1500
-        return llm.chat(messages, temperature=0.7, max_tokens=max_tok, strip_think=strip_think)
+        if stage == 2:
+            stage2_max = int(os.environ.get("STAGE2_MAX_TOKENS", "0"))
+            max_tok = stage2_max if stage2_max > 0 else (max_tokens if max_tokens is not None else 1500)
+        else:
+            max_tok = max_tokens if max_tokens is not None else (4096 if is_attacker_phase_c else 1500)
+
+        extra_body = None
+        if stage == 2 and os.environ.get("STAGE2_DISABLE_THINKING", "").lower() in ("1", "true", "yes"):
+            extra_body = {"thinking_config": {"thinking_budget": 0}}
+
+        return llm.chat(messages, temperature=0.7, max_tokens=max_tok, strip_think=strip_think,
+                        extra_body=extra_body)
 
     # ─── Parsers ──────────────────────────────────────────────────────────────
 
@@ -963,6 +1258,255 @@ class CyberSessionOrchestrator:
             if not gap.get("routed", False):
                 gap["routed"] = True
 
+    # ─── Two-Stage Round helpers ───────────────────────────────────────────────
+
+    _STAGE1_FEED_CHARS_PER_POST = int(os.environ.get("STAGE1_FEED_CHARS_PER_POST", "300"))
+    _STAGE1_MAX_TOKENS = int(os.environ.get("STAGE1_MAX_TOKENS", "400"))
+
+    def _build_feed_context(
+        self,
+        round_num: int,
+        stage1_posts: List[Dict[str, Any]],
+        stage1_claims: Optional[List[Dict[str, Any]]] = None,
+    ) -> str:
+        """
+        Build context từ Stage 1 posts của round hiện tại để inject vào Stage 2 prompt.
+
+        DRY: Khối CLAIM dựng từ cùng list stage1_claims đã parse bởi _parse_stage1_claims().
+        Không re-parse regex ở đây — một nguồn regex duy nhất.
+        Khi implement: truyền [] thay None khi parse trả về list rỗng → hành vi nhất quán.
+        """
+        if not stage1_posts:
+            return ""
+
+        cap = self._STAGE1_FEED_CHARS_PER_POST
+
+        # Khối 1: summary truncated — cho reasoning context
+        lines = [f"=== STAGE 1 ANALYSIS — Round {round_num} ({len(stage1_posts)} experts) ==="]
+        lines.append("(Summaries — truncated for token budget)\n")
+        for post in stage1_posts:
+            domain = post.get("domain_group", "?")
+            persona = post.get("persona", "?")
+            content = post.get("content", "").strip()
+            if len(content) > cap:
+                content = content[:cap] + "…"
+            lines.append(f"[{domain}/{persona}]: {content}")
+            lines.append("")
+
+        # Khối 2: CLAIM lines — FULL text từ stage1_claims đã parse (không truncate)
+        if stage1_claims:
+            lines.append(
+                f"=== STAGE 1 CLAIMS — Round {round_num} "
+                f"(full, use exact title to VALIDATE/CHALLENGE) ==="
+            )
+            for c in stage1_claims:
+                lines.append(
+                    f"  [{c.get('author_domain', '?')}/{c.get('author_id', '?')}] "
+                    f"CLAIM: {c['title']}"
+                )
+            lines.append("")
+
+        return "\n".join(lines)
+
+    def _parse_stage1_claims(
+        self,
+        stage1_posts: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """
+        Extract CLAIM: tags từ Stage 1 posts.
+        CLAIMs được dùng làm target cho CHALLENGE/VALIDATE trong Stage 2.
+        Không phải expert_findings — không qua consensus engine.
+        """
+        _claim_re = re.compile(r'(?i)^CLAIM\s*:\s*(.+)$', re.MULTILINE)
+        claims = []
+        for post in stage1_posts:
+            for m in _claim_re.finditer(post.get("content", "")):
+                claims.append({
+                    "title":        m.group(1).strip(),
+                    "author_id":    post.get("agent_id", "?"),
+                    "author_domain": post.get("domain_group", "?"),
+                    "round_num":    post.get("round_num", 0),
+                    "challenged_by": [],
+                    "validated_by":  [],
+                })
+        return claims
+
+    def _parse_challenge_validate(
+        self,
+        text: str,
+        profile,
+        round_num: int,
+        session_state: CyberSessionState,
+        stage1_claims: Optional[List[Dict[str, Any]]] = None,
+    ):
+        """
+        Parse CHALLENGE_FINDING và VALIDATE_FINDING từ Stage 2 response.
+
+        Target priority:
+          1. Stage 1 CLAIMs (same round — giải quyết ordering trap)
+          2. expert_findings từ round trước (đã commit)
+
+        P1: Sau khi CLAIM match, fuzzy-link sang expert_finding cùng round (Jaccard ≥ 0.15).
+        P6: Guard — bỏ qua VALIDATE nếu CLAIM là phủ định ("not vulnerable", v.v.).
+        """
+        _CHALLENGE_RE = re.compile(
+            r'(?i)^CHALLENGE_FINDING\s*:\s*(.+?)$\s*^REASON\s*:\s*(.+?)(?=^[A-Z_]+\s*:|$)',
+            re.MULTILINE | re.DOTALL,
+        )
+        _VALIDATE_RE = re.compile(
+            r'(?i)^VALIDATE_FINDING\s*:\s*(.+?)$\s*^DOMAIN_EVIDENCE\s*:\s*(.+?)(?=^[A-Z_]+\s*:|$)',
+            re.MULTILINE | re.DOTALL,
+        )
+
+        def _normalize(s: str) -> str:
+            """Lowercase + strip trailing punctuation — tolerate minor LLM title abbreviation."""
+            return re.sub(r'[.,!?;:]+$', '', s.lower().strip())
+
+        def _find_target(title_fragment: str):
+            frag = _normalize(title_fragment)
+            # Priority 1: Stage 1 CLAIMs (same round)
+            if stage1_claims:
+                for c in stage1_claims:
+                    if frag in _normalize(c["title"]):
+                        return ("claim", c)
+            # Priority 2: expert_findings từ round cũ (đã commit)
+            for f in session_state.expert_findings:
+                if f.get("round_number", 0) < round_num and frag in _normalize(f.get("title", "")):
+                    return ("finding", f)
+            return (None, None)
+
+        def _claim_is_negative(claim: dict) -> bool:
+            """P6: True nếu CLAIM phủ định vulnerability — không propagate VALIDATE."""
+            text_n = _normalize(claim.get("title", "") + " " + claim.get("content", ""))
+            _TITLE_NEG = ("not vulnerable", "no risk", "is safe", "is not exploitable",
+                          "cannot be exploited", "miscategorized", "false positive",
+                          "not a vulnerability", "no vulnerability")
+            if any(s in text_n for s in _TITLE_NEG):
+                return True
+            # Kiểm tra mệnh đề "because <reason>" bắt đầu bằng negation
+            idx = text_n.find(" because ")
+            if idx != -1:
+                reason = text_n[idx + 9:].strip()
+                _REASON_NEG = ("it does not", "there is no ", "the guard", "already protected",
+                               "not possible", "no way to", "impossible", "is prevented")
+                if any(reason.startswith(s) for s in _REASON_NEG):
+                    return True
+            return False
+
+        def _fuzzy_link_claim_to_finding(claim: dict):
+            """P1: Tìm expert_finding cùng round có title overlap cao nhất với CLAIM."""
+            claim_tokens = set(_normalize(claim.get("title", "")).split())
+            if not claim_tokens:
+                return None
+            min_overlap = 3 if len(claim_tokens) < 8 else 2
+            best_match, best_score = None, 0
+            for f in session_state.expert_findings:
+                if f.get("round_number") != round_num:
+                    continue
+                finding_tokens = set(_normalize(f.get("title", "")).split())
+                overlap = len(claim_tokens & finding_tokens)
+                if overlap > best_score:
+                    best_score, best_match = overlap, f
+            if best_match and best_score >= min_overlap:
+                union = claim_tokens | set(_normalize(best_match.get("title", "")).split())
+                jaccard = best_score / len(union) if union else 0
+                if jaccard >= 0.15:
+                    logger.debug(
+                        f"P1 link CLAIM→finding '{best_match.get('title','')[:50]}' "
+                        f"(overlap={best_score}, jaccard={jaccard:.2f})"
+                    )
+                    return best_match
+            return None
+
+        for m in _CHALLENGE_RE.finditer(text):
+            title_fragment = m.group(1).strip()
+            reason = m.group(2).strip()[:300]
+            kind, target = _find_target(title_fragment)
+            if target is None:
+                continue
+            entry = {
+                "challenger": profile.agent_id,
+                "domain":     profile.domain_group,
+                "reason":     reason,
+                "round":      round_num,
+            }
+            target.setdefault("challenged_by", []).append(entry)
+            # Confidence penalty chỉ áp lên expert_findings (claims không có confidence)
+            if kind == "finding" and profile.domain_group != target.get("author_domain"):
+                target["confidence"] = max(0.1, target.get("confidence", 0.5) - 0.10)
+            logger.debug(
+                f"CHALLENGE [{profile.agent_id}] → {kind} '{title_fragment[:60]}'"
+            )
+
+        for m in _VALIDATE_RE.finditer(text):
+            title_fragment = m.group(1).strip()
+            evidence = m.group(2).strip()[:300]
+            kind, target = _find_target(title_fragment)
+            if target is None:
+                continue
+
+            # P6: skip nếu CLAIM là phủ định
+            if kind == "claim" and _claim_is_negative(target):
+                logger.debug(
+                    f"VALIDATE [{profile.agent_id}] skipped — negative CLAIM '{title_fragment[:60]}'"
+                )
+                continue
+
+            # P1: fuzzy-link CLAIM → expert_finding cùng round
+            if kind == "claim":
+                linked = _fuzzy_link_claim_to_finding(target)
+                if linked is not None:
+                    kind, target = "finding", linked
+
+            entry = {
+                "validator": profile.agent_id,
+                "domain":    profile.domain_group,
+                "evidence":  evidence,
+                "round":     round_num,
+            }
+            target.setdefault("validated_by", []).append(entry)
+            if kind == "finding" and profile.domain_group != target.get("author_domain"):
+                target["cross_domain_validated"] = True
+                target["confidence"] = min(0.95, target.get("confidence", 0.5) + 0.08)
+            logger.debug(
+                f"VALIDATE [{profile.agent_id}] → {kind} '{title_fragment[:60]}'"
+            )
+
+    def _apply_attacker_gate(self, session_state: CyberSessionState, n_attackers: int = 5):
+        """
+        P8: Post-Phase-C attacker gate — áp dụng 1 lần sau khi Phase C kết thúc.
+
+        Dùng last_vote per attacker (dedup) để tính net ratio thay vì cộng dồn
+        từng flat delta. Tránh bias khi cùng profile vote nhiều lần.
+
+        net_ratio = (confirms - dismisses) / n_attackers ∈ [-1, 1]
+          ≤ -0.4  → majority DISMISS → confidence × 0.70
+          ≥  0.6  → strong CONFIRM  → confidence × 1.15
+        """
+        for finding in session_state.expert_findings:
+            corrs = finding.get("attacker_corroborations", [])
+            if not corrs:
+                continue
+            # Lấy vote cuối cùng của mỗi attacker profile
+            last_vote: Dict[str, str] = {}
+            for c in corrs:
+                last_vote[c["profile_id"]] = c["action"]
+            confirms  = sum(1 for a in last_vote.values() if "CONFIRM" in a)
+            dismisses = sum(1 for a in last_vote.values() if "DISMISS" in a)
+            net_ratio = (confirms - dismisses) / n_attackers
+            if net_ratio <= -0.4:
+                finding["confidence"] = max(0.10, finding["confidence"] * 0.70)
+                logger.debug(
+                    f"AttackerGate PENALIZE '{finding.get('title','')[:50]}' "
+                    f"net={net_ratio:.2f} ({confirms}C/{dismisses}D)"
+                )
+            elif net_ratio >= 0.6:
+                finding["confidence"] = min(0.95, finding["confidence"] * 1.15)
+                logger.debug(
+                    f"AttackerGate BOOST '{finding.get('title','')[:50]}' "
+                    f"net={net_ratio:.2f} ({confirms}C/{dismisses}D)"
+                )
+
     def _attach_corroboration(
         self,
         action: Dict[str, Any],
@@ -1107,6 +1651,17 @@ class CyberSessionOrchestrator:
                         f"confidence: {f.get('confidence', 0.5):.2f}"
                         + (f", {corr_count} attacker reactions" if corr_count else "") + ")"
                     )
+
+            # P5: Top-3 high-confidence findings with evidence — help agents build on prior reasoning
+            top3 = sorted(windowed, key=lambda f: f.get("confidence", 0), reverse=True)[:3]
+            if top3:
+                lines.append(f"\n=== TOP-3 HIGH-CONFIDENCE FINDINGS (with evidence) ===")
+                for f in top3:
+                    lines.append(f"[{f.get('severity','?').upper()}] {f.get('title','?')}")
+                    ev_list = f.get("evidence") or []
+                    ev = ev_list[0] if ev_list else (f.get("evidence") if isinstance(f.get("evidence"), str) else "")
+                    if ev:
+                        lines.append(f"  Evidence: {str(ev)[:400]}")
 
         if session_state.attacker_findings:
             windowed_atk = [f for f in session_state.attacker_findings if f.get("round_number", 0) >= min_round]

@@ -702,10 +702,19 @@ class ConsensusEngine:
                 all_patches.append(p)
         all_patches = list(dict.fromkeys(all_patches))
 
+        # P3/P7: category "other" không mapped với ground truth label nào —
+        # giữ trong report cho auditor người nhưng exclude khỏi F1 evaluation pool
+        _EVAL_CATEGORIES = {
+            "access_control", "price_oracle", "flash_loan", "governance_attack",
+            "incorrect_accounting", "state_machine_bug", "business_flow", "reentrancy_logic",
+        }
+        exclude_from_eval = category not in _EVAL_CATEGORIES
         return {
             "semantic_vuln_id":    f"sv_{uuid.uuid4().hex[:8]}",
             "title":               rep.get("title", "Unnamed Semantic Finding"),
             "category":            category,
+            "display_label":       "[UNCLASSIFIED]" if exclude_from_eval else None,
+            "exclude_from_eval":   exclude_from_eval,
             "severity":            severity,
             "affected_functions":  all_funcs,
             "evidence":            rep.get("evidence", ""),

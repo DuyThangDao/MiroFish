@@ -74,6 +74,41 @@ PHASE_CONFIG = {
         "rounds": [1, 2, 3],
         "description": "Domain experts analyze the contract within their specialization",
         "attacker_active": False,
+        # Two-stage: Stage 1 — free-form analysis + optional CLAIM declarations
+        "stage1_instruction": (
+            "STAGE 1 — CLAIM DECLARATIONS\n"
+            "Write ONLY 3-5 CLAIM lines from YOUR DOMAIN perspective. No prose, no headers.\n\n"
+            "Format (one per line, start immediately):\n"
+            "  CLAIM: <function_name()> may be vulnerable because <specific one-line reason>\n\n"
+            "Examples:\n"
+            "  CLAIM: fulfill() may be vulnerable because state update happens after external call\n"
+            "  CLAIM: cancel() may be vulnerable because reentrancy guard missing on ETH transfer path\n"
+            "  CLAIM: getPriceFromAMM() may be vulnerable because spot price manipulable via flash loan\n\n"
+            "Start your response with CLAIM lines directly. No introduction text.\n"
+            "CLAIMs will be shared with ALL experts in Stage 2 for validation or challenge.\n"
+            + GAP_FORMAT_INSTRUCTION
+        ),
+        # Two-stage: Stage 2 — structured findings with full feed context
+        "stage2_instruction": (
+            "STAGE 2 — FINDINGS & DISCUSSION\n"
+            "You have read all domain experts' Stage 1 analyses and CLAIM declarations above.\n\n"
+            "Now write your structured output:\n"
+            "  - FINDING / SEMANTIC_FINDING: new vulnerabilities from YOUR domain\n"
+            "  - VALIDATE_FINDING: confirm a Stage 1 CLAIM or prior-round finding\n"
+            "      VALIDATE_FINDING: <exact CLAIM or finding title>\n"
+            "      DOMAIN_EVIDENCE: <your evidence from your domain angle>\n"
+            "      FUNCTION: <function name>\n"
+            "      ADDITIONAL_IMPACT: <extra impact>\n"
+            "  - CHALLENGE_FINDING: dispute a Stage 1 CLAIM or prior-round finding\n"
+            "      CHALLENGE_FINDING: <exact CLAIM or finding title>\n"
+            "      REASON: <specific counter-evidence from code>\n"
+            "      FUNCTION: <function name>\n"
+            "      EVIDENCE: <code quote>\n\n"
+            "Note: CHALLENGE/VALIDATE target Stage 1 CLAIMs and previous-round findings.\n"
+            "New findings from THIS round's other experts will be challengeable next round.\n"
+            + GAP_FORMAT_INSTRUCTION
+        ),
+        # Backward compat: single-stage (stage=0) path
         "instruction_addition": (
             "In this phase, analyze the contract from YOUR DOMAIN EXPERTISE perspective. "
             "Propose findings with specific SWC IDs, function names, and code evidence. "
@@ -86,6 +121,40 @@ PHASE_CONFIG = {
         "rounds": [4, 5, 6, 7],
         "description": "Domain experts challenge and validate findings across specializations",
         "attacker_active": False,
+        # Two-stage: Stage 1 — cross-domain free-form analysis
+        "stage1_instruction": (
+            "STAGE 1 — CLAIM DECLARATIONS (cross-domain)\n"
+            "Write ONLY 3-5 CLAIM lines from YOUR DOMAIN perspective. No prose, no headers.\n"
+            "Include prior-round findings you want to challenge or validate.\n\n"
+            "Format (one per line, start immediately):\n"
+            "  CLAIM: <function_name()> may be vulnerable because <specific one-line reason>\n\n"
+            "Examples:\n"
+            "  CLAIM: fulfill() may be vulnerable because cross-domain reentrancy via router callback\n"
+            "  CLAIM: addLiquidity() may be vulnerable because missing slippage check interacts with price oracle\n\n"
+            "Start your response with CLAIM lines directly. No introduction text.\n"
+            + GAP_FORMAT_INSTRUCTION
+        ),
+        # Two-stage: Stage 2 — cross-domain challenge + validate
+        "stage2_instruction": (
+            "STAGE 2 — CROSS-DOMAIN FINDINGS & CHALLENGE\n"
+            "You have read all domain experts' Stage 1 analyses and CLAIM declarations above.\n\n"
+            "Priority actions:\n"
+            "1. CHALLENGE a Stage 1 CLAIM or prior-round finding you disagree with:\n"
+            "   CHALLENGE_FINDING: <exact CLAIM title or prior finding title>\n"
+            "   REASON: <specific counter-evidence from code>\n"
+            "   FUNCTION: <function name>\n"
+            "   EVIDENCE: <code quote>\n\n"
+            "2. VALIDATE a Stage 1 CLAIM or prior-round finding from YOUR domain's angle:\n"
+            "   VALIDATE_FINDING: <exact CLAIM title or prior finding title>\n"
+            "   DOMAIN_EVIDENCE: <your evidence>\n"
+            "   FUNCTION: <function>\n"
+            "   ADDITIONAL_IMPACT: <extra impact>\n\n"
+            "3. Add NEW findings missed by all domains.\n"
+            "4. Reclassify business-logic bugs (no SWC → use SEMANTIC_FINDING).\n\n"
+            "Note: CLAIM titles come from the Stage 1 feed above — use exact wording to match.\n"
+            + GAP_FORMAT_INSTRUCTION
+        ),
+        # Backward compat: single-stage (stage=0) path
         "instruction_addition": (
             "In this phase, READ findings from OTHER domain groups and challenge them. "
             "Ask: Is this finding accurate? Is the severity correct? "
@@ -1069,12 +1138,26 @@ class ContractAuditEnvBuilder:
         round_num: int,
         gap_context: str = "",
         phase_c_review_list: str = "",
+        stage: int = 0,
     ) -> str:
-        """Build system instruction injected at the start of each round."""
+        """
+        Build system instruction injected at the start of each round.
+
+        stage=0: single-stage mode (backward compat — uses instruction_addition)
+        stage=1: two-stage Stage 1 — free-form analysis + CLAIM declarations
+        stage=2: two-stage Stage 2 — FINDING/SEMANTIC_FINDING + CHALLENGE/VALIDATE
+        """
         phase_cfg = PHASE_CONFIG.get(phase, {})
+        if stage == 1:
+            instruction_text = phase_cfg.get("stage1_instruction", phase_cfg.get("instruction_addition", ""))
+        elif stage == 2:
+            instruction_text = phase_cfg.get("stage2_instruction", phase_cfg.get("instruction_addition", ""))
+        else:
+            instruction_text = phase_cfg.get("instruction_addition", "")
+
         instruction = (
             f"=== Phase {phase}: {phase_cfg.get('name', '')} | Round {round_num}/{TOTAL_ROUNDS} ===\n"
-            f"{phase_cfg.get('instruction_addition', '')}"
+            f"{instruction_text}"
         )
         # RC-3 Two-step Phase C: inject preliminary consensus findings for attackers to review
         if phase == "C" and phase_c_review_list:

@@ -208,6 +208,7 @@ class CyberSessionState:
     semantic_findings: List[Dict[str, Any]] = field(default_factory=list)  # SemanticFinding serialized
     consensus_vulns:   List[Dict[str, Any]] = field(default_factory=list)   # ConsensusVulnerability serialized
     gap_registry:      List[Dict[str, Any]] = field(default_factory=list)   # GapDeclaration serialized
+    round_stage1_posts: Dict[int, List[Dict[str, Any]]] = field(default_factory=dict)  # Two-stage: Stage 1 posts per round
 
     agent_config:     Dict[str, Any] = field(default_factory=dict)   # từ CyberExpertProfileGenerator
     error:            Optional[str] = None
