@@ -91,11 +91,11 @@ SEMANTIC_ANCHOR_KEYWORDS: Dict[str, List[str]] = {
 WEIGHT_INTRA  = 0.40   # L1 — intra-group agreement
 WEIGHT_CROSS  = 0.60   # L2 — cross-domain validation
 
-# Stage 2: attacker verification gate (multiplicative)
+# Stage 2: attacker verification gate (multiplicative applied to expert_confidence)
 # NEUTRAL = 1.0: unreviewed findings keep full expert_confidence
-#   (no neutral penalty — avoids over-filtering when Phase C has low attacker activity)
-# DISMISS = 0.40: actively-dismissed findings almost always fall below MIN_CONFIDENCE
-#   (0.40 * max_exp_conf=1.0 = 0.40 < 0.50 threshold)
+#   (no penalty — avoids over-filtering when Phase C has low attacker activity)
+# DISMISS = 0.40: dismissed findings need extra peer challenge to drop below MIN_CONFIDENCE(0.35)
+#   (0.40 * max_exp_conf=1.0 = 0.40 > 0.35; peer challenges can push it below threshold)
 ATTACKER_GATE_CONFIRM  = 1.00   # confirmed by attacker  → no change
 ATTACKER_GATE_NEUTRAL  = 1.00   # not reviewed           → no penalty
 ATTACKER_GATE_DISMISS  = 0.40   # dismissed by attacker  → heavy penalty
@@ -122,9 +122,10 @@ class ConsensusEngine:
     2. Tính Layer 1 (intra-group): % agents trong cùng group đồng ý
     3. Tính Layer 2 (cross-group): số group khác nhau đã nêu finding tương tự
     4. Tính Layer 3 (attacker): net corroboration score từ attacker profiles
-    5. Final = weighted sum
-    6. Filter < MIN_CONFIDENCE
-    7. Merge attacker-only findings với base confidence 0.60
+    5. Tính Layer 4 (peer): CHALLENGE/VALIDATE delta từ Stage 2 cross-domain review
+    6. confidence = (L1*0.40 + L2*0.60) * attacker_gate + peer_delta;  clamped [0, 1]
+    7. Filter < MIN_CONFIDENCE (0.35)
+    8. Merge attacker-only findings với base confidence 0.60
     """
 
     def run(
@@ -442,7 +443,7 @@ class ConsensusEngine:
                             if c.get("action") in {"ATTACKER_DISMISS", "ATTACKER_DOWNGRADE"})
 
         if not all_corr:
-            gate = ATTACKER_GATE_NEUTRAL   # no Phase C review → 25% penalty
+            gate = ATTACKER_GATE_NEUTRAL   # no Phase C review → no penalty (NEUTRAL=1.0)
         elif net_confirms > net_dismisses:
             gate = ATTACKER_GATE_CONFIRM   # attackers verified exploitability
         elif net_dismisses > net_confirms:
@@ -450,7 +451,15 @@ class ConsensusEngine:
         else:
             gate = ATTACKER_GATE_NEUTRAL   # tied → treat as unreviewed
 
-        confidence = expert_confidence * gate
+        # ── Layer 4: Peer cross-domain signal (Stage 2 CHALLENGE/VALIDATE) ────
+        # peer_delta applied AFTER gate so it is independent of attacker activity.
+        # Caps: max boost = 5*0.03 = +0.15; max penalty = 5*0.05 = -0.25.
+        # Confidence clamped to [0, 1] to prevent negative scores.
+        challenge_count = sum(len(f.get("challenged_by", [])) for f in cluster)
+        validate_count  = sum(len(f.get("validated_by",   [])) for f in cluster)
+        peer_delta = min(validate_count, 5) * 0.03 - min(challenge_count, 5) * 0.05
+
+        confidence = max(0.0, min(1.0, expert_confidence * gate + peer_delta))
 
         # ── Severity consensus ────────────────────────────────────────────────
         severity = self._consensus_severity(cluster, all_corr)
@@ -671,7 +680,13 @@ class ConsensusEngine:
         gate = ATTACKER_GATE_CONFIRM if attacker_surfaced else ATTACKER_GATE_NEUTRAL
 
         expert_confidence = intra_score * WEIGHT_INTRA + cross_score * WEIGHT_CROSS
-        confidence = expert_confidence * gate
+
+        # Layer 4 peer signal — same formula as expert cluster scoring
+        challenge_count = sum(len(f.get("challenged_by", [])) for f in cluster)
+        validate_count  = sum(len(f.get("validated_by",   [])) for f in cluster)
+        peer_delta = min(validate_count, 5) * 0.03 - min(challenge_count, 5) * 0.05
+
+        confidence = max(0.0, min(1.0, expert_confidence * gate + peer_delta))
 
         # Semantic findings use a lower threshold (0.25) since they have no SWC
         # cross-validation baseline — 2 domains + attacker corroboration is sufficient
@@ -845,6 +860,11 @@ class ConsensusEngine:
             ]
             if not candidates:
                 continue
+            # Require mentions from at least 2 distinct author domains.
+            # Same-domain repeated mentions don't count as independent corroboration.
+            distinct_domains = {self._get_author_group(f) for f in candidates}
+            if len(distinct_domains) < 2:
+                continue
 
             best = max(candidates, key=lambda f: f.get("confidence", 0.0))
             unvalidated.append({
@@ -856,7 +876,8 @@ class ConsensusEngine:
                 "affected_functions": best.get("affected_functions", []),
                 "author_domain":     self._get_author_group(best),
                 "source_count":      len(candidates),
-                "note":              "Single-domain finding — not cross-validated by consensus",
+                "domain_count":      len(distinct_domains),
+                "note":              f"Multi-domain gap — flagged by {len(distinct_domains)} distinct domains",
             })
 
         return unvalidated

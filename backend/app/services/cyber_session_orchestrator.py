@@ -1362,17 +1362,33 @@ class CyberSessionOrchestrator:
             """Lowercase + strip trailing punctuation — tolerate minor LLM title abbreviation."""
             return re.sub(r'[.,!?;:]+$', '', s.lower().strip())
 
+        def _jaccard(a: str, b: str) -> float:
+            """Token-level Jaccard similarity between two normalized title strings."""
+            ta, tb = set(a.split()), set(b.split())
+            if not ta or not tb:
+                return 0.0
+            return len(ta & tb) / len(ta | tb)
+
         def _find_target(title_fragment: str):
             frag = _normalize(title_fragment)
-            # Priority 1: Stage 1 CLAIMs (same round)
+            # Priority 1: Stage 1 CLAIMs (same round) — Jaccard ≥ 0.30
             if stage1_claims:
+                best_c, best_j = None, 0.0
                 for c in stage1_claims:
-                    if frag in _normalize(c["title"]):
-                        return ("claim", c)
-            # Priority 2: expert_findings từ round cũ (đã commit)
+                    j = _jaccard(frag, _normalize(c["title"]))
+                    if j > best_j:
+                        best_j, best_c = j, c
+                if best_j >= 0.30:
+                    return ("claim", best_c)
+            # Priority 2: expert_findings từ round cũ (đã commit) — Jaccard ≥ 0.30
+            best_f, best_j = None, 0.0
             for f in session_state.expert_findings:
-                if f.get("round_number", 0) < round_num and frag in _normalize(f.get("title", "")):
-                    return ("finding", f)
+                if f.get("round_number", 0) < round_num:
+                    j = _jaccard(frag, _normalize(f.get("title", "")))
+                    if j > best_j:
+                        best_j, best_f = j, f
+            if best_j >= 0.30:
+                return ("finding", best_f)
             return (None, None)
 
         def _claim_is_negative(claim: dict) -> bool:

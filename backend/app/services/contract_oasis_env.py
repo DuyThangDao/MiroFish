@@ -84,6 +84,12 @@ PHASE_CONFIG = {
             "  CLAIM: fulfill() may be vulnerable because state update happens after external call\n"
             "  CLAIM: cancel() may be vulnerable because reentrancy guard missing on ETH transfer path\n"
             "  CLAIM: getPriceFromAMM() may be vulnerable because spot price manipulable via flash loan\n\n"
+            "⚠️ REQUIRED COVERAGE — explicitly check for these patterns before writing CLAIMs:\n"
+            "  - Unbounded arrays/loops (SWC-128): any array that grows without a cap, or loops over\n"
+            "    user-controlled data that could exhaust block gas (DoS with Block Gas Limit)\n"
+            "  - Unprotected state-modifying functions any caller can invoke to grief other users\n"
+            "  - Integer overflow/underflow in arithmetic not guarded by SafeMath or Solidity ≥0.8\n"
+            "Include a CLAIM about DoS patterns even if you find no clear issue — write 'no issue found' if clean.\n\n"
             "Start your response with CLAIM lines directly. No introduction text.\n"
             "CLAIMs will be shared with ALL experts in Stage 2 for validation or challenge.\n"
             + GAP_FORMAT_INSTRUCTION
@@ -92,18 +98,19 @@ PHASE_CONFIG = {
         "stage2_instruction": (
             "STAGE 2 — FINDINGS & DISCUSSION\n"
             "You have read all domain experts' Stage 1 analyses and CLAIM declarations above.\n\n"
-            "Now write your structured output:\n"
-            "  - FINDING / SEMANTIC_FINDING: new vulnerabilities from YOUR domain\n"
-            "  - VALIDATE_FINDING: confirm a Stage 1 CLAIM or prior-round finding\n"
-            "      VALIDATE_FINDING: <exact CLAIM or finding title>\n"
-            "      DOMAIN_EVIDENCE: <your evidence from your domain angle>\n"
-            "      FUNCTION: <function name>\n"
-            "      ADDITIONAL_IMPACT: <extra impact>\n"
-            "  - CHALLENGE_FINDING: dispute a Stage 1 CLAIM or prior-round finding\n"
-            "      CHALLENGE_FINDING: <exact CLAIM or finding title>\n"
-            "      REASON: <specific counter-evidence from code>\n"
-            "      FUNCTION: <function name>\n"
-            "      EVIDENCE: <code quote>\n\n"
+            "MANDATORY (write at least one before adding new findings):\n"
+            "  1. CHALLENGE a CLAIM or prior-round finding you disagree with:\n"
+            "       CHALLENGE_FINDING: <exact CLAIM or finding title>\n"
+            "       REASON: <specific counter-evidence from code>\n"
+            "       FUNCTION: <function name>\n"
+            "       EVIDENCE: <code quote>\n\n"
+            "  2. VALIDATE a CLAIM or prior-round finding from YOUR domain's angle:\n"
+            "       VALIDATE_FINDING: <exact CLAIM or finding title>\n"
+            "       DOMAIN_EVIDENCE: <your evidence>\n"
+            "       FUNCTION: <function name>\n"
+            "       ADDITIONAL_IMPACT: <extra impact>\n\n"
+            "OPTIONAL (only after addressing the above):\n"
+            "  3. FINDING / SEMANTIC_FINDING: new vulnerabilities from YOUR domain\n\n"
             "Note: CHALLENGE/VALIDATE target Stage 1 CLAIMs and previous-round findings.\n"
             "New findings from THIS round's other experts will be challengeable next round.\n"
             + GAP_FORMAT_INSTRUCTION
@@ -138,7 +145,7 @@ PHASE_CONFIG = {
         "stage2_instruction": (
             "STAGE 2 — CROSS-DOMAIN FINDINGS & CHALLENGE\n"
             "You have read all domain experts' Stage 1 analyses and CLAIM declarations above.\n\n"
-            "Priority actions:\n"
+            "MANDATORY (write at least one before adding new findings):\n"
             "1. CHALLENGE a Stage 1 CLAIM or prior-round finding you disagree with:\n"
             "   CHALLENGE_FINDING: <exact CLAIM title or prior finding title>\n"
             "   REASON: <specific counter-evidence from code>\n"
@@ -149,6 +156,7 @@ PHASE_CONFIG = {
             "   DOMAIN_EVIDENCE: <your evidence>\n"
             "   FUNCTION: <function>\n"
             "   ADDITIONAL_IMPACT: <extra impact>\n\n"
+            "OPTIONAL (only after addressing the above):\n"
             "3. Add NEW findings missed by all domains.\n"
             "4. Reclassify business-logic bugs (no SWC → use SEMANTIC_FINDING).\n\n"
             "Note: CLAIM titles come from the Stage 1 feed above — use exact wording to match.\n"
@@ -617,6 +625,14 @@ _SWC_REMAP: Dict[str, str] = {
 # Accepted formats: SWC-N through SWC-NNN, DEFI-UPPERCASE_NAME
 _VALID_SWC_RE = re.compile(r'^(SWC-\d{1,3}|DEFI-[A-Z][A-Z_]{2,})$')
 
+# Protocol keyword boundary: any ALLCAPS_WORD: pattern signals a new protocol field.
+# Used to stop multi-line field accumulation when Stage 2 keywords (VALIDATE_FINDING,
+# CHALLENGE_FINDING, DOMAIN_EVIDENCE, etc.) appear in the same response stream.
+# Note: this also matches prose tokens like NOTE:, TODO:, WARNING: — if such words
+# appear legitimately inside description text they will truncate it early.  Monitor
+# for false-positive truncation; add a whitelist prefix set here if needed.
+_PROTOCOL_KW_RE = re.compile(r'^[A-Z][A-Z_]{2,}\s*:')
+
 
 # ─── Function Field Parser ────────────────────────────────────────────────────
 
@@ -819,14 +835,8 @@ def parse_contract_finding_from_text(
         elif lower.startswith("patch:"):
             current_field = "patch"
             current_value = [stripped.split(":", 1)[1].strip()]
-        elif current_field and line.startswith("  ") or (
-            current_field and stripped and not re.match(
-                r'(?i)^(ANALYZED|GAP|FINDING|SWC|SEVERITY|FUNCTION|EVIDENCE|DESCRIPTION|PATCH)\s*:',
-                stripped
-            )
-        ):
-            if stripped:
-                current_value.append(stripped)
+        elif current_field and stripped and not _PROTOCOL_KW_RE.match(stripped):
+            current_value.append(stripped)
 
     _flush_field()
 
@@ -1004,11 +1014,8 @@ def parse_semantic_finding_from_text(
         elif lower.startswith("patch:"):
             current_field = "patch"
             current_value = [stripped.split(":", 1)[1].strip()]
-        elif current_field and (line.startswith("  ") or (
-            stripped and not _FIELD_RE.match(stripped)
-        )):
-            if stripped:
-                current_value.append(stripped)
+        elif current_field and stripped and not _PROTOCOL_KW_RE.match(stripped):
+            current_value.append(stripped)
 
     _flush()
 
