@@ -31,6 +31,7 @@ import re
 import time
 from dataclasses import asdict
 from datetime import datetime
+from pathlib import Path
 from typing import Optional, List, Set
 
 # ─── Path setup ───────────────────────────────────────────────────────────────
@@ -246,6 +247,9 @@ def run_audit(
     verbose: bool = False,
     timeout_session: int = 1800,
     ground_truth: Optional[List[str]] = None,
+    sol_path: Optional[str] = None,
+    manifest: Optional[dict] = None,
+    readme_text: Optional[str] = None,
 ):
     """
     Full pipeline:
@@ -273,14 +277,18 @@ def run_audit(
     from app.services.cyber_session_orchestrator import CyberSessionOrchestrator
     from app.services.contract_audit_agent import ContractAuditReportAgent
     from app.services.contract_invariant_extractor import ContractInvariantExtractor
+    from app.services.contract_intent_extractor import ContractIntentExtractor
+    from app.services.contract_dep_graph import ContractDepGraph
 
     task_manager        = TaskManager()
     kg_builder          = ContractKGBuilder()
     prof_gen            = ContractExpertProfileGenerator()
     orchestrator        = CyberSessionOrchestrator()
     report_agent        = ContractAuditReportAgent()
-    # Use boost LLM for invariant extraction (better reasoning than primary Flash model)
+    # Use boost LLM for heavier pre-processing steps
     invariant_extractor = ContractInvariantExtractor(llm_client=orchestrator.boost_llm)
+    intent_extractor    = ContractIntentExtractor(llm_client=orchestrator.boost_llm)
+    dep_graph           = ContractDepGraph()
 
     from datetime import datetime as _dt
     _run_start = _dt.now()
@@ -310,6 +318,43 @@ def run_audit(
 
         _save_json(output_dir, "kg_result.json", kg_result)
         _save_text(output_dir, "contract_summary.txt", contract_summary)
+
+        # ── Step 1.1: Extract protocol intent from NatSpec (S5) ──────────────
+        # Runs after KG build so LLM receives KG-enriched contract_summary as context.
+        # Note: KG builder may also parse NatSpec — ContractIntentExtractor checks
+        # for "PROTOCOL INTENT" in summary before injecting to avoid duplication.
+        logger.info("\n[STEP 1.1/4] Extracting protocol intent from NatSpec (S5)...")
+        intent_result    = intent_extractor.extract(
+            source_code=source_code,
+            context_summary=contract_summary,
+            readme=readme_text,
+        )
+        contract_summary = intent_result["enriched_summary"]
+        _save_json(output_dir, "intent.json", {"intent": intent_result["intent_statements"]})
+        logger.info(f"  Intent statements: {len(intent_result['intent_statements'])}")
+
+        # ── Step 1.3: Build static data-flow graph via Slither (1b) ──────────
+        # Slither requires a file path. Uses sol_path (flat file or contest_dir).
+        # Falls back gracefully if Slither not installed or compilation fails.
+        logger.info("\n[STEP 1.3/4] Building data-flow dependency graph (Slither / 1b)...")
+        slither_target = sol_path  # contest_dir takes priority if provided via --contest-dir
+        if slither_target:
+            dep_summary = dep_graph.build_and_summarize(
+                source_path=slither_target,
+                contract_name=contract_name,
+            )
+            if dep_summary:
+                contract_summary += f"\n\n{dep_summary.text}"
+                logger.info(f"  Dep graph: {len(dep_summary.critical_vars)} critical vars")
+                _save_json(output_dir, "dep_graph.json", {
+                    "critical_vars": dep_summary.critical_vars,
+                    "top_writers":   dep_summary.top_writers,
+                    "top_readers":   dep_summary.top_readers,
+                })
+            else:
+                logger.info("  Dep graph: skipped (Slither not available or compile error)")
+        else:
+            logger.info("  Dep graph: skipped (no sol_path — sample contract mode)")
 
         # ── Step 1.5: Extract protocol invariants (additive layer) ────────────
         logger.info("\n[STEP 1.5/4] Extracting protocol invariants...")
@@ -341,6 +386,7 @@ def run_audit(
             profiles=profiles,
             mode="contract_audit",
             invariants=invariants,
+            manifest=manifest,
         )
 
         task = task_manager.get_task(task_id)
@@ -540,6 +586,10 @@ def main():
         "--sample", choices=list(SAMPLE_CONTRACTS.keys()),
         help="Use a built-in sample contract",
     )
+    source_group.add_argument(
+        "--contest-dir", metavar="DIR",
+        help="Path to Web3Bugs contest directory — auto-flattens + computes ContractManifest",
+    )
 
     parser.add_argument(
         "--output", "-o", default="./audit_output",
@@ -566,7 +616,27 @@ def main():
     args = parser.parse_args()
 
     # ── Load source ──────────────────────────────────────────────────────────
-    if args.sol:
+    sol_path    = None
+    manifest    = None
+    readme_text = None
+
+    if args.contest_dir:
+        import sys as _sys
+        _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from flatten_contest import flatten_contest_dir
+        contest_dir = os.path.abspath(args.contest_dir)
+        if not os.path.isdir(contest_dir):
+            logger.error(f"Contest dir không tồn tại: {contest_dir}")
+            sys.exit(1)
+        logger.info(f"Flattening contest dir: {contest_dir}")
+        source_code, manifest = flatten_contest_dir(contest_dir, verbose=True, emit_manifest=True)
+        contract_name = Path(contest_dir).name
+        sol_path      = contest_dir  # pass dir as Slither target
+        if not source_code.strip():
+            logger.error("Flatten produced empty source — check contest directory")
+            sys.exit(1)
+        logger.info(f"  Manifest: primary={manifest.get('primary')}, secondary={manifest.get('secondary')}")
+    elif args.sol:
         sol_path = os.path.abspath(args.sol)
         if not os.path.exists(sol_path):
             logger.error(f"File không tồn tại: {sol_path}")
@@ -575,11 +645,26 @@ def main():
             source_code = f.read()
         contract_name = os.path.splitext(os.path.basename(sol_path))[0]
     else:
+        sol_path = None
         sample = SAMPLE_CONTRACTS[args.sample]
         source_code   = sample["source"]
         contract_name = args.sample
         logger.info(f"Using sample contract: {sample['name']}")
         logger.info(f"Description: {sample['description']}")
+
+    # ── Load README (for S5 intent extraction) ──────────────────────────────
+    search_dir = args.contest_dir or (os.path.dirname(sol_path) if sol_path and os.path.isfile(sol_path) else None)
+    if search_dir:
+        for _rname in ["README.md", "readme.md", "README.txt"]:
+            _rpath = os.path.join(search_dir, _rname)
+            if os.path.exists(_rpath):
+                try:
+                    with open(_rpath, "r", encoding="utf-8", errors="replace") as _rf:
+                        readme_text = _rf.read()[:5000]
+                    logger.info(f"  README found: {_rname} ({len(readme_text)} chars)")
+                except Exception:
+                    pass
+                break
 
     # ── Timestamped output dir ────────────────────────────────────────────────
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -588,7 +673,7 @@ def main():
     # ── Resolve ground truth ─────────────────────────────────────────────────
     if args.ground_truth:
         ground_truth = [s.strip().upper() for s in args.ground_truth.split(",") if s.strip()]
-    elif args.sol:
+    elif sol_path and os.path.isfile(sol_path):
         ground_truth = _lookup_ground_truth(sol_path)
         if ground_truth:
             logger.info(f"Auto-detected ground truth from SmartBugs: {ground_truth}")
@@ -604,6 +689,9 @@ def main():
         verbose=args.verbose,
         timeout_session=args.timeout,
         ground_truth=ground_truth or None,
+        sol_path=sol_path,
+        manifest=manifest,
+        readme_text=readme_text,
     )
 
 

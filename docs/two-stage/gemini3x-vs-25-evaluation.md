@@ -1,4 +1,4 @@
-# Đánh giá so sánh: Gemini 3.x vs Gemini 2.5 — Contest 19
+# Đánh giá Gemini 3.x — Contest 19 & Contest 3
 
 > Ngày: 2026-04-26 | Cấu hình: gemini-3-flash-preview (main) + gemini-3.1-pro-preview (boost)  
 > Tất cả run dùng cùng bộ 7 fixes (Fix-B2, Fix-H2, Fix-CV1, Fix-CV3, Fix-CV4, P-L1, Fix-H2/P-L5)
@@ -130,3 +130,122 @@ Precision giảm từ 25% → 10% cho thấy gemini-3.x có **recall cao hơn nh
 | **Cap semantic pool size** | Giảm S FP | Chỉ giữ top-K semantic findings theo confidence |
 | **Precision-recall tradeoff analysis** | Hiểu rõ noise pattern | Chạy thêm contests để có sample size lớn hơn |
 | **Separate L/S model config** | Dùng 3.x cho L, 2.5 cho S | Khó về architecture nhưng có thể improve cả hai |
+
+---
+
+## 5. Kết quả Contest 3 — Marginswap (Dexes, 2021)
+
+> Run: `contest3_flat_20260424_172941_20260426_132808` | Duration: 67m27s | 0 error 429
+
+**Ground truth:** G_L=3 (H-01/L1, H-09/L4, H-11/L4) | G_S=4 (H-03/S1-1, H-04/S6-2, H-05/S6-4, H-07/S3-1) | OOS=3
+
+### Kết quả eval
+
+| Track | TP | FP | FN | Pool | Precision | Recall | F1 |
+|-------|----|----|----|----|-----------|--------|-----|
+| **L-track** (G_L=3) | 2 | 7 | 1 | 9 | 0.222 | 0.667 | **0.333** |
+| **S-track** (G_S=4) | 2 | 5 | 2 | 7 | 0.286 | 0.500 | **0.364** |
+| **Combined** | 4 | 12 | 3 | 16 | 0.250 | 0.571 | **0.348** |
+
+### Chi tiết bugs
+
+| Bug | Track | Tìm được? | Ghi chú |
+|-----|-------|----------|--------|
+| H-01 | L1 (Reentrancy) | ✗ | Classic reentrancy — miss |
+| H-09 | L4 (Uninit state) | ✓ | `lastUpdatedDay` not initialized |
+| H-11 | L4 (DoS gas) | ✓ | `withdrawReward` gas exhaustion |
+| H-03 | S1-1 (Price oracle) | ✓ | Price feed manipulation |
+| H-04 | S6-2 (Logic) | ✗ | Inconsistent `applyInterest` — logic bug phức tạp |
+| H-05 | S6-4 (Logic) | ✗ | Wrong liquidation logic — logic bug phức tạp |
+| H-07 | S3-1 (State) | ✓ | `holdsToken` never set |
+
+### Nhận xét
+
+- **L-track**: Miss H-01 (reentrancy L1) — đây là loại bug thường bị bỏ qua nếu pattern không đủ rõ ràng trong flat file
+- **S-track**: Miss H-04/H-05 — cả hai là logic bugs kinh doanh phức tạp (incorrect accounting, liquidation math), khó detect bằng pattern matching
+- **Contest 3 LOC lớn hơn** (134K chars vs ~80K) nhưng chạy nhanh hơn contest 19 (67 vs 76 phút)
+
+---
+
+## 6. Tổng hợp 2 Contests — Gemini 3.x
+
+| Contest | GL | GS | L TP | L FP | L FN | L F1 | S TP | S FP | S FN | S F1 | Combined F1 | Duration |
+|---------|----|----|------|------|------|------|------|------|------|------|-------------|----------|
+| **C19** (Connext) | 1 | 2 | 1 | 9 | 0 | 0.182 | 2 | 8 | 0 | 0.333 | 0.261 | 76 min |
+| **C03** (Marginswap) | 3 | 4 | 2 | 7 | 1 | 0.333 | 2 | 5 | 2 | 0.364 | 0.348 | 67 min |
+| **Aggregated** | 4 | 6 | 3 | 16 | 1 | **0.273** | 4 | 13 | 2 | **0.348** | **0.311** | — |
+
+**Quan sát từ 2 contests:**
+- L-track Recall = 3/4 = **75%** — miss 1 reentrancy (H-01)
+- S-track Recall = 4/6 = **67%** — miss logic bugs phức tạp (S6-x)
+- FP trung bình: L=8/run, S=6.5/run — khá cao, cần giảm để tăng precision
+- Tốc độ ổn định: **67–76 phút/contest**, không có 429
+
+---
+
+## 7. Kết quả Contest 35 — Sushi Trident Phase 2 (Dexes/AMM, 2022)
+
+> Run: `contest35_flat_20260426_144308_20260426_160932` | Duration: 68m42s | 0 error 429  
+> Flat file: 248,342 chars (lớn nhất trong 3 contests)
+
+**Ground truth:** G_L=6 (tất cả L7) | G_S=5 (S3-1, S6-1, S6-3, S6-4×2) | OOS=6
+
+### Kết quả eval
+
+| Track | TP | FP | FN | Pool | Precision | Recall | F1 |
+|-------|----|----|----|----|-----------|--------|-----|
+| **L-track** (G_L=6) | 0 | 10 | 6 | 10 | 0.000 | 0.000 | **0.000** |
+| **S-track** (G_S=5) | 1 | 7 | 4 | 8 | 0.125 | 0.200 | **0.154** |
+| **Combined** | 1 | 17 | 10 | 18 | 0.056 | 0.091 | **0.069** |
+
+### Chi tiết bugs
+
+| Bug | Track | Tìm được? | Ghi chú |
+|-----|-------|----------|--------|
+| H-01 | L7 | ✗ | Unsafe cast trong `burn()` — overflow math |
+| H-04 | L7 | ✗ | Overflow trong `mint()` |
+| H-05 | L7 | ✗ | Incorrect typecast trong `_getAmountsForLiquidity` |
+| H-09 | L7 | ✗ | `rangeFeeGrowth` underflow |
+| H-14 | L7 | ✗ | Math bug `rangeFeeGrowth` & `secondsPerLiquidity` |
+| H-15 | L7 | ✗ | `initialPrice` không check giới hạn |
+| H-03 | S3-1 | ✓ | Incentives bị steal (CLPM) |
+| H-08 | S6-4 | ✗ | Wrong inequality add/remove liquidity |
+| H-10 | S6-3 | ✗ | `burn()` sai logic |
+| H-11 | S6-4 | ✗ | Sai `feeGrowthGlobal` accounting |
+| H-12 | S6-1 | ✗ | `secondsPerLiquidity` không update đúng |
+
+### Phân tích — Tại sao F1 rất thấp?
+
+**L7 là loại bug đặc biệt khó:**
+- Tất cả 6 L-bugs đều thuộc L7 (arithmetic overflow/underflow trong concentrated liquidity math)
+- Đây là các lỗi toán học cực kỳ tinh vi trong Uniswap v3-style AMM: integer overflow khi cast, fixed-point precision loss, underflow trong fee accounting
+- Không có SWC nào bao phủ chính xác L7 → L-pool không match được GT
+- Ngay cả auditor chuyên nghiệp cũng phải hiểu sâu về Uniswap v3 math mới tìm được
+
+**S6-x logic bugs phức tạp:**
+- H-08/H-10/H-11/H-12 đều là protocol-level logic bugs đòi hỏi hiểu rõ concentrated liquidity mechanics
+- Loại bug này khác hoàn toàn với S1 (price oracle) hay S3 (state) mà tool detect tốt hơn
+
+**Kết luận:** Contest 35 là **hard case** — tool hiện tại không phù hợp cho AMM math bugs chuyên biệt.
+
+---
+
+## 8. Tổng hợp 3 Contests — Gemini 3.x
+
+| Contest | Domain | GL | GS | L TP | L FP | L FN | L F1 | S TP | S FP | S FN | S F1 | Comb F1 | Duration |
+|---------|--------|----|----|------|------|------|------|------|------|------|------|---------|----------|
+| **C19** Connext | Bridge | 1 | 2 | 1 | 9 | 0 | 0.182 | 2 | 8 | 0 | 0.333 | 0.261 | 76 min |
+| **C03** Marginswap | Dexes | 3 | 4 | 2 | 7 | 1 | 0.333 | 2 | 5 | 2 | 0.364 | 0.348 | 67 min |
+| **C35** Sushi Trident | AMM | 6 | 5 | 0 | 10 | 6 | 0.000 | 1 | 7 | 4 | 0.154 | 0.069 | 69 min |
+| **Aggregated** | — | **10** | **11** | **3** | 26 | 7 | **0.176** | **5** | 20 | 6 | **0.294** | **0.235** | — |
+
+### Insights từ 3 contests
+
+| Observation | Chi tiết |
+|------------|---------|
+| **Tool mạnh nhất ở Bridge/Lending** | C19/C03 Combined F1 = 0.261–0.348; C35 = 0.069 |
+| **L7 (AMM math) = điểm mù lớn** | 0/6 L7 bugs detected — cần specialized reasoning |
+| **S3/S1 tốt, S6 yếu** | TP: H-03(S3)✓, H-07(S3)✓, H-03(S1)✓ vs H-04/05/08/10/11/12(S6) ✗ |
+| **L-track recall theo contest type** | C19: 1/1=100%, C03: 2/3=67%, C35: 0/6=0% |
+| **FP cao và ổn định** | ~7–10 L-FP/run bất kể contract size — cần giảm ngưỡng |
+| **Tốc độ rất ổn định** | 67–76 min/contest dù size khác nhau (80K–248K chars) |

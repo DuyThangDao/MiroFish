@@ -55,11 +55,31 @@ Focus on these "absent check" patterns:
    - Multi-step operations where an intermediate state is exploitable by another caller
    - Pattern: "between step 1 (state update) and step 2 (token transfer), reentrancy is possible"
 
+6. ORDERING GAPS (S3a)
+   - Operations that MUST happen in a specific sequence but can be called out-of-order
+   - Pattern: "interest() must be called BEFORE liquidation check — but liquidate() doesn't enforce this"
+   - Pattern: "fee must be accumulated BEFORE updating position — but update() skips accrueFee()"
+
+7. ACCOUNTING INVARIANT VIOLATIONS (S3a)
+   - After operation X, a sum/total MUST equal expected value Y — but no post-check exists
+   - Pattern: "After swap, reserve0 * reserve1 MUST >= k but no assertion exists"
+   - Pattern: "shares/totalSupply must equal assets/totalAssets but mint() doesn't verify ratio"
+
+8. BOUNDARY VIOLATIONS (S3a)
+   - Values must stay within [min, max] at all times but bounds not enforced
+   - Pattern: "sqrtPrice must be in [MIN_SQRT_RATIO, MAX_SQRT_RATIO] but no clamp after update"
+   - Pattern: "Liquidation only when collateralRatio < threshold — code uses <= (off-by-one)"
+
+9. STATE TRANSITION VIOLATIONS (S3a)
+   - State machine allows invalid transitions
+   - Pattern: "Position can be burned when liquidity > 0 — should require liquidity == 0 first"
+   - Pattern: "cancel() callable when status == fulfilled — missing mutual exclusion"
+
 CRITICAL RULES:
 - Only report things the code DOES NOT currently have a require() or modifier for
 - If you see require(msg.sender == X) already in the code — that one is COVERED, skip it
 - violation_hint must be the MISSING line (e.g., "addLiquidity() has no require(msg.sender == router)")
-- Maximum 8 invariants — prioritize HIGH-IMPACT missing checks only
+- Maximum 10 invariants — prioritize HIGH-IMPACT missing checks only
 - Reference actual function names and state variable names from the source
 
 Return ONLY a JSON object:
@@ -74,6 +94,83 @@ Return ONLY a JSON object:
     }
   ]
 }"""
+
+
+# ─── Domain detection + template invariants (S3b) ────────────────────────────
+
+_DOMAIN_KEYWORDS: Dict[str, List[str]] = {
+    "amm_v3": ["sqrtPrice", "tick", "feeGrowth", "secondsPerLiquidity", "tickBitmap", "sqrtRatioX96"],
+    "amm_v2": ["reserve0", "reserve1", "kLast", "MINIMUM_LIQUIDITY"],
+    "lending": ["collateral", "liquidat", "interestRate", "borrowIndex", "healthFactor"],
+    "erc4626": ["totalAssets", "convertToShares", "convertToAssets", "previewDeposit"],
+    "bridge":  ["relayer", "executeMessage", "xDomain", "domainSeparator", "nonce"],
+}
+
+_DOMAIN_INVARIANTS: Dict[str, List[Dict[str, Any]]] = {
+    "amm_v3": [
+        {
+            "id": "TINV-AMM3-001", "category": "accounting",
+            "statement": "feeGrowthInside = feeGrowthGlobal - feeGrowthBelow - feeGrowthAbove (unchecked subtraction intentional for wrap-around)",
+            "functions": ["_updatePosition", "collect"],
+            "violation_hint": "If feeGrowth subtraction is NOT unchecked{}, it will revert on wrap-around — check all feeGrowth arithmetic",
+        },
+        {
+            "id": "TINV-AMM3-002", "category": "boundary",
+            "statement": "sqrtPrice must stay within [MIN_SQRT_RATIO, MAX_SQRT_RATIO] at all times",
+            "functions": ["swap", "initialize"],
+            "violation_hint": "Check if sqrtPrice clamping exists after price update in swap() — missing clamp = out-of-range price",
+        },
+        {
+            "id": "TINV-AMM3-003", "category": "accounting",
+            "statement": "pool.liquidity must equal sum of liquidity of all positions active at current tick",
+            "functions": ["mint", "burn", "_updatePosition"],
+            "violation_hint": "Verify pool.liquidity is updated correctly in mint/burn — off-by-one in tick range check causes drift",
+        },
+    ],
+    "amm_v2": [
+        {
+            "id": "TINV-AMM2-001", "category": "accounting",
+            "statement": "reserve0 * reserve1 (k) must not decrease after swap (unless fee taken correctly)",
+            "functions": ["swap"],
+            "violation_hint": "Check k-invariant assertion at end of swap() — missing or using wrong balance snapshot",
+        },
+    ],
+    "lending": [
+        {
+            "id": "TINV-LEND-001", "category": "ordering",
+            "statement": "Interest MUST be accrued before evaluating liquidation threshold",
+            "functions": ["liquidate", "isLiquidatable"],
+            "violation_hint": "Check if accrueInterest() is called before health factor check in liquidate()",
+        },
+        {
+            "id": "TINV-LEND-002", "category": "boundary",
+            "statement": "Liquidation only when collateralRatio STRICTLY less than threshold (< not <=)",
+            "functions": ["liquidate", "isLiquidatable"],
+            "violation_hint": "Check comparison operator: <= allows liquidation at exact threshold (off-by-one boundary bug)",
+        },
+    ],
+    "erc4626": [
+        {
+            "id": "TINV-4626-001", "category": "accounting",
+            "statement": "shares/totalSupply must equal assets/totalAssets (ERC4626 share price invariant)",
+            "functions": ["deposit", "withdraw", "mint", "redeem"],
+            "violation_hint": "Check if totalAssets() and totalSupply stay in sync after each operation — inflation attack vector",
+        },
+    ],
+}
+
+
+def _detect_domain(source_code: str) -> Optional[str]:
+    """Keyword-scan first 50K chars to detect protocol domain. Returns domain key or None."""
+    sample = source_code[:50_000]
+    scores: Dict[str, int] = {}
+    for domain, keywords in _DOMAIN_KEYWORDS.items():
+        count = sum(sample.count(kw) for kw in keywords)
+        if count > 0:
+            scores[domain] = count
+    if not scores:
+        return None
+    return max(scores, key=lambda d: scores[d])
 
 
 # ─── Structural scan helpers ─────────────────────────────────────────────────
@@ -203,7 +300,10 @@ def _parse_invariants(raw: Any) -> List[Dict[str, Any]]:
     else:
         return []
 
-    valid_cats = {"access_control", "state_integrity", "economic", "temporal", "atomicity"}
+    valid_cats = {
+        "access_control", "state_integrity", "economic", "temporal", "atomicity",
+        "ordering", "accounting", "boundary", "state_transition",  # S3a additions
+    }
     result = []
     for i, item in enumerate(items[:10]):
         if not isinstance(item, dict):
@@ -234,7 +334,8 @@ def _build_invariant_section(invariants: List[Dict[str, Any]]) -> str:
     if not invariants:
         return ""
     structural = [i for i in invariants if i.get("source") == "structural"]
-    llm_based  = [i for i in invariants if i.get("source") != "structural"]
+    templates  = [i for i in invariants if i.get("source") == "template"]
+    llm_based  = [i for i in invariants if i.get("source") not in ("structural", "template")]
 
     lines = ["MISSING ENFORCEMENT TARGETS (verify each — these checks are ABSENT from code):"]
 
@@ -246,6 +347,16 @@ def _build_invariant_section(invariants: List[Dict[str, Any]]) -> str:
                 f"  [{inv['id']}] {inv['category']}: {inv['statement']}\n"
                 f"            functions: {funcs_str}\n"
                 f"            MISSING CHECK: {inv['violation_hint']}"
+            )
+
+    if templates:
+        lines.append("  [DOMAIN TEMPLATE — protocol-class invariants]")
+        for inv in templates:
+            funcs_str = ", ".join(inv["functions"]) if inv["functions"] else "—"
+            hint_str  = f"\n            CHECK: {inv['violation_hint']}" if inv.get("violation_hint") else ""
+            lines.append(
+                f"  [{inv['id']}] {inv['category']}: {inv['statement']}\n"
+                f"            functions: {funcs_str}{hint_str}"
             )
 
     if llm_based:
@@ -295,6 +406,13 @@ class ContractInvariantExtractor:
         """
         # ── Layer 1: structural ──────────────────────────────────────────────
         structural_invs = _structural_ownership_scan(source_code)
+
+        # ── Layer 1.5: domain template invariants (S3b) ──────────────────────
+        domain = _detect_domain(source_code)
+        template_invs: List[Dict[str, Any]] = []
+        if domain and domain in _DOMAIN_INVARIANTS:
+            template_invs = [dict(inv, source="template") for inv in _DOMAIN_INVARIANTS[domain]]
+            logger.info(f"Domain detected: {domain} — injecting {len(template_invs)} template invariants")
 
         # ── Layer 2: LLM (missing-enforcement framing) ───────────────────────
         truncated_src = source_code[:max_source_chars]
@@ -348,8 +466,8 @@ class ContractInvariantExtractor:
                 + ", ".join(f"{i['id']}({i['category']})" for i in llm_invs)
             )
 
-        # ── Merge: structural first (deterministic, higher precision) ────────
-        invariants = structural_invs + llm_invs
+        # ── Merge: structural → domain templates → LLM ───────────────────────
+        invariants = structural_invs + template_invs + llm_invs
 
         if invariants:
             logger.info(

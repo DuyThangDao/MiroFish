@@ -12,3 +12,18 @@ services:
     restart: unless-stopped
     volumes:
       - ./backend/uploads:/app/backend/uploads
+
+  # Optional: Memgraph graph DB for dep graph persistence (MEMGRAPH_ENABLED=true)
+  # Remove or comment out if not using Slither dep graph feature
+  memgraph:
+    image: memgraph/memgraph:latest
+    container_name: mirofish_memgraph
+    ports:
+      - "7687:7687"   # Bolt protocol (Cypher queries via mgclient)
+      - "7444:7444"   # Memgraph Lab web UI
+    volumes:
+      - memgraph_data:/var/lib/memgraph
+    restart: unless-stopped
+
+volumes:
+  memgraph_data:

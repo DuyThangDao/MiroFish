@@ -53,6 +53,16 @@ _IMPORT_LINE = re.compile(r'''^\s*import\s+[^;]+;''', re.MULTILINE)
 _INTERFACE_RE = re.compile(r'\binterface\s+\w+', re.MULTILINE)
 _CONTRACT_RE  = re.compile(r'\b(contract|library|abstract\s+contract)\s+\w+', re.MULTILINE)
 
+# Manifest: class name patterns for primary/secondary classification
+_CORE_NAME_RE = re.compile(
+    r'\b(Pool|Vault|Core|Engine|Logic|Manager|Strategy|Market|Exchange|Pair|AMM|Farm)\b',
+    re.IGNORECASE,
+)
+_INFRA_NAME_RE = re.compile(
+    r'\b(Router|Helper|Deployer|Factory|Registry|Proxy|Base|Abstract|Interface|Mock)\b',
+    re.IGNORECASE,
+)
+
 
 def _is_skip_dir(path: Path) -> bool:
     return any(part.lower() in _SKIP_DIRS for part in path.parts)
@@ -225,11 +235,75 @@ def _is_interface_only(src: str) -> bool:
     return has_interface and not has_contract
 
 
+def _compute_manifest(
+    order: List[str],
+    sources: Dict[str, str],
+    graph: Dict[str, List[str]],
+    contest_dir: str,
+) -> dict:
+    """
+    Compute ContractManifest from LOC, class name patterns, and import in-degree.
+    Returns dict with primary (str), secondary (list[str]), and metadata.
+    primary/secondary hold contract names (not file paths) for use in prompts.
+    """
+    base = Path(contest_dir)
+
+    # in-degree: number of other files that import this file
+    in_degree: Dict[str, int] = {k: 0 for k in order}
+    for node, deps in graph.items():
+        for d in deps:
+            if d in in_degree:
+                in_degree[d] += 1
+
+    scores: Dict[str, float] = {}
+    contract_names: Dict[str, str] = {}
+
+    for key in order:
+        src = sources.get(key, "")
+        if not src.strip():
+            continue
+
+        loc = src.count('\n') + 1
+
+        # Use first contract/library name found in file
+        m = _CONTRACT_RE.search(src)
+        cname = m.group(0).split()[-1] if m else Path(key).stem
+        contract_names[key] = cname
+
+        score = float(loc)
+        if _CORE_NAME_RE.search(cname):
+            score *= 1.5
+        if _INFRA_NAME_RE.search(cname):
+            score *= 0.6
+        # High in-degree → likely core (many files depend on it)
+        score += in_degree.get(key, 0) * 500
+        if _is_interface_only(src):
+            score *= 0.1
+
+        scores[key] = score
+
+    if not scores:
+        return {"primary": None, "secondary": [], "total_contracts": 0, "total_chars": 0}
+
+    sorted_keys = sorted(scores, key=lambda k: scores[k], reverse=True)
+    primary_key = sorted_keys[0]
+    secondary_keys = sorted_keys[1:4]
+
+    return {
+        "primary":        contract_names.get(primary_key),
+        "primary_file":   str(Path(primary_key).relative_to(base)),
+        "secondary":      [contract_names.get(k) for k in secondary_keys],
+        "total_contracts": len(scores),
+        "total_chars":    sum(len(sources.get(k, "")) for k in order),
+    }
+
+
 def flatten_contest_dir(
     contest_dir: str,
     max_chars: int = 260_000,
     verbose: bool = False,
-) -> str:
+    emit_manifest: bool = False,
+) -> "str | tuple[str, dict]":
     """
     Flatten all .sol files in contest_dir into a single source string.
 
@@ -308,6 +382,11 @@ def flatten_contest_dir(
     if verbose:
         print(f"  Flattened: {len(result):,} chars ({len(result)//1000}K) from {len(order)} files")
 
+    if emit_manifest:
+        manifest = _compute_manifest(order, sources, graph, contest_dir)
+        if verbose:
+            print(f"  Manifest: primary={manifest['primary']}, secondary={manifest['secondary']}")
+        return result, manifest
     return result
 
 

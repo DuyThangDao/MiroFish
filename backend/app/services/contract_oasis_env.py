@@ -84,11 +84,19 @@ PHASE_CONFIG = {
             "  CLAIM: fulfill() may be vulnerable because state update happens after external call\n"
             "  CLAIM: cancel() may be vulnerable because reentrancy guard missing on ETH transfer path\n"
             "  CLAIM: getPriceFromAMM() may be vulnerable because spot price manipulable via flash loan\n\n"
+            "⚠️ SWC TAGGING RULES — MANDATORY: assign SWC when you see these patterns:\n"
+            "  SWC-101: ANY explicit cast (uint128(x), int24(y), uint160(z), uint256→int256)\n"
+            "           ANY unchecked{} block — Solidity 0.8 DOES NOT protect explicit casts,\n"
+            "           only arithmetic operators (+, -, *). Casts can silently truncate.\n"
+            "  SWC-107: ANY external call BEFORE state update, including via callback/hook/onFlashLoan\n"
+            "  SWC-124: ANY delegatecall, including ones hidden inside batch() or proxy patterns\n"
+            "  SWC-128: ANY loop over array/mapping that can grow unbounded\n\n"
             "⚠️ REQUIRED COVERAGE — explicitly check for these patterns before writing CLAIMs:\n"
             "  - Unbounded arrays/loops (SWC-128): any array that grows without a cap, or loops over\n"
             "    user-controlled data that could exhaust block gas (DoS with Block Gas Limit)\n"
             "  - Unprotected state-modifying functions any caller can invoke to grief other users\n"
-            "  - Integer overflow/underflow in arithmetic not guarded by SafeMath or Solidity ≥0.8\n"
+            "  - Explicit type casts (SWC-101): uint128(x), int24(y), unchecked{} blocks — tag SWC-101\n"
+            "    even on Solidity 0.8 contracts (0.8 does NOT protect casts, only operators)\n"
             "Include a CLAIM about DoS patterns even if you find no clear issue — write 'no issue found' if clean.\n\n"
             "Start your response with CLAIM lines directly. No introduction text.\n"
             "CLAIMs will be shared with ALL experts in Stage 2 for validation or challenge.\n"
@@ -138,6 +146,12 @@ PHASE_CONFIG = {
             "Examples:\n"
             "  CLAIM: fulfill() may be vulnerable because cross-domain reentrancy via router callback\n"
             "  CLAIM: addLiquidity() may be vulnerable because missing slippage check interacts with price oracle\n\n"
+            "⚠️ SWC TAGGING RULES — MANDATORY: assign SWC when you see these patterns:\n"
+            "  SWC-101: ANY explicit cast (uint128(x), int24(y), uint160(z)) or unchecked{} block\n"
+            "           Solidity 0.8 DOES NOT protect explicit casts — only arithmetic operators\n"
+            "  SWC-107: ANY external call BEFORE state update, via callback/hook/onFlashLoan\n"
+            "  SWC-124: ANY delegatecall (direct or via proxy/batch)\n"
+            "  SWC-128: ANY loop over unbounded array/mapping\n\n"
             "Start your response with CLAIM lines directly. No introduction text.\n"
             + GAP_FORMAT_INSTRUCTION
         ),
@@ -1097,6 +1111,27 @@ class ContractAuditEnvBuilder:
     Tương đương CyberOasisEnvBuilder.
     """
 
+    def __init__(self, manifest: Optional[Dict[str, Any]] = None):
+        self.manifest = manifest
+
+    def _build_focus_directive(self) -> str:
+        """Inject focus directive when manifest has a primary contract and file is large."""
+        if not self.manifest:
+            return ""
+        primary = self.manifest.get("primary")
+        secondary = self.manifest.get("secondary", [])
+        total_chars = self.manifest.get("total_chars", 0)
+        if not primary or total_chars < 100_000:
+            return ""
+        sec_str = ", ".join(s for s in secondary if s) or "none"
+        return (
+            f"\n⚠️ MULTI-CONTRACT AUDIT — Phân bổ attention:\n"
+            f"  PRIMARY TARGET (≥50% findings phải về): {primary}\n"
+            f"  Secondary: {sec_str}\n"
+            f"  KHÔNG để infrastructure/utility patterns chiếm đa số findings.\n"
+            f"  Infrastructure bugs vẫn report nhưng KHÔNG ưu tiên hơn {primary}.\n"
+        )
+
     def build_config(
         self,
         session_id: str,
@@ -1161,6 +1196,10 @@ class ContractAuditEnvBuilder:
             instruction_text = phase_cfg.get("stage2_instruction", phase_cfg.get("instruction_addition", ""))
         else:
             instruction_text = phase_cfg.get("instruction_addition", "")
+
+        # S2a: prepend focus directive to Stage 1 instructions only
+        if stage == 1:
+            instruction_text = self._build_focus_directive() + instruction_text
 
         instruction = (
             f"=== Phase {phase}: {phase_cfg.get('name', '')} | Round {round_num}/{TOTAL_ROUNDS} ===\n"

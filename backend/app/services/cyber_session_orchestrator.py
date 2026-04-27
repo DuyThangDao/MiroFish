@@ -282,6 +282,7 @@ class CyberSessionOrchestrator:
         session_id: Optional[str] = None,
         mode: str = "network_security",
         invariants: Optional[List[Dict[str, Any]]] = None,
+        manifest: Optional[Dict[str, Any]] = None,
     ) -> str:
         """
         Khởi chạy session trong background thread.
@@ -290,6 +291,7 @@ class CyberSessionOrchestrator:
         Args:
             mode: "network_security" (default) | "contract_audit"
             invariants: protocol invariants from ContractInvariantExtractor (contract_audit only)
+            manifest: ContractManifest from flatten_contest_dir (contract_audit only)
         """
         session_id = session_id or f"cyber_{uuid.uuid4().hex[:12]}"
         task_id = self.task_manager.create_task(
@@ -304,7 +306,7 @@ class CyberSessionOrchestrator:
 
         thread = threading.Thread(
             target=self._session_worker,
-            args=(task_id, session_id, graph_id, network_summary, profiles, mode, invariants),
+            args=(task_id, session_id, graph_id, network_summary, profiles, mode, invariants, manifest),
             daemon=True
         )
         thread.start()
@@ -462,6 +464,7 @@ class CyberSessionOrchestrator:
         profiles: List[CyberAgentProfile],
         mode: str = "network_security",
         invariants: Optional[List[Dict[str, Any]]] = None,
+        manifest: Optional[Dict[str, Any]] = None,
     ):
         try:
             self.task_manager.update_task(
@@ -472,7 +475,7 @@ class CyberSessionOrchestrator:
             # Pick env_builder and phase function based on mode
             if mode == "contract_audit":
                 cm = _get_contract_modules()
-                env_builder = cm["env_builder"]()
+                env_builder = cm["env_builder"](manifest=manifest)
                 get_phase = cm["get_phase"]
                 config = env_builder.build_config(
                     session_id=session_id,
