@@ -29,6 +29,7 @@ dependencies = [
     "pydantic>=2.0.0",
     "google-auth>=2.49.1",
     "anthropic>=0.96.0",
+    "slither-analyzer",
 ]
 
 [project.optional-dependencies]

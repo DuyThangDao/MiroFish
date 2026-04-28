@@ -53,13 +53,15 @@ _IMPORT_LINE = re.compile(r'''^\s*import\s+[^;]+;''', re.MULTILINE)
 _INTERFACE_RE = re.compile(r'\binterface\s+\w+', re.MULTILINE)
 _CONTRACT_RE  = re.compile(r'\b(contract|library|abstract\s+contract)\s+\w+', re.MULTILINE)
 
-# Manifest: class name patterns for primary/secondary classification
+# Manifest: class name patterns for primary/secondary classification.
+# No \b boundaries — match CamelCase suffixes (e.g. "Pool" in "ConcentratedLiquidityPool").
 _CORE_NAME_RE = re.compile(
-    r'\b(Pool|Vault|Core|Engine|Logic|Manager|Strategy|Market|Exchange|Pair|AMM|Farm)\b',
+    r'Pool|Vault|Core|Engine|Logic|Manager|Strategy|Market|Exchange|Pair|AMM|Farm',
     re.IGNORECASE,
 )
 _INFRA_NAME_RE = re.compile(
-    r'\b(Router|Helper|Deployer|Factory|Registry|Proxy|Base|Abstract|Interface|Mock)\b',
+    r'Router|Helper|Deployer|Factory|Registry|Proxy|Base|Abstract|Interface|Mock'
+    r'|Math|Library|ERC20|ERC721|ERC1155',
     re.IGNORECASE,
 )
 
@@ -228,10 +230,22 @@ def _strip_file(src: str, keep_pragma: bool, seen_externals: Set[str]) -> str:
     return "\n".join(out)
 
 
+_SOL_BLOCK_COMMENT_RE  = re.compile(r'/\*.*?\*/', re.DOTALL)
+_SOL_LINE_COMMENT_RE   = re.compile(r'//[^\n]*')
+
+
+def _strip_sol_comments(src: str) -> str:
+    """Strip // line comments and /* */ block comments from Solidity source."""
+    src = _SOL_BLOCK_COMMENT_RE.sub('', src)
+    src = _SOL_LINE_COMMENT_RE.sub('', src)
+    return src
+
+
 def _is_interface_only(src: str) -> bool:
     """True if file defines only interfaces (no contract/library bodies)."""
-    has_interface = bool(_INTERFACE_RE.search(src))
-    has_contract  = bool(_CONTRACT_RE.search(src))
+    stripped = _strip_sol_comments(src)
+    has_interface = bool(_INTERFACE_RE.search(stripped))
+    has_contract  = bool(_CONTRACT_RE.search(stripped))
     return has_interface and not has_contract
 
 
@@ -263,10 +277,12 @@ def _compute_manifest(
         if not src.strip():
             continue
 
+        stripped = _strip_sol_comments(src)
         loc = src.count('\n') + 1
+        is_iface = _is_interface_only(src)
 
-        # Use first contract/library name found in file
-        m = _CONTRACT_RE.search(src)
+        # Extract contract name from comment-stripped source only
+        m = _CONTRACT_RE.search(stripped)
         cname = m.group(0).split()[-1] if m else Path(key).stem
         contract_names[key] = cname
 
@@ -275,9 +291,12 @@ def _compute_manifest(
             score *= 1.5
         if _INFRA_NAME_RE.search(cname):
             score *= 0.6
-        # High in-degree → likely core (many files depend on it)
-        score += in_degree.get(key, 0) * 500
-        if _is_interface_only(src):
+        # In-degree bonus only for real contracts — interfaces are imported widely
+        # but that reflects dependency breadth, not implementation importance.
+        # Weight 200 (not 500) so LOC+name pattern dominates over pure import count.
+        if not is_iface:
+            score += in_degree.get(key, 0) * 200
+        if is_iface:
             score *= 0.1
 
         scores[key] = score
