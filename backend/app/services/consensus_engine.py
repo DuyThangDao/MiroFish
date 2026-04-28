@@ -102,6 +102,11 @@ ATTACKER_GATE_DISMISS  = 0.40   # dismissed by attacker  → heavy penalty
 
 MIN_CONFIDENCE = 0.35  # Below this → exclude from consensus_vulns (safety net: goes to gaps)
 
+# ─── Tier-1 gate ──────────────────────────────────────────────────────────────
+# Tier 1 (consensus_vulns): finding has function location + exploit path → actionable
+# Tier 2 (unvalidated_swc_gaps): SWC detected but no location/path → triage signal
+_BACKFILL_FN_RE = re.compile(r'`([a-zA-Z_]\w+)\(\)`')
+
 # Attacker action → delta used only for attacker_score metadata field
 ATTACKER_DELTA = {
     "ATTACKER_CONFIRM":   +0.15,
@@ -127,6 +132,30 @@ class ConsensusEngine:
     7. Filter < MIN_CONFIDENCE (0.35)
     8. Merge attacker-only findings với base confidence 0.60
     """
+
+    def __init__(self) -> None:
+        # Tier 2 findings demoted from consensus (no function/exploit path)
+        # Appended to unvalidated_swc_gaps by enforce_swc_coverage()
+        self._tier2_demoted: List[Dict[str, Any]] = []
+
+    @staticmethod
+    def _backfill_functions(vuln: "ConsensusVulnerability") -> "ConsensusVulnerability":
+        """Extract function names from description/recommendations if affected_assets is empty."""
+        if vuln.affected_assets:
+            return vuln
+        text = " ".join(filter(None, [
+            vuln.description,
+            " ".join(vuln.recommendations or []),
+        ]))
+        matches = list(dict.fromkeys(_BACKFILL_FN_RE.findall(text)))
+        if matches:
+            vuln.affected_assets = matches
+        return vuln
+
+    @staticmethod
+    def _is_tier1(vuln: "ConsensusVulnerability") -> bool:
+        """Tier 1: has at least 1 function location AND at least 1 recommendation (exploit path proxy)."""
+        return bool(vuln.affected_assets) and bool(vuln.recommendations)
 
     def run(
         self,
@@ -174,6 +203,39 @@ class ConsensusEngine:
         # ── Step 6: Filter and sort ───────────────────────────────────────────
         vulns = [v for v in vulns if v.confidence_score >= MIN_CONFIDENCE]
         vulns.sort(key=lambda v: (v.confidence_score, SEVERITY_RANK.get(v.severity, 0)), reverse=True)
+
+        # ── Step 6b: Tier routing (contract_audit only) ───────────────────────
+        # Backfill function names from description/recommendations, then split:
+        #   Tier 1 → consensus_vulns  (has function location + recommendations)
+        #   Tier 2 → unvalidated_swc_gaps  (class-level hint only)
+        self._tier2_demoted = []
+        if mode == "contract_audit":
+            vulns = [self._backfill_functions(v) for v in vulns]
+            tier1, tier2 = [], []
+            for v in vulns:
+                if self._is_tier1(v):
+                    tier1.append(v)
+                else:
+                    tier2.append(v)
+            if tier2:
+                logger.info(
+                    f"Tier routing: {len(tier1)} Tier-1 (actionable), "
+                    f"{len(tier2)} Tier-2 demoted to gaps (no function/path)"
+                )
+            self._tier2_demoted = [
+                {
+                    "swc_category":       "tier2_demoted",
+                    "swc_id":             (v.mitre_techniques or [""])[0],
+                    "title":              v.title,
+                    "description":        v.description,
+                    "severity":           v.severity,
+                    "affected_functions": v.affected_assets,
+                    "confidence_score":   v.confidence_score,
+                    "note":               "Tier-2: SWC pattern detected but no function location or exploit path confirmed",
+                }
+                for v in tier2
+            ]
+            vulns = tier1
 
         # ── Step 7: Semantic consensus (contract_audit only) ─────────────────
         semantic_results: List[Dict[str, Any]] = []
@@ -879,6 +941,14 @@ class ConsensusEngine:
                 "domain_count":      len(distinct_domains),
                 "note":              f"Multi-domain gap — flagged by {len(distinct_domains)} distinct domains",
             })
+
+        # Append Tier-2 demoted findings (have SWC but no function/exploit path)
+        for t2 in self._tier2_demoted:
+            # Skip if same SWC already covered in unvalidated list
+            t2_swc = t2.get("swc_id", "")
+            already = any(g.get("swc_id") == t2_swc and t2_swc for g in unvalidated)
+            if not already:
+                unvalidated.append(t2)
 
         return unvalidated
 

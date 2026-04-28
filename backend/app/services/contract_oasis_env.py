@@ -119,6 +119,13 @@ PHASE_CONFIG = {
             "       ADDITIONAL_IMPACT: <extra impact>\n\n"
             "OPTIONAL (only after addressing the above):\n"
             "  3. FINDING / SEMANTIC_FINDING: new vulnerabilities from YOUR domain\n\n"
+            "⚠️ FUNCTION FIELD IS MANDATORY IN ALL FINDINGS:\n"
+            "  If you mention a function name anywhere in your description or evidence,\n"
+            "  you MUST include it in the FUNCTION: field. A finding without FUNCTION: is\n"
+            "  demoted to a low-value hint and will NOT appear as a confirmed vulnerability.\n"
+            "  Wrong:   FUNCTION: (empty)  DESCRIPTION: _mint uses unsafe cast...\n"
+            "  Correct: FUNCTION: _mint()  DESCRIPTION: _mint uses unsafe cast...\n"
+            "  If the same SWC appears in 3 functions, write 3 separate FINDINGs.\n\n"
             "Note: CHALLENGE/VALIDATE target Stage 1 CLAIMs and previous-round findings.\n"
             "New findings from THIS round's other experts will be challengeable next round.\n"
             + GAP_FORMAT_INSTRUCTION
@@ -173,7 +180,14 @@ PHASE_CONFIG = {
             "OPTIONAL (only after addressing the above):\n"
             "3. Add NEW findings missed by all domains.\n"
             "4. Reclassify business-logic bugs (no SWC → use SEMANTIC_FINDING).\n\n"
-            "Note: CLAIM titles come from the Stage 1 feed above — use exact wording to match.\n"
+            "Note: CLAIM titles come from the Stage 1 feed above — use exact wording to match.\n\n"
+            "⚠️ FUNCTION FIELD IS MANDATORY IN ALL FINDINGS:\n"
+            "  If you mention a function name anywhere in your description or evidence,\n"
+            "  you MUST include it in the FUNCTION: field. A finding without FUNCTION: is\n"
+            "  demoted to a low-value hint and will NOT appear as a confirmed vulnerability.\n"
+            "  Wrong:   FUNCTION: (empty)  DESCRIPTION: _mint uses unsafe cast...\n"
+            "  Correct: FUNCTION: _mint()  DESCRIPTION: _mint uses unsafe cast...\n"
+            "  If the same SWC appears in 3 functions, write 3 separate FINDINGs.\n\n"
             + GAP_FORMAT_INSTRUCTION
         ),
         # Backward compat: single-stage (stage=0) path

@@ -1,206 +1,281 @@
-# L-track Metric Inflation: Phân tích, Nguyên nhân và Giải pháp
+# L-track Metric Inflation: Phân tích, Quyết định và Giải pháp
 
-> Phát hiện trong quá trình đánh giá RC fixes — Contest 35 (Sushi Trident), 2026-04-27
+> Vấn đề phát lộ khi đối chiếu F1 L-track (class-level) với mức localize thực tế — có thể lặp lại trên bất kỳ contest nào có nhiều GT cùng nhãn L / cùng SWC.
 
 ---
 
 ## 1. Vấn đề
 
-### 1.1 Hiện tượng quan sát được
+### 1.1 Hiện tượng
 
-Sau khi áp dụng G-RC-1 (SWC tagging rules), L-track F1 cho contest 35 tăng từ **0.000 lên 0.857** — một cải thiện trông rất ấn tượng. Tuy nhiên khi kiểm tra report thực tế, tool chỉ produce **1 generic hint** về SWC-101:
+Eval L-track tính TP theo cơ chế **giao lớp**: một finding đúng SWC tương ứng nhãn L có thể match tất cả bug GT cùng lớp trong cùng contest. Khi nhiều bug GT cùng nhãn L, **một** finding generic đúng class kéo **nhiều** TP cùng lúc — F1_class cao dù tool chỉ có một hint không gắn function/exploit path nào.
 
-> *"While Solidity 0.8.x introduced built-in overflow protection for arithmetic, it does not revert on explicit type casting... Use OpenZeppelin SafeCast."*
+Hệ quả: metric nói "đã nhận ra pattern lớp lỗi" nhưng không đo "đã trỏ đúng vị trí và có bằng chứng exploit" — hai câu hỏi hoàn toàn khác nhau về giá trị thực tế.
 
-Không có function cụ thể nào được chỉ ra (`affected_assets: []`). Không có exploit path. Không có patch cụ thể.
+### 1.2 Phân tầng ý nghĩa
 
-### 1.2 Kết quả đối chiếu chi tiết
-
-**6 GT bugs (tất cả L7 — SWC-101):**
-
-| Bug | Hàm cụ thể | Tool có tìm ra không? |
+| Tầng | Câu hỏi | Giá trị thực tế |
 |---|---|---|
-| H-01 | `burn()` — unsafe downcast uint256→int128 | ❌ |
-| H-04 | `mint()` — overflow trong liquidity calc | ❌ |
-| H-05 | `_getAmountsForLiquidity()` — truncation | ❌ |
-| H-09 | `rangeFeeGrowth` — underflow | ❌ |
-| H-14 | `rangeFeeGrowth`, `secondsPerLiquidity` — cần unchecked | ❌ |
-| H-15 | `initialPrice` — không validate range | ❌ |
+| **Class** | Tool có nhận ra lớp lỗi (SWC) tồn tại không? | Triage — auditor biết phải tìm pattern gì |
+| **Function** | Tool có trỏ đúng function mà GT kỳ vọng không? | Audit assistant — có chỗ cụ thể để kiểm tra |
+| **Exploit path** | Tool có dựng được attack sequence không? | Actionable — có thể confirm và fix ngay |
 
-**Điều tool thực sự có:** 1 finding với `SWC-101`, `functions=[]`, xuất hiện như một gợi ý "Long-term Remediation" trong report.
+**Quyết định về metric:**
 
-### 1.3 So sánh với finding có vị trí cụ thể
+Class-level F1 sẽ được **bỏ** sau khi fix structured output compliance được deploy ổn định. Lý do:
 
-Cùng run, tool produce các finding khác **có đầy đủ context**:
+- Sau fix, finding có SWC → hầu hết cũng có function → class và fn-level đo gần như cùng thứ
+- Sự khác biệt còn lại (finding có SWC nhưng không có function sau fix) chính là Tier 2 — đã được report riêng trong output, không cần thêm metric
+- Giữ hai metric tạo overhead tracking mà không thêm insight mới
 
-| Finding | SWC | Functions được chỉ ra | Có exploit path? |
-|---|---|---|---|
-| Cross-Function Reentrancy | SWC-107 | `flashSwap()`, `swap()`, `mint()`, `burn()` (7 hàm) | ✅ |
-| DoS with Failed Call | SWC-128 | `initialize()`, `transferMultiple()` | ✅ |
-| Missing Initializer | SWC-112 | `initialize()`, `init()`, `batch()` | ✅ |
-| **Silent Truncation** | **SWC-101** | **`[]` — trống** | ❌ |
+**Ngoại lệ — giai đoạn chuyển tiếp:** Giữ class-level song song trong **1–2 lần chạy đầu tiên sau khi deploy fix** để làm diagnostic: nếu `F1_L_class` và `F1_L_fn` vẫn cách xa nhau sau fix → backfill chưa đủ, cần điều tra thêm. Sau khi hai metric hội tụ, bỏ class-level.
 
-→ Tool **có khả năng** produce actionable findings, nhưng với SWC-101 thì không làm được.
+**Metric dài hạn duy nhất: `F1_L_fn`** — đo finding có SWC đúng + function đúng + exploit path.
 
 ---
 
-## 2. Nguyên nhân phỏng đoán
+## 2. Nguyên nhân gốc
 
-### 2.1 Cơ chế lenient matching của eval framework
+### 2.1 Eval: class-level match + GT nhiều mục cùng lớp
 
-```python
-def _match_l(bug, findings):
-    expected_swcs = L_TO_SWC.get(bug.label)  # L7 → {SWC-101}
-    for f in findings:
-        if f.source in ("consensus", "gap") and f.swc_ids & expected_swcs:
-            return True  # ← bất kỳ 1 finding có SWC-101 = tất cả L7 bugs "found"
-```
+Một finding trong L-pool có đúng SWC → match toàn bộ bug GT cùng lớp. Không phụ thuộc tên dự án — chỉ cần GT có nhiều mục trùng lớp là xảy ra.
 
-Thiết kế này đo **"tool có biết vulnerability class tồn tại không?"** — không đo **"tool có chỉ ra đúng location không?"**. Hệ quả: 1 generic hint → 6 TP, recall = 1.0.
+### 2.2 Tool: agents biết vị trí nhưng không điền đúng field — đây là root cause thực sự
 
-### 2.2 Tại sao SWC-101 không có function location?
+Kiểm tra raw session output (contest 35) cho thấy điều ngược lại với giả định ban đầu:
 
-**Nguyên nhân chính — flattened multi-contract source:**
+**Agents BIẾT function cụ thể — nhưng ghi vào free-text thay vì `affected_functions` field:**
 
-Contest 35 được flatten thành 1 file 248K chars từ 35 files. Các L7 bugs nằm rải rác trong `ConcentratedLiquidityPool.sol` — một contract chuyên biệt về AMM V3 tick math. Khi agents xử lý file phẳng khổng lồ:
-
-- Agents detect được *pattern* "explicit cast tồn tại" (đủ để tag SWC-101) nhưng không trace được *context* để xác định function cụ thể
-- Attention dilution: 248K chars → agents focus vào các pattern dễ nhận hơn (reentrancy, access control) thay vì đào sâu vào từng cast operation
-- Manifest heuristic lỗi (`primary=so`): focus directive không trỏ đúng vào `ConcentratedLiquidityPool` — agents không biết đây là contract cần audit sâu
-
-**Nguyên nhân phụ — SWC-101 trên Solidity 0.8.x khó nhận ra:**
-
-Agents được training để biết "0.8 = safe overflow". G-RC-1 đã sửa nhận thức này ở mức *class detection* (giúp SWC-101 xuất hiện trong consensus) nhưng chưa đủ để agents *localize* từng instance:
-- Explicit cast như `int256(uint256(x))` trông vô hại
-- Pattern `toUint128()`, `toInt128()` dễ bị bỏ qua khi đọc lướt
-- Trong concentrated liquidity math, các cast ẩn trong công thức dày đặc
-
-**Nguyên nhân phụ — Confidence thấp (0.49):**
-
-Consensus engine có thể đã merge nhiều signals yếu thành 1 finding mà không có đủ evidence để attach function names. Finding có confidence 0.49 (gần threshold loại bỏ) — chỉ vừa đủ vào report, không đủ data để localize.
-
-### 2.3 Vấn đề với cách tool "tìm" SWC-101
-
-Tool hiện tại detect SWC-101 theo hướng **top-down pattern matching**:
-1. Agent đọc code, nhận ra có explicit cast
-2. Tag SWC-101 vào finding
-3. Consensus merge → 1 generic finding
-
-Thay vì **bottom-up instance enumeration**:
-1. Tìm tất cả `uint256 → uint128`, `int256 → int128` operations
-2. Kiểm tra từng cái có thể overflow không
-3. Mỗi instance = 1 finding độc lập
-
-Cách hiện tại là "đọc lướt và ghi nhớ pattern" — không phải "enumerate và verify từng instance".
-
----
-
-## 3. Ảnh hưởng đến đánh giá
-
-### 3.1 Mức độ phóng đại
-
-| Metric | Eval framework | Thực tế audit |
-|---|---|---|
-| L-track TP | 6 | ~0–1 |
-| L-track F1 | **0.857** | **~0.0–0.15** |
-| Combined F1 | 0.538 | ~0.15–0.20 |
-
-### 3.2 Loại metric nào phù hợp hơn?
-
-| Metric | Đo cái gì | Phù hợp cho |
-|---|---|---|
-| **Class-level recall** (hiện tại) | Tool có biết vulnerability class tồn tại không? | Triage / screening tool |
-| **Function-level recall** | Tool có chỉ đúng function không? | Audit assistant |
-| **Instance-level recall** | Tool có tìm từng bug riêng lẻ không? | Automated bug finder |
-
-MiroFish định vị là **audit assistant** — function-level recall mới là metric phù hợp.
-
----
-
-## 4. Giải pháp đề xuất
-
-### 4.1 Cải thiện eval framework: thêm function-level metric
-
-Thêm `F1_L_fn` — chỉ tính TP khi finding có function overlap với GT bug:
-
-```python
-# Cần map GT bug → expected function names
-GT_FUNCTION_MAP = {
-    ("35", "H-01"): {"burn"},
-    ("35", "H-04"): {"mint"},
-    ("35", "H-05"): {"_getAmountsForLiquidity"},
-    # ...
+```json
+// Finding cf_e5494d6c — SWC-101
+{
+  "affected_functions": [],                          // ← TRỐNG
+  "description": "In this contract, _mint and _burn use these casts...",  // ← BIẾT RÕ
+  "evidence": ["to128() → (leaf) (implied in context of _mint and _burn)"] // ← BIẾT RÕ
 }
 
-def _match_l_strict(bug, findings):
-    expected_swcs = L_TO_SWC.get(bug.label)
-    expected_fns  = GT_FUNCTION_MAP.get((str(bug.contest_id), bug.bug_id), set())
+// Finding cf_685ae9f5 — SWC-101
+{
+  "affected_functions": [],                          // ← TRỐNG
+  "description": "the pools rely on to128 for internal accounting (e.g., in _transfer and _updateReserves)"  // ← BIẾT RÕ
+}
+```
+
+Agents đã nhận diện được `to128()`, `to64()`, `_mint`, `_burn`, `_transfer`, `_updateReserves` — thông tin nằm trong `description` và `evidence`. Consensus engine chỉ đọc `affected_functions` (structured field) và không parse free-text → function location bị mất hoàn toàn khi merge.
+
+**Root cause thực sự:** Structured output compliance — thông tin có trong reasoning của agent nhưng không được ghi vào đúng schema field. Đây là vấn đề **prompt + output format**, không phải vấn đề capability.
+
+Hệ quả: fix đơn giản hơn nhiều so với giả định ban đầu — không cần thay đổi cách agents "tìm" bug, chỉ cần enforce điền đúng field.
+
+### 2.3 Consensus engine không recover từ free-text
+
+Ngay cả khi agent biết function, nếu `affected_functions: []` thì merged finding cũng trống. Không có bước nào trong pipeline hiện tại extract function names từ `description`/`evidence` text để backfill vào structured output.
+
+### 2.4 File lớn + attention dilution (yếu tố phụ)
+
+Flat multi-contract file (248K chars) làm tăng xác suất agents viết tắt trong free-text thay vì điền đầy đủ structured fields. Manifest sai (focus directive trỏ nhầm) làm trầm trọng thêm nhưng không phải root cause chính.
+
+---
+
+## 3. Kiến trúc 2-tier output (giải pháp cốt lõi)
+
+Hai mong muốn — giữ class-level signal VÀ yêu cầu exploit path cho finding actionable — không xung đột nếu output được phân thành 2 tier rõ ràng:
+
+```
+┌─────────────────────────────────────────────────────┐
+│  TIER 1 — consensus_vulns                           │
+│  Điều kiện: SWC đúng + function cụ thể + exploit   │
+│  path ít nhất 2 bước + impact rõ                    │
+│  → Actionable: auditor có thể confirm và fix ngay   │
+├─────────────────────────────────────────────────────┤
+│  TIER 2 — unvalidated_swc_gaps                      │
+│  Điều kiện: SWC đúng, nhưng thiếu function hoặc    │
+│  thiếu exploit path                                 │
+│  → Triage signal: auditor biết phải tìm gì,        │
+│    chưa biết chính xác ở đâu                        │
+└─────────────────────────────────────────────────────┘
+```
+
+**Eval mapping:**
+- `F1_L_fn` — **metric chính**, chỉ dùng Tier 1 (finding có function + exploit path)
+- `F1_L_class` — **diagnostic tạm thời**, dùng cả 2 tier, chỉ dùng trong giai đoạn chuyển tiếp để verify fix hiệu quả → bỏ sau khi hai metric hội tụ
+
+---
+
+## 4. Giải pháp triển khai
+
+### 4.1 Fix root cause: enforce `affected_functions` trong agent output (Stage 1 + Stage 2)
+
+Vì agents đã biết function nhưng không điền vào field, fix ưu tiên cao nhất là **prompt enforcement** — buộc agents populate `affected_functions` bất cứ khi nào họ đề cập function trong reasoning.
+
+**Thêm vào Stage 1 instruction (expert agents):**
+
+```
+CRITICAL OUTPUT RULE — affected_functions field:
+If you mention any function name (e.g., _mint, to128, withdraw) anywhere in your
+description or evidence, you MUST also list it in the "affected_functions" array.
+Do NOT leave affected_functions empty if you can identify the vulnerable function.
+Wrong:  { "affected_functions": [], "description": "_mint uses unsafe cast..." }
+Correct: { "affected_functions": ["_mint"], "description": "_mint uses unsafe cast..." }
+```
+
+**Thêm vào Stage 2 instruction (attacker/validator agents):**
+
+```
+When validating a finding, check: does it have affected_functions populated?
+If the description mentions a function but affected_functions is empty, ADD the
+function name to affected_functions before escalating. This is required for Tier 1.
+
+To escalate a finding to Tier 1 (consensus_vulns), ALL 3 must be present:
+  1. affected_functions: at least 1 exact function name
+  2. Attack path: step-by-step sequence (minimum 2 steps)
+  3. Impact: concrete outcome (funds lost / state corrupted / DoS)
+
+Findings without all 3 → Tier 2 (triage signal, still reported).
+Do NOT merge multiple function-level issues of the same SWC into one generic finding.
+```
+
+### 4.2 Consensus engine: backfill từ free-text + gate Tier 1
+
+Thêm 2 bước trong consensus engine trước khi route finding:
+
+**Bước 1 — Backfill `affected_functions` từ free-text** (safety net khi prompt không đủ):
+
+```python
+import re
+
+_FN_PATTERN = re.compile(r'`([a-zA-Z_]\w+\(\))`')
+
+def _backfill_functions(finding: dict) -> dict:
+    """Extract function names từ description/evidence nếu affected_functions rỗng."""
+    if finding.get("affected_functions"):
+        return finding  # đã có, không cần
+    text = " ".join([
+        finding.get("description", ""),
+        " ".join(finding.get("evidence", [])),
+    ])
+    extracted = _FN_PATTERN.findall(text)
+    if extracted:
+        finding["affected_functions"] = list(dict.fromkeys(extracted))  # dedup, preserve order
+    return finding
+```
+
+**Bước 2 — Gate vào Tier 1:**
+
+```python
+def _has_exploit_path(finding: dict) -> bool:
+    return (
+        bool(finding.get("affected_functions"))   # có function name (sau backfill)
+        and bool(finding.get("exploit_steps"))    # có attack sequence
+        and finding.get("confidence_score", 0) >= 0.45
+    )
+
+# Trong consensus engine, sau khi merge:
+finding = _backfill_functions(finding)
+if _has_exploit_path(finding):
+    consensus_vulns.append(finding)       # Tier 1 — actionable
+else:
+    unvalidated_swc_gaps.append(finding)  # Tier 2 — triage, vẫn report
+```
+
+### 4.3 Thêm F1_L_fn vào eval pipeline (metric chính dài hạn)
+
+```python
+def _match_l_fn(bug: GTBug, findings: List[ToolFinding]) -> bool:
+    """Primary metric: SWC đúng class VÀ function overlap VÀ finding ở Tier 1."""
+    expected_swcs = L_TO_SWC.get(bug.label, frozenset())
+    expected_fns  = gt_functions.get((bug.contest_id, bug.bug_id), set())
+    if not expected_swcs:
+        return False
     for f in findings:
-        if f.source in ("consensus", "gap") and f.swc_ids & expected_swcs:
-            if not expected_fns:          # GT không có function info → fall back lenient
-                return True
-            if f.functions & expected_fns: # function overlap required
-                return True
+        if f.source != "consensus":           # chỉ Tier 1
+            continue
+        if not (f.swc_ids & expected_swcs):
+            continue
+        if not expected_fns:                  # GT không có function data → fallback lenient
+            return True
+        if f.functions & expected_fns:        # function overlap
+            return True
     return False
 ```
 
-Report song song cả 2 metrics để có full picture:
+Output eval trong giai đoạn chuyển tiếp (cả 2 dòng để verify fix):
 ```
-L F1 (class-level):    0.857  ← khả năng detect pattern
-L F1 (fn-level):       0.xxx  ← khả năng localize bug
-```
-
-### 4.2 Cải thiện tool: localize SWC-101 instances
-
-**Giải pháp ngắn hạn — Prompt engineering:**
-
-Thêm instruction vào `stage1_instruction`:
-```
-For SWC-101 findings, you MUST enumerate each explicit cast operation separately:
-- List each function containing uint256→uint128, int256→int128 (or similar) casts
-- For each: state whether overflow/underflow is possible given the value range
-- Do NOT merge all cast issues into one generic finding
+F1_L_fn    (primary):    0.xxx  ← SWC đúng + function đúng + exploit path [METRIC CHÍNH]
+F1_L_class (diagnostic): 0.857  ← chỉ cần SWC đúng [bỏ sau khi hai metric hội tụ]
 ```
 
-**Giải pháp dài hạn — Static analysis pre-pass:**
+Khi `|F1_L_class - F1_L_fn| < 0.05` ổn định qua 2–3 contest → bỏ `F1_L_class` khỏi output.
 
-Trước khi chạy LLM agents, dùng regex/AST scan để enumerate tất cả explicit cast operations:
-```python
-CAST_PATTERN = re.compile(
-    r'(?:uint(?:8|16|32|64|128|160)|int(?:8|16|32|64|128))\s*\(\s*\w+\s*\)',
-)
-# Map each match → function name → inject vào context
-```
+### 4.4 Cập nhật report format — phân biệt 2 tier rõ trong output
 
-Kết quả inject vào `contract_summary` như một section riêng:
-```
-EXPLICIT CAST OPERATIONS (potential SWC-101):
-  burn(): int256(liquidityDelta) at line 234
-  mint(): uint128(amount) at line 189
-  _getAmountsForLiquidity(): uint128(amount0) at line 312
-```
+Trong `audit_report.md`, Tier 2 findings phải được hiển thị khác biệt:
 
-Agents nhận context này sẽ có đủ thông tin để produce function-level findings.
-
-### 4.3 Fix manifest heuristic
-
-Manifest lỗi (`primary=so`) làm focus directive trỏ sai contract → agents không audit sâu vào `ConcentratedLiquidityPool`. Cần fix `_compute_manifest()` để handle trường hợp contest có nhiều file nhỏ, đặc biệt khi primary contract nằm trong subdirectory sâu.
-
-### 4.4 Nhận thức khi báo cáo kết quả
-
-Trong các báo cáo đánh giá, luôn kèm theo disclaimer:
-
-> *"L-track F1 sử dụng class-level lenient matching — 1 finding với đúng SWC ID đủ để match tất cả GT bugs cùng class. Metric này đo khả năng nhận diện vulnerability pattern, không đo khả năng localize từng bug instance. Function-level F1 (stricter) sẽ thấp hơn đáng kể."*
+```markdown
+## CONFIRMED VULNERABILITIES (Tier 1 — Actionable)
+[HIGH] SWC-107: Cross-Function Reentrancy | flashSwap() | Exploit: ...
 
 ---
 
-## 5. Tóm tắt
+## SUSPECTED PATTERNS (Tier 2 — Triage Signal)
+> Các pattern dưới đây được nhận diện ở lớp lỗi nhưng chưa có exploit path
+> cụ thể. Auditor nên kiểm tra thủ công các function liên quan.
 
-| Điểm | Nội dung |
+[MEDIUM] SWC-101: Possible unsafe explicit casting — check all uint256→uint128
+conversions. Confidence: 0.49. No specific function confirmed.
+```
+
+---
+
+## 5. Tác động dự kiến
+
+| Metric | Hiện tại | Sau fix |
+|---|---|---|
+| consensus_vulns count | Mix có/không path | Chỉ có path → ít hơn, chất hơn |
+| unvalidated_swc_gaps | Ít | Hấp thụ hints → nhiều hơn |
+| F1_L_class | Không đổi (cả 2 tier count) | Giữ nguyên |
+| F1_L_fn | Không đo | Có thể đo, phản ánh thực tế |
+| Report value | Hint lẫn với findings | Tier 1 = actionable, Tier 2 = triage |
+| FP trong consensus | Cao (hint vào tier 1) | Giảm (hint bị route sang tier 2) |
+
+---
+
+## 6. Thứ tự triển khai
+
+| Bước | Nội dung | Ghi chú |
+|---|---|---|
+| **1** | Enforce `affected_functions` trong Stage 1 + Stage 2 prompt | Fix root cause — không đổi kiến trúc |
+| **2** | Thêm `_backfill_functions()` + `_has_exploit_path()` gate vào consensus engine | Safety net + route 2 tier |
+| **3** | Cập nhật report format — phân biệt Tier 1 / Tier 2 | Output rõ ràng cho auditor |
+| **4** | Thêm F1_L_fn vào eval pipeline | Đo hiệu quả fix |
+| **5** | Củng cố manifest/focus (G-RC-2) | Giảm attention dilution → tăng chất Tier 1 |
+
+Bước 1+2+3 là một cụm triển khai cùng lúc. Bước 4 độc lập. Bước 5 dài hạn.
+
+---
+
+## 7. Nguyên tắc an toàn khi triển khai
+
+| Nguyên tắc | Chi tiết |
 |---|---|
-| **Vấn đề** | L F1 = 0.857 nhưng tool chỉ có 1 generic hint, không actionable |
-| **Root cause chính** | Eval framework lenient: 1 SWC match = N TP nếu tất cả GT bugs cùng class |
-| **Root cause phụ** | Tool không localize được do attention dilution + manifest sai + SWC-101 khó trace trong flattened file |
-| **Giải pháp eval** | Thêm function-level F1 metric chạy song song |
-| **Giải pháp tool** | Static cast enumeration pre-pass + prompt yêu cầu enumerate từng instance |
-| **Ưu tiên** | Fix eval metric trước (độ chính xác đánh giá) → rồi mới cải thiện tool |
+| **Class-level là tạm thời** | In song song trong giai đoạn chuyển tiếp để verify fix, sau đó bỏ |
+| **Fallback khi GT thiếu function data** | Nếu `gt_functions[bug_id]` rỗng: không buộc strict, giữ hành vi cũ cho bug đó |
+| **Tier 2 không bị xóa** | Hint vào Tier 2 vẫn xuất hiện trong report — không suppress, chỉ đánh dấu khác |
+| **Manifest có điều kiện** | Chỉ inject focus directive khi `confidence(manifest) >= ngưỡng` hoặc user override |
+| **Prompt có trần finding** | Tối đa N findings riêng cùng lớp SWC mỗi round — tránh flood consensus |
+| **A/B trước khi bật global** | Test prompt mới trên 1–2 contest trước khi deploy toàn bộ |
+
+---
+
+## 8. Tóm tắt
+
+| Mục | Quyết định |
+|---|---|
+| **Metric dài hạn** | `F1_L_fn` duy nhất — SWC đúng + function đúng + exploit path (Tier 1 only) |
+| **Class-level F1** | Bỏ sau khi fix ổn định; giữ tạm làm diagnostic trong giai đoạn chuyển tiếp |
+| **Điều kiện bỏ class-level** | `\|F1_L_class − F1_L_fn\| < 0.05` ổn định qua 2–3 contest |
+| **Tier 1 (consensus_vulns)** | Bắt buộc: function + exploit path + impact → actionable |
+| **Tier 2 (unvalidated_swc_gaps)** | Hint không có path — vẫn report như triage signal, không tính vào metric chính |
+| **Xung đột 2 mong muốn?** | Không — Tier 1 = actionable, Tier 2 = triage, mỗi tier phục vụ một mục đích |
+| **Root cause thực sự** | Agents biết function nhưng không điền `affected_functions` — structured output compliance, không phải capability |
+| **Fix ưu tiên cao nhất** | Prompt enforcement Stage 1+2 + `_backfill_functions()` safety net trong consensus engine |
