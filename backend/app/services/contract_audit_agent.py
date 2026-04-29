@@ -474,7 +474,7 @@ class _ContractToolContext:
             return "No consensus vulnerabilities found."
         lines = [f"Top {len(top)} vulnerabilities by confidence:"]
         for v in top:
-            swc_ids = ", ".join(v.mitre_techniques) if v.mitre_techniques else "unmapped"
+            swc_ids = ", ".join(v.swc_ids) if v.swc_ids else "unmapped"
             lines.append(
                 f"\n[{v.severity.upper()}] {v.title}"
                 f"\n  Confidence: {v.confidence_score:.2f} "
@@ -492,7 +492,7 @@ class _ContractToolContext:
             return "No critical or high severity vulnerabilities found."
         lines = [f"Critical/High findings ({len(critical)} total):"]
         for v in critical:
-            swc = ", ".join(v.mitre_techniques) if v.mitre_techniques else "?"
+            swc = ", ".join(v.swc_ids) if v.swc_ids else "?"
             lines.append(
                 f"\n[{v.severity.upper()}][{swc}] {v.title} — confidence {v.confidence_score:.2f}"
                 f"\n  {v.description[:200]}"
@@ -610,7 +610,7 @@ class _ContractToolContext:
             if v.recommendations:
                 patches.append({
                     "title": v.title,
-                    "swc_id": v.mitre_techniques[0] if v.mitre_techniques else "?",
+                    "swc_id": v.swc_ids[0] if v.swc_ids else "?",
                     "severity": v.severity,
                     "affected_functions": v.affected_assets,
                     "patch": "; ".join(v.recommendations[:2]),
@@ -677,7 +677,7 @@ class _ContractToolContext:
 
         defi_vulns = [
             v for v in self.vulns
-            if any(m in defi_patterns for m in v.mitre_techniques)
+            if any(m in defi_patterns for m in v.swc_ids)
             or "defi" in v.supporting_groups
         ]
 

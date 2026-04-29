@@ -293,13 +293,12 @@ def _extract_found(report_result: dict, session_result: dict,
 
     # Strict: consensus_vulns
     for vuln in report_result.get("consensus_vulns", []):
-        for swc in vuln.get("mitre_techniques", []):
+        for swc in vuln.get("swc_ids", []):
             norm = _normalise_swc(swc)
             if norm in search:
                 strict.add(norm)
-        # Include mitre_techniques text in keyword search (catches non-standard tags like "Unprotected Ether Withdrawal")
-        mt_text = " ".join(vuln.get("mitre_techniques", []))
-        text = f"{vuln.get('title','')} {vuln.get('description','')} {mt_text}".upper()
+        swc_text = " ".join(vuln.get("swc_ids", []))
+        text = f"{vuln.get('title','')} {vuln.get('description','')} {swc_text}".upper()
         strict |= _resolve_swc(text, search)
     strict = _normalize(strict)
 

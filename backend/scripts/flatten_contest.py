@@ -13,11 +13,14 @@ Algorithm:
   2. Separate: local files vs external npm imports (@openzeppelin, @uniswap, ...)
   3. Build dependency graph from local import statements
   4. Topological sort → include files in correct order (deps before dependents)
-  5. Concatenate, stripping:
-     - Duplicate pragma solidity (keep first only)
-     - SPDX lines (keep one per file as comment, not directive)
-     - Local import statements (file already inlined)
-     - External import statements → replace with brief comment stub
+  5. Classify files as in-scope / out-of-scope via 3-tier strategy:
+     Tier 1 — Import graph: files transitively imported by primary contract
+     Tier 2 — README hints: parse "scope" / "focused on" patterns
+     Tier 3 — Conservative: all files in-scope (no filtering)
+  6. Concatenate:
+     - In-scope files: full content (deduped pragma/SPDX/imports)
+     - Out-of-scope files: function-signature stubs only (bodies replaced with {...})
+     - Scope header injected at top for agent context
 
 Result: single self-contained .sol string for LLM audit.
 Max size enforced: if total > max_chars, drop interface-only files first.
@@ -241,6 +244,133 @@ def _strip_sol_comments(src: str) -> str:
     return src
 
 
+def _get_reachable_set(start_key: str, graph: Dict[str, List[str]]) -> Set[str]:
+    """BFS: return all file keys transitively imported by start_key (inclusive)."""
+    visited: Set[str] = {start_key}
+    queue = [start_key]
+    while queue:
+        node = queue.pop(0)
+        for dep in graph.get(node, []):
+            if dep not in visited:
+                visited.add(dep)
+                queue.append(dep)
+    return visited
+
+
+def _extract_scope_from_readme(contest_dir: str) -> List[str]:
+    """
+    Parse README.md for explicit scope hints.
+    Returns list of path fragments (e.g. ["concentrated", "concentratedPool"]).
+    """
+    readme = Path(contest_dir) / "README.md"
+    if not readme.exists():
+        return []
+    text = _read_safe(readme)
+    hints: List[str] = []
+    # "focused on X" → extract X
+    m = re.search(r'focused\s+on\s+([A-Za-z0-9 /,_-]+)', text, re.IGNORECASE)
+    if m:
+        hints.append(m.group(1).strip().split()[0])  # first word of match
+    # "contracts/X" path fragments in scope sections
+    for m in re.finditer(r'contracts/([A-Za-z0-9_-]+)', text):
+        frag = m.group(1)
+        if frag not in hints:
+            hints.append(frag)
+    return hints
+
+
+def _compress_to_stub(src: str) -> str:
+    """
+    Replace function/modifier/constructor bodies with { ... }, keeping all signatures.
+    Preserves: pragma, contract/library/interface headers, state variables,
+               function signatures, events, errors, structs, enums.
+
+    Uses brace-depth tracking (depth 0 = top-level, 1 = inside contract,
+    >=2 = inside a function body). Lines at depth >=2 are skipped.
+    """
+    lines = src.split('\n')
+    result: List[str] = []
+    depth = 0
+
+    for line in lines:
+        # Skip single-line // comments (keep NatSpec /// for signatures)
+        stripped = line.strip()
+        if stripped.startswith('//') and not stripped.startswith('///'):
+            depth += line.count('{') - line.count('}')
+            continue
+
+        opens = line.count('{')
+        closes = line.count('}')
+        new_depth = depth + opens - closes
+
+        if depth >= 2:
+            # Inside a function body — skip entirely
+            depth = new_depth
+            continue
+
+        if depth == 1 and opens > closes:
+            # Line opens a function/modifier body (net +1 brace at contract level)
+            # Truncate at last `{` and add stub marker
+            sig = line[:line.rfind('{')].rstrip()
+            if sig.strip():
+                result.append(sig + ' { ... }')
+            depth = new_depth
+            continue
+
+        result.append(line)
+        depth = new_depth
+
+    return '\n'.join(result)
+
+
+def _classify_files(
+    order: List[str],
+    graph: Dict[str, List[str]],
+    manifest: dict,
+    contest_dir: str,
+) -> Dict[str, object]:
+    """
+    Classify files as in-scope or out-of-scope using 3-tier fallback:
+      Tier 1 — Import graph reachability from manifest.primary_key
+      Tier 2 — README scope hints (folder/keyword matching)
+      Tier 3 — Conservative: all files in-scope
+
+    Returns dict with keys:
+      in_scope:  List[str]  — file keys to include in full
+      out_scope: List[str]  — file keys to compress to stubs
+      method:    str        — which tier was used
+    """
+    base = Path(contest_dir)
+
+    # Tier 1: import graph from primary
+    primary_key = manifest.get("primary_key")
+    if primary_key and primary_key in graph:
+        reachable = _get_reachable_set(primary_key, graph)
+        out_scope = [k for k in order if k not in reachable]
+        if out_scope:
+            return {
+                "in_scope":  [k for k in order if k in reachable],
+                "out_scope": out_scope,
+                "method":    "import_graph",
+            }
+
+    # Tier 2: README scope hints
+    hints = _extract_scope_from_readme(contest_dir)
+    if hints:
+        in_s, out_s = [], []
+        for k in order:
+            rel = str(Path(k).relative_to(base)).lower()
+            if any(h.lower() in rel for h in hints):
+                in_s.append(k)
+            else:
+                out_s.append(k)
+        if out_s:
+            return {"in_scope": in_s, "out_scope": out_s, "method": "readme"}
+
+    # Tier 3: conservative — no filtering
+    return {"in_scope": order, "out_scope": [], "method": "conservative"}
+
+
 def _is_interface_only(src: str) -> bool:
     """True if file defines only interfaces (no contract/library bodies)."""
     stripped = _strip_sol_comments(src)
@@ -309,11 +439,13 @@ def _compute_manifest(
     secondary_keys = sorted_keys[1:4]
 
     return {
-        "primary":        contract_names.get(primary_key),
-        "primary_file":   str(Path(primary_key).relative_to(base)),
-        "secondary":      [contract_names.get(k) for k in secondary_keys],
+        "primary":         contract_names.get(primary_key),
+        "primary_file":    str(Path(primary_key).relative_to(base)),
+        "primary_key":     primary_key,           # absolute path — used by _classify_files
+        "secondary":       [contract_names.get(k) for k in secondary_keys],
+        "secondary_keys":  secondary_keys,
         "total_contracts": len(scores),
-        "total_chars":    sum(len(sources.get(k, "")) for k in order),
+        "total_chars":     sum(len(sources.get(k, "")) for k in order),
     }
 
 
@@ -373,28 +505,79 @@ def flatten_contest_dir(
             print(f"  Still too large — dropping {dropped} more files to fit {max_chars//1000}K limit")
         order = trimmed_order
 
-    # Build output
+    # Always compute manifest (needed for scope classification)
+    manifest = _compute_manifest(order, sources, graph, contest_dir)
+
+    # Classify files: in-scope (full) vs out-of-scope (stubs)
+    classification = _classify_files(order, graph, manifest, contest_dir)
+    in_scope_set  = set(classification["in_scope"])
+    out_scope_set = set(classification["out_scope"])
+    cls_method    = classification["method"]
+
+    # Collect out-of-scope contract names for manifest + prompt
+    base = Path(contest_dir)
+    out_scope_names: List[str] = []
+    for k in classification["out_scope"]:
+        src = sources.get(k, "")
+        stripped_src = _strip_sol_comments(src)
+        m = _CONTRACT_RE.search(stripped_src)
+        if m:
+            out_scope_names.append(m.group(0).split()[-1])
+    manifest["out_scope_contracts"] = out_scope_names
+    manifest["scope_method"]        = cls_method
+
+    if verbose and out_scope_set:
+        print(f"  Scope ({cls_method}): {len(in_scope_set)} in-scope, "
+              f"{len(out_scope_set)} out-of-scope → stubs")
+
+    # Build scope header injected at top (agents see this first)
+    primary   = manifest.get("primary", "unknown")
+    secondary = [s for s in manifest.get("secondary", []) if s]
+    scope_header_lines = [
+        f"// ═══ Web3Bugs Contest {Path(contest_dir).name} — Flattened Source ═══",
+        f"// AUDIT SCOPE: {primary}" + (f", {', '.join(secondary)}" if secondary else ""),
+    ]
+    if out_scope_names:
+        scope_header_lines.append(
+            f"// OUT-OF-SCOPE (stubs only — function bodies omitted): "
+            f"{', '.join(out_scope_names[:8])}"
+            + (" ..." if len(out_scope_names) > 8 else "")
+        )
+    scope_header_lines.append("")
+    parts = ["\n".join(scope_header_lines)]
+
+    # In-scope files: full content
     pragma_emitted = False
     seen_externals: Set[str] = set()
-    contest_name = Path(contest_dir).name
-    parts = [f"// ═══ Web3Bugs Contest {contest_name} — Flattened Source ═══\n"]
 
     for key in order:
-        if key not in sources:
+        if key not in sources or key not in in_scope_set:
             continue
         src = sources[key]
         if not src.strip():
             continue
 
-        rel = str(Path(key).relative_to(Path(contest_dir)))
+        rel = str(Path(key).relative_to(base))
         parts.append(f"\n// ─── {rel} ───\n")
 
         keep_pragma = not pragma_emitted
         if keep_pragma and _PRAGMA_RE.search(src):
             pragma_emitted = True
 
-        stripped = _strip_file(src, keep_pragma=keep_pragma, seen_externals=seen_externals)
-        parts.append(stripped)
+        parts.append(_strip_file(src, keep_pragma=keep_pragma, seen_externals=seen_externals))
+
+    # Out-of-scope files: compressed stubs
+    for key in order:
+        if key not in sources or key not in out_scope_set:
+            continue
+        src = sources[key]
+        if not src.strip():
+            continue
+
+        rel = str(Path(key).relative_to(base))
+        parts.append(f"\n// ─── {rel} [OUT-OF-SCOPE — signatures only] ───\n")
+        stub = _compress_to_stub(src)
+        parts.append(_strip_file(stub, keep_pragma=False, seen_externals=seen_externals))
 
     result = "\n".join(parts)
 
@@ -402,7 +585,6 @@ def flatten_contest_dir(
         print(f"  Flattened: {len(result):,} chars ({len(result)//1000}K) from {len(order)} files")
 
     if emit_manifest:
-        manifest = _compute_manifest(order, sources, graph, contest_dir)
         if verbose:
             print(f"  Manifest: primary={manifest['primary']}, secondary={manifest['secondary']}")
         return result, manifest

@@ -225,7 +225,7 @@ class ConsensusEngine:
             self._tier2_demoted = [
                 {
                     "swc_category":       "tier2_demoted",
-                    "swc_id":             (v.mitre_techniques or [""])[0],
+                    "swc_id":             (v.swc_ids or [""])[0],
                     "title":              v.title,
                     "description":        v.description,
                     "severity":           v.severity,
@@ -542,13 +542,11 @@ class ConsensusEngine:
         all_evidence: List[str] = []
         all_recs: List[str] = []
         all_source_ids: List[str] = []
-        all_mitre: List[str] = []
+        all_swc_ids: List[str] = []
 
         for f in cluster:
-            # affected_functions (contract) or affected_assets (network)
             all_assets.extend(f.get("affected_functions") or f.get("affected_assets") or [])
             all_evidence.extend(f.get("evidence") or [])
-            # patch_suggestion is a string; recommendations is a list — handle both
             _patch = f.get("recommendations") or f.get("patch_suggestion")
             if isinstance(_patch, list):
                 all_recs.extend(_patch)
@@ -556,17 +554,17 @@ class ConsensusEngine:
                 all_recs.append(_patch)
             if f.get("finding_id"):
                 all_source_ids.append(f["finding_id"])
-            # swc_id (contract) or mitre_techniques (network)
-            all_mitre.extend(f.get("mitre_techniques") or [])
+            # collect SWC IDs from individual expert findings
+            all_swc_ids.extend(f.get("swc_ids") or f.get("mitre_techniques") or [])
             swc_id = f.get("swc_id")
-            if swc_id and swc_id not in all_mitre:
-                all_mitre.append(swc_id)
+            if swc_id and swc_id not in all_swc_ids:
+                all_swc_ids.append(swc_id)
 
         # Deduplicate
-        all_assets  = list(dict.fromkeys(all_assets))
-        all_evidence= list(dict.fromkeys(all_evidence))
-        all_recs    = list(dict.fromkeys(all_recs))
-        all_mitre   = list(dict.fromkeys(all_mitre))
+        all_assets   = list(dict.fromkeys(all_assets))
+        all_evidence = list(dict.fromkeys(all_evidence))
+        all_recs     = list(dict.fromkeys(all_recs))
+        all_swc_ids  = list(dict.fromkeys(all_swc_ids))
 
         return ConsensusVulnerability(
             vuln_id=f"vuln_{uuid.uuid4().hex[:8]}",
@@ -582,7 +580,7 @@ class ConsensusEngine:
             supporting_attackers=list(set(supporting_attackers)),
             dismissing_attackers=list(set(dismissing_attackers)),
             recommendations=all_recs,
-            mitre_techniques=all_mitre,
+            swc_ids=all_swc_ids,
             source_finding_ids=all_source_ids,
             attacker_finding_ids=[],
             needs_review=(len(all_corr) == 0),
@@ -671,7 +669,7 @@ class ConsensusEngine:
             supporting_attackers=[af.get("attacker_profile", "unknown")] + agreed_by,
             dismissing_attackers=[],
             recommendations=[],
-            mitre_techniques=[],
+            swc_ids=[],
             source_finding_ids=[],
             attacker_finding_ids=[af.get("finding_id", "")],
             is_attacker_only=True,

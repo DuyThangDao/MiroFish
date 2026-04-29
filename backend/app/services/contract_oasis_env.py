@@ -1129,22 +1129,39 @@ class ContractAuditEnvBuilder:
         self.manifest = manifest
 
     def _build_focus_directive(self) -> str:
-        """Inject focus directive when manifest has a primary contract and file is large."""
+        """Inject focus directive when manifest identifies a primary contract."""
         if not self.manifest:
             return ""
         primary = self.manifest.get("primary")
-        secondary = self.manifest.get("secondary", [])
-        total_chars = self.manifest.get("total_chars", 0)
-        if not primary or total_chars < 100_000:
+        if not primary:
             return ""
-        sec_str = ", ".join(s for s in secondary if s) or "none"
-        return (
-            f"\n⚠️ MULTI-CONTRACT AUDIT — Phân bổ attention:\n"
-            f"  PRIMARY TARGET (≥50% findings phải về): {primary}\n"
-            f"  Secondary: {sec_str}\n"
-            f"  KHÔNG để infrastructure/utility patterns chiếm đa số findings.\n"
-            f"  Infrastructure bugs vẫn report nhưng KHÔNG ưu tiên hơn {primary}.\n"
-        )
+        secondary     = [s for s in self.manifest.get("secondary", []) if s]
+        out_of_scope  = self.manifest.get("out_scope_contracts", [])
+        scope_method  = self.manifest.get("scope_method", "")
+
+        sec_str = ", ".join(secondary) if secondary else "none"
+
+        lines = [
+            f"\n⚠️ AUDIT SCOPE — Tập trung đúng contract:",
+            f"  IN-SCOPE PRIMARY  : {primary}",
+            f"  IN-SCOPE SECONDARY: {sec_str}",
+        ]
+
+        if out_of_scope:
+            oos_str = ", ".join(out_of_scope[:6]) + (" ..." if len(out_of_scope) > 6 else "")
+            lines += [
+                f"  OUT-OF-SCOPE (stub only): {oos_str}",
+                f"  → Các contracts OUT-OF-SCOPE chỉ có function signatures, KHÔNG có body.",
+                f"  → KHÔNG report findings cho OUT-OF-SCOPE contracts trừ khi chúng",
+                f"    ảnh hưởng trực tiếp đến {primary}.",
+            ]
+
+        lines += [
+            f"  ≥60% findings PHẢI về {primary} hoặc direct dependencies của nó.",
+            f"  Infrastructure/utility bugs chỉ report khi exploitable từ {primary}.",
+        ]
+
+        return "\n".join(lines) + "\n"
 
     def build_config(
         self,

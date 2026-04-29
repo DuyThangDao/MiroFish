@@ -27,6 +27,7 @@ import json
 import logging
 import os
 import sys
+import csv
 import re
 import time
 from dataclasses import asdict
@@ -418,6 +419,34 @@ def run_audit(
         )
         report_result = _poll_task(task_manager, task_id, "Report Gen", timeout=1800)
 
+        # ── Step 5b: PoC Verification (post-consensus) ────────────────────────
+        logger.info("\n[STEP 4b/4] PoC Verification Stage...")
+        try:
+            from app.services.poc_verification import PoCVerificationStage, PoCConfig
+            poc_stage = PoCVerificationStage(
+                llm_client=orchestrator.llm,
+                config=PoCConfig(enabled=True),
+            )
+            _consensus_vulns = report_result.get("consensus_vulns", [])
+            _gap_findings    = report_result.get("unvalidated_swc_gaps", [])
+            _contest_dir     = sol_path if (sol_path and os.path.isdir(sol_path)) else None
+
+            _upd_consensus, _upd_gaps = poc_stage.run(
+                consensus_vulns=_consensus_vulns,
+                gap_findings=_gap_findings,
+                flat_source=source_code,
+                contest_dir=_contest_dir,
+            )
+            if len(_upd_consensus) > len(_consensus_vulns):
+                upgraded = len(_upd_consensus) - len(_consensus_vulns)
+                logger.info(f"  PoC: {upgraded} finding(s) upgraded Tier-2 → Tier-1")
+                report_result["consensus_vulns"]    = _upd_consensus
+                report_result["unvalidated_swc_gaps"] = _upd_gaps
+            else:
+                logger.info("  PoC: no upgrades")
+        except Exception as _poc_err:
+            logger.warning(f"  PoC stage skipped (non-fatal): {_poc_err}")
+
         # Inject timing + eval metrics into stats before saving
         _duration = int((_dt.now() - _run_start).total_seconds())
         _stats_update = {
@@ -506,10 +535,82 @@ _CATEGORY_TO_SWC = {
 }
 
 def _lookup_ground_truth(sol_path: str) -> List[str]:
-    """Auto-detect expected SWCs from SmartBugs vulnerabilities.json given .sol path."""
-    sol_abs = os.path.abspath(sol_path)
-    # Walk up to find vulnerabilities.json in dataset root
-    check_dir = os.path.dirname(sol_abs)
+    """
+    Auto-detect expected SWC IDs from the dataset ground truth.
+
+    Supports two formats (tried in order):
+      1. web3bugs bugs.csv: walk up from sol_path looking for results/bugs.csv;
+         extract contest_id from the path segment matching a numeric directory
+         under "contracts/"; return SWC IDs for L* bugs of that contest.
+      2. SmartBugs vulnerabilities.json: walk up looking for vulnerabilities.json
+         and match the .sol filename.
+    """
+    # web3bugs L-label → SWC mapping (mirrors evaluate_web3bugs.py L_TO_SWC)
+    _L_TO_SWC = {
+        "L1": {"SWC-107"},
+        "L2": {"SWC-101"},
+        "L3": {"SWC-109"},
+        "L4": {"SWC-128"},
+        "L5": {"SWC-124"},
+        "L6": {"SWC-107", "SWC-131"},
+        "L7": {"SWC-101"},
+        "L8": {"SWC-104"},
+        "L9": {"SWC-109"},
+        "LA": {"SWC-121", "SWC-122"},
+        "LB": {"SWC-115"},
+    }
+
+    sol_abs = Path(sol_path).resolve()
+
+    # ── Strategy 1: web3bugs bugs.csv ─────────────────────────────────────────
+    # Detect contest_id from path (look for numeric dir under "contracts/")
+    contest_id: Optional[int] = None
+    parts = sol_abs.parts
+    for i, part in enumerate(parts):
+        if part == "contracts" and i + 1 < len(parts) and parts[i + 1].isdigit():
+            contest_id = int(parts[i + 1])
+            break
+    # Also accept a numeric dir anywhere in the path as fallback
+    if contest_id is None:
+        for part in reversed(parts[:-1]):
+            if part.isdigit():
+                contest_id = int(part)
+                break
+
+    if contest_id is not None:
+        # Walk up to find results/bugs.csv (may be sibling of "contracts/" dir)
+        check = sol_abs.parent
+        for _ in range(8):
+            bugs_csv = check / "results" / "bugs.csv"
+            if bugs_csv.exists():
+                try:
+                    swcs: Set[str] = set()
+                    with open(bugs_csv, newline="", encoding="utf-8") as f:
+                        reader = csv.DictReader(f)
+                        for row in reader:
+                            # CSV columns may have leading spaces; extra commas produce None key
+                            norm = {
+                                k.strip(): (v.strip() if v else "")
+                                for k, v in row.items()
+                                if k is not None
+                            }
+                            cid_str = norm.get("Contest ID", "")
+                            label   = norm.get("Bug Label",  "")
+                            if cid_str.isdigit() and int(cid_str) == contest_id:
+                                mapped = _L_TO_SWC.get(label)
+                                if mapped:
+                                    swcs.update(mapped)
+                    if swcs:
+                        return sorted(swcs)
+                except Exception:
+                    pass
+                break
+            if check.parent == check:
+                break
+            check = check.parent
+
+    # ── Strategy 2: SmartBugs vulnerabilities.json ────────────────────────────
+    check_dir = str(sol_abs.parent)
     for _ in range(5):
         candidate = os.path.join(check_dir, "vulnerabilities.json")
         if os.path.exists(candidate):
@@ -522,16 +623,16 @@ def _lookup_ground_truth(sol_path: str) -> List[str]:
             db = json.load(f)
     except Exception:
         return []
-    sol_name = os.path.basename(sol_abs)
+    sol_name = sol_abs.name
     for entry in db:
         if entry.get("name") == sol_name or entry.get("name") == sol_name.replace(".sol", ""):
-            swcs = set()
+            swcs_s: Set[str] = set()
             for v in entry.get("vulnerabilities", []):
                 cat = v.get("category", "")
                 swc = _CATEGORY_TO_SWC.get(cat)
                 if swc:
-                    swcs.add(swc)
-            return sorted(swcs)
+                    swcs_s.add(swc)
+            return sorted(swcs_s)
     return []
 
 
@@ -545,7 +646,7 @@ def _compute_eval_metrics(
         return {}
     detected: Set[str] = set()
     for v in consensus_vulns:
-        for swc in v.get("mitre_techniques", []):
+        for swc in v.get("swc_ids", []):
             detected.add(swc)
     for gap in (unvalidated_gaps or []):
         swc = gap.get("swc_id", "")

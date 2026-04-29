@@ -190,8 +190,7 @@ def _extract_found(
 
     # ── 1. Consensus vulns (strict) ──────────────────────────────────────────
     for vuln in report_result.get("consensus_vulns", []):
-        # mitre_techniques stores SWC IDs in contract mode
-        for swc in vuln.get("mitre_techniques", []):
+        for swc in vuln.get("swc_ids", []):
             norm = _normalise_swc(swc)
             if norm in {_normalise_swc(e) for e in expected_swcs}:
                 strict_swcs.add(norm)

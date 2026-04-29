@@ -349,7 +349,7 @@ class _ToolContext:
                 f"\n  Affected: {', '.join(v.affected_assets[:3]) or 'unspecified'}"
                 f"\n  Groups: {', '.join(v.supporting_groups)}"
                 f"\n  Attackers confirm: {', '.join(v.supporting_attackers) or 'none'}"
-                f"\n  MITRE: {', '.join(v.mitre_techniques) or 'unmapped'}"
+                f"\n  SWC: {', '.join(v.swc_ids) or 'unmapped'}"
             )
         return "\n".join(lines)
 
@@ -464,17 +464,17 @@ class _ToolContext:
         return "\n".join(lines)
 
     def _get_mitre_mapping(self, args: Dict) -> str:
-        mitre_index: Dict[str, List[str]] = {}
+        swc_index: Dict[str, List[str]] = {}
         for v in self.vulns:
-            for tid in v.mitre_techniques:
-                if tid not in mitre_index:
-                    mitre_index[tid] = []
-                mitre_index[tid].append(v.title)
-        if not mitre_index:
-            return "No MITRE technique mappings found (agents did not include technique IDs)."
-        lines = ["MITRE ATT&CK technique mapping:"]
-        for tid, titles in sorted(mitre_index.items()):
-            lines.append(f"  {tid}: {', '.join(titles[:3])}")
+            for swc in v.swc_ids:
+                if swc not in swc_index:
+                    swc_index[swc] = []
+                swc_index[swc].append(v.title)
+        if not swc_index:
+            return "No SWC mappings found (agents did not include SWC IDs)."
+        lines = ["SWC mapping:"]
+        for swc, titles in sorted(swc_index.items()):
+            lines.append(f"  {swc}: {', '.join(titles[:3])}")
         return "\n".join(lines)
 
     def _get_confidence_distribution(self, args: Dict) -> str:

@@ -213,7 +213,7 @@ def extract_findings(
     findings: List[ToolFinding] = []
 
     for cv in report.get("consensus_vulns", []):
-        swcs = set(cv.get("mitre_techniques", []))
+        swcs = set(cv.get("swc_ids", []))
         fns  = _norm_fn_set(cv.get("affected_assets", []))
         derived: Optional[str] = None
         if policy_b:

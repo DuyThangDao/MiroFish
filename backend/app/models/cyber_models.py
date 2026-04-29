@@ -154,7 +154,7 @@ class ConsensusVulnerability:
     dismissing_attackers:  List[str]    # attacker profiles dismiss
 
     recommendations:       List[str]
-    mitre_techniques:      List[str]
+    swc_ids:               List[str]
 
     # Source findings
     source_finding_ids:    List[str]    # ExpertFinding IDs hợp nhất thành vuln này
