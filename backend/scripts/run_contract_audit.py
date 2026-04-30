@@ -298,9 +298,14 @@ def run_audit(
     kg_task_id = None
     try:
         # ── Step 1 + 2: Parse + Build KG ──────────────────────────────────────
+        # Use in_scope_source for KG if available (from flatten_contest_dir scope classification)
+        # so out-of-scope stubs don't pollute function/event indexing.
+        kg_source = (manifest or {}).get("in_scope_source") or source_code
         logger.info("\n[STEP 1/4] Parsing Solidity source + building Zep KG...")
+        if kg_source is not source_code:
+            logger.info(f"  KG: using in-scope-only source ({len(kg_source):,} chars vs {len(source_code):,} full)")
         kg_task_id = kg_builder.build_from_source_async(
-            source_code=source_code,
+            source_code=kg_source,
             graph_name=graph_name,
             contract_name=contract_name,
         )
@@ -326,7 +331,7 @@ def run_audit(
         # for "PROTOCOL INTENT" in summary before injecting to avoid duplication.
         logger.info("\n[STEP 1.1/4] Extracting protocol intent from NatSpec (S5)...")
         intent_result    = intent_extractor.extract(
-            source_code=source_code,
+            source_code=kg_source,
             context_summary=contract_summary,
             readme=readme_text,
         )
@@ -339,18 +344,28 @@ def run_audit(
         # Falls back gracefully if Slither not installed or compilation fails.
         logger.info("\n[STEP 1.3/4] Building data-flow dependency graph (Slither / 1b)...")
         slither_target = sol_path  # contest_dir takes priority if provided via --contest-dir
+        # Use manifest primary contract name so Slither targets the right .sol file
+        # (contest_name is the directory number e.g. "35", not the contract name)
+        slither_contract_name = (
+            manifest.get("primary", contract_name) if manifest else contract_name
+        )
         if slither_target:
+            logger.info(f"  Slither target contract: {slither_contract_name}")
             dep_summary = dep_graph.build_and_summarize(
                 source_path=slither_target,
-                contract_name=contract_name,
+                contract_name=slither_contract_name,
             )
             if dep_summary:
                 contract_summary += f"\n\n{dep_summary.text}"
-                logger.info(f"  Dep graph: {len(dep_summary.critical_vars)} critical vars")
+                logger.info(
+                    f"  Dep graph: {len(dep_summary.critical_vars)} critical vars, "
+                    f"primary={dep_summary.primary_contract}"
+                )
                 _save_json(output_dir, "dep_graph.json", {
-                    "critical_vars": dep_summary.critical_vars,
-                    "top_writers":   dep_summary.top_writers,
-                    "top_readers":   dep_summary.top_readers,
+                    "primary_contract": dep_summary.primary_contract,
+                    "critical_vars":    dep_summary.critical_vars,
+                    "top_writers":      dep_summary.top_writers,
+                    "top_readers":      dep_summary.top_readers,
                 })
             else:
                 logger.info("  Dep graph: skipped (Slither not available or compile error)")

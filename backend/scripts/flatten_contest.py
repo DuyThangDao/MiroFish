@@ -549,6 +549,7 @@ def flatten_contest_dir(
     # In-scope files: full content
     pragma_emitted = False
     seen_externals: Set[str] = set()
+    inscope_parts = list(parts)  # copy scope header
 
     for key in order:
         if key not in sources or key not in in_scope_set:
@@ -558,15 +559,20 @@ def flatten_contest_dir(
             continue
 
         rel = str(Path(key).relative_to(base))
-        parts.append(f"\n// ─── {rel} ───\n")
+        file_header = f"\n// ─── {rel} ───\n"
+        parts.append(file_header)
+        inscope_parts.append(file_header)
 
         keep_pragma = not pragma_emitted
         if keep_pragma and _PRAGMA_RE.search(src):
             pragma_emitted = True
 
-        parts.append(_strip_file(src, keep_pragma=keep_pragma, seen_externals=seen_externals))
+        stripped = _strip_file(src, keep_pragma=keep_pragma, seen_externals=seen_externals)
+        parts.append(stripped)
+        inscope_parts.append(stripped)
 
-    # Out-of-scope files: compressed stubs
+    # Out-of-scope files: compressed stubs (agents only — NOT in KG source)
+    seen_externals_stubs: Set[str] = set(seen_externals)
     for key in order:
         if key not in sources or key not in out_scope_set:
             continue
@@ -577,9 +583,11 @@ def flatten_contest_dir(
         rel = str(Path(key).relative_to(base))
         parts.append(f"\n// ─── {rel} [OUT-OF-SCOPE — signatures only] ───\n")
         stub = _compress_to_stub(src)
-        parts.append(_strip_file(stub, keep_pragma=False, seen_externals=seen_externals))
+        parts.append(_strip_file(stub, keep_pragma=False, seen_externals=seen_externals_stubs))
 
     result = "\n".join(parts)
+    # Store in_scope_source in manifest so callers can pass only in-scope code to KG builder
+    manifest["in_scope_source"] = "\n".join(inscope_parts)
 
     if verbose:
         print(f"  Flattened: {len(result):,} chars ({len(result)//1000}K) from {len(order)} files")

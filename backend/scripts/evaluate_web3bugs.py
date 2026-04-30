@@ -68,9 +68,17 @@ L_TO_SWC: Dict[str, FrozenSet[str]] = {
     "LB":  frozenset({"SWC-115"}),
 }
 
-# (contest_id, bug_id) → expected function names — populated as GT function data becomes available.
+# (contest_id, bug_id) → expected function names (lowercase, no parens — matches _norm_fn output).
 # Empty = no function-level GT for that bug → _match_l_fn() falls back to SWC-only match (lenient).
-GT_FUNCTIONS: Dict[Tuple[int, str], Set[str]] = {}
+GT_FUNCTIONS: Dict[Tuple[int, str], Set[str]] = {
+    # Contest 35 — ConcentratedLiquidityPool (SushiSwap Trident)
+    (35, "H-01"): {"burn"},                                    # unsafe cast in burn()
+    (35, "H-04"): {"mint"},                                    # overflow in mint()
+    (35, "H-05"): {"_getamountsforliquidity"},                 # typecasting in _getAmountsForLiquidity()
+    (35, "H-09"): {"rangefeegrowth"},                          # uint256 subtraction underflow in rangeFeeGrowth()
+    (35, "H-14"): {"rangefeegrowth", "rangesecondsinside"},    # unchecked math needed in both view fns
+    (35, "H-15"): {"constructor"},                             # initialPrice not validated in constructor
+}
 
 # SWC_TO_SEMANTIC imported from app.services.semantic_taxonomy (single source).
 
@@ -282,17 +290,6 @@ def find_latest_report(contest_results_dir: str) -> Optional[str]:
 # Matching logic
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _match_l(bug: GTBug, findings: List[ToolFinding]) -> bool:
-    """L-track class-level match (diagnostic): any finding in L-pool (consensus/gap) with SWC overlap."""
-    expected_swcs = L_TO_SWC.get(bug.label, frozenset())
-    if not expected_swcs:
-        return False
-    for f in findings:
-        if f.source in ("consensus", "gap") and f.swc_ids & expected_swcs:
-            return True
-    return False
-
-
 def _match_l_fn(bug: GTBug, findings: List[ToolFinding]) -> bool:
     """
     L-track fn-level match (primary): Tier-1 consensus finding with SWC match.
@@ -331,6 +328,10 @@ def _match_s(
     """
     expected_cats = S_TO_CATEGORIES.get(bug.label, frozenset())
     if not expected_cats:
+        # Fall back to parent label: "S6-4" → "S6", "S3-1" → "S3", etc.
+        parent = bug.label.split("-")[0]
+        expected_cats = S_TO_CATEGORIES.get(parent, frozenset())
+    if not expected_cats:
         return False
     expected_lower = {c.lower() for c in expected_cats}
     for f in findings:
@@ -366,14 +367,9 @@ class ContestResult(NamedTuple):
     gt_s: int       # |G_S| — S1–S6 bugs in scope
     gt_oos: int     # SE*/SC/O* — excluded from denominators
     # Finding pool sizes (denominator of precision)
-    n_l_pool: int        # consensus + gap findings (class-level pool)
-    n_l_tier1_pool: int  # consensus-only findings (fn-level / Tier-1 pool)
+    n_l_tier1_pool: int  # consensus-only findings (Tier-1 pool)
     n_s_pool: int        # semantic findings (+ Policy-B consensus findings)
-    # Track L — class-level (diagnostic during transition, drop when converged with fn)
-    tp_l: int
-    fp_l: int
-    fn_l: int
-    # Track L — fn-level (primary long-term metric, Tier-1 only)
+    # Track L — fn-level (primary metric, Tier-1 consensus only)
     tp_l_fn: int
     fp_l_fn: int
     fn_l_fn: int
@@ -396,31 +392,25 @@ def evaluate_contest(
     gt_s   = [b for b in gt_bugs if _label_type(b.label) == "S"]
     gt_oos = [b for b in gt_bugs if _label_type(b.label) in ("OOS", "O")]
 
-    # L-pool: consensus + gap findings (class-level); Tier-1 = consensus only (fn-level)
-    l_pool       = [f for f in findings if f.source in ("consensus", "gap")]
+    # Tier-1 = consensus-only findings (fn-level primary metric)
     l_tier1_pool = [f for f in findings if f.source == "consensus"]
     s_pool = [f for f in findings if _in_s_pool(f, policy_b, policy_gap)]
 
-    tp_l    = sum(1 for b in gt_l if _match_l(b, findings))
     tp_l_fn = sum(1 for b in gt_l if _match_l_fn(b, findings))
     tp_s    = sum(1 for b in gt_s if _match_s(b, findings, policy_b, policy_gap))
 
-    fn_l    = len(gt_l) - tp_l
     fn_l_fn = len(gt_l) - tp_l_fn
     fn_s    = len(gt_s) - tp_s
 
-    fp_l    = max(0, len(l_pool)       - tp_l)
     fp_l_fn = max(0, len(l_tier1_pool) - tp_l_fn)
     fp_s    = max(0, len(s_pool)       - tp_s)
 
     if verbose:
-        print(f"    ── Track L class (G_L={len(gt_l)}, L-pool={len(l_pool)}) ──")
-        for b in gt_l:
-            hit_cls = _match_l(b, findings)
-            hit_fn  = _match_l_fn(b, findings)
-            tag = f"{'✓' if hit_cls else '✗'}/{'✓' if hit_fn else '✗'}"
-            print(f"      [{tag}] {b.bug_id} ({b.label}) — {b.description[:70]}")
         pol = ("B" if policy_b else "A") + ("+gap" if policy_gap else "")
+        print(f"    ── Track L fn-level (G_L={len(gt_l)}, Tier-1 pool={len(l_tier1_pool)}) ──")
+        for b in gt_l:
+            hit_fn = _match_l_fn(b, findings)
+            print(f"      [{'✓' if hit_fn else '✗'}] {b.bug_id} ({b.label}) — {b.description[:70]}")
         print(f"    ── Track S (G_S={len(gt_s)}, S-pool={len(s_pool)}, Policy {pol}) ──")
         for b in gt_s:
             hit = _match_s(b, findings, policy_b, policy_gap)
@@ -436,10 +426,8 @@ def evaluate_contest(
         gt_l=len(gt_l),
         gt_s=len(gt_s),
         gt_oos=len(gt_oos),
-        n_l_pool=len(l_pool),
         n_l_tier1_pool=len(l_tier1_pool),
         n_s_pool=len(s_pool),
-        tp_l=tp_l, fp_l=fp_l, fn_l=fn_l,
         tp_l_fn=tp_l_fn, fp_l_fn=fp_l_fn, fn_l_fn=fn_l_fn,
         tp_s=tp_s, fp_s=fp_s, fn_s=fn_s,
     )
@@ -450,12 +438,13 @@ def evaluate_contest(
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _row_l(r: ContestResult) -> str:
-    Pc, Rc, Fc = _f1(r.tp_l,    r.fp_l,    r.fn_l)
-    Pf, Rf, Ff = _f1(r.tp_l_fn, r.fp_l_fn, r.fn_l_fn)
+    P, R, F = _f1(r.tp_l_fn, r.fp_l_fn, r.fn_l_fn)
+    has_gt_fn = any(True for (cid, _), fns in GT_FUNCTIONS.items() if cid == r.contest_id and fns)
+    note = "" if has_gt_fn else " [lenient: no GT_fn data]"
     return (
         f"  {r.contest_id:>5} │ G_L={r.gt_l:>3} │"
-        f" fn-lvl(T1): pool={r.n_l_tier1_pool:>3} TP={r.tp_l_fn:>3} FP={r.fp_l_fn:>3} FN={r.fn_l_fn:>3} F1={Ff:.3f} [PRIMARY]"
-        f" │ class(diag): pool={r.n_l_pool:>3} TP={r.tp_l:>3} F1={Fc:.3f}"
+        f" pool={r.n_l_tier1_pool:>3} TP={r.tp_l_fn:>3} FP={r.fp_l_fn:>3} FN={r.fn_l_fn:>3}"
+        f" P={P:.3f} R={R:.3f} F1={F:.3f}{note}"
     )
 
 
@@ -477,31 +466,31 @@ def print_table(
     sep = "─" * 72
 
     # ── Track L ───────────────────────────────────────────────────────────────
+    gt_fn_contests = {cid for (cid, _), fns in GT_FUNCTIONS.items() if fns}
+    fn_note = (
+        f"(strict: function match required for {len(gt_fn_contests)} contest(s))"
+        if gt_fn_contests
+        else "(lenient: SWC match only — GT_FUNCTIONS not populated)"
+    )
     print()
-    print("  ══ TRACK L  (L* bugs) ══")
-    print("     fn-level [PRIMARY]: Tier-1 consensus only (SWC + function/exploit path)")
-    print("     class-level [diagnostic]: consensus + gap (SWC only; drop when |class-fn|<0.05 stable)")
+    print(f"  ══ TRACK L  (L* bugs) — fn-level, Tier-1 consensus ══")
+    print(f"     {fn_note}")
     print(sep)
     for r in results:
         print(_row_l(r))
     print(sep)
 
     # Aggregate L
-    agg_gt_l          = sum(r.gt_l           for r in results)
-    agg_tp_l          = sum(r.tp_l           for r in results)
-    agg_fp_l          = sum(r.fp_l           for r in results)
-    agg_fn_l          = sum(r.fn_l           for r in results)
-    agg_pool_l        = sum(r.n_l_pool       for r in results)
-    agg_tp_l_fn       = sum(r.tp_l_fn        for r in results)
-    agg_fp_l_fn       = sum(r.fp_l_fn        for r in results)
-    agg_fn_l_fn       = sum(r.fn_l_fn        for r in results)
-    agg_pool_l_tier1  = sum(r.n_l_tier1_pool for r in results)
-    Pc, Rc, Fc = _f1(agg_tp_l,    agg_fp_l,    agg_fn_l)
+    agg_gt_l         = sum(r.gt_l           for r in results)
+    agg_tp_l_fn      = sum(r.tp_l_fn        for r in results)
+    agg_fp_l_fn      = sum(r.fp_l_fn        for r in results)
+    agg_fn_l_fn      = sum(r.fn_l_fn        for r in results)
+    agg_pool_l_tier1 = sum(r.n_l_tier1_pool for r in results)
     Pf, Rf, Ff = _f1(agg_tp_l_fn, agg_fp_l_fn, agg_fn_l_fn)
     print(
         f"  {'AGG':>5} │ G_L={agg_gt_l:>3} │"
-        f" fn-lvl(T1): pool={agg_pool_l_tier1:>3} TP={agg_tp_l_fn:>3} FP={agg_fp_l_fn:>3} FN={agg_fn_l_fn:>3} F1={Ff:.3f} [PRIMARY — F1_L_fn]"
-        f" │ class(diag): pool={agg_pool_l:>3} TP={agg_tp_l:>3} F1={Fc:.3f} [F1_L_class]"
+        f" pool={agg_pool_l_tier1:>3} TP={agg_tp_l_fn:>3} FP={agg_fp_l_fn:>3} FN={agg_fn_l_fn:>3}"
+        f" P={Pf:.3f} R={Rf:.3f} F1={Ff:.3f}  ← F1_L_fn"
     )
 
     # ── Track S ───────────────────────────────────────────────────────────────
@@ -529,16 +518,15 @@ def print_table(
         f" P={P:.3f} R={R:.3f} F1={F:.3f}  ← F1_S (micro)"
     )
 
-    # ── Combined (for reference) ───────────────────────────────────────────────
-    agg_gt_in   = agg_gt_l  + agg_gt_s
-    # Combined uses F1_L_fn (primary) + F1_S
+    # ── Combined (micro-average across both tracks) ────────────────────────────
+    agg_gt_in   = agg_gt_l + agg_gt_s
     agg_tp_comb = agg_tp_l_fn + agg_tp_s
     agg_fp_comb = agg_fp_l_fn + agg_fp_s
     agg_fn_comb = agg_fn_l_fn + agg_fn_s
     P, R, F = _f1(agg_tp_comb, agg_fp_comb, agg_fn_comb)
     agg_oos = sum(r.gt_oos for r in results)
     print()
-    print("  ══ COMBINED (F1_L_fn + F1_S, reference only) ══")
+    print("  ══ COMBINED  (F1_L_fn + F1_S) ══")
     print(
         f"  GT_in-scope={agg_gt_in}  OOS_excluded={agg_oos} │"
         f" TP={agg_tp_comb} FP={agg_fp_comb} FN={agg_fn_comb} │"
@@ -606,13 +594,12 @@ def main() -> None:
         gt_l_n = sum(1 for b in gt_bugs if _label_type(b.label) == "L")
         gt_s_n = sum(1 for b in gt_bugs if _label_type(b.label) == "S")
         gt_oos_n = sum(1 for b in gt_bugs if _label_type(b.label) in ("OOS", "O"))
-        l_pool_n        = sum(1 for f in findings if f.source in ("consensus", "gap"))
         l_tier1_pool_n  = sum(1 for f in findings if f.source == "consensus")
         s_pool_n        = sum(1 for f in findings if _in_s_pool(f, args.policy_b, args.policy_gap))
 
         print(
             f"\n  Contest {cid} │ GT: total={len(gt_bugs)} L={gt_l_n} S={gt_s_n} OOS={gt_oos_n}"
-            f" │ Findings: L-class-pool={l_pool_n} L-tier1-pool={l_tier1_pool_n} S-pool={s_pool_n}"
+            f" │ Findings: L-pool(T1)={l_tier1_pool_n} S-pool={s_pool_n}"
         )
         if args.verbose:
             print(f"    Report: {report_path}")

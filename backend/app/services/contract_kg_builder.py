@@ -274,8 +274,10 @@ class ContractKGBuilder:
                 )
             else:
                 signals.append(
-                    f"Compiler ^{m.group(1)}: 0.8+ — built-in overflow/underflow protection "
-                    f"(arithmetic REVERTS on overflow; SafeMath redundant but harmless)"
+                    f"Compiler ^{m.group(1)}: 0.8+ — arithmetic operators (+/-/*) revert on "
+                    f"overflow/underflow; BUT explicit type casts (uint128(x), int256(y), uint256(int)) "
+                    f"are NOT protected and silently truncate — SWC-101 still applicable via unsafe casting. "
+                    f"Always check unchecked{{}} blocks and explicit casts."
                 )
 
         # ReentrancyGuard

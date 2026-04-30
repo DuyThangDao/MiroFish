@@ -790,7 +790,10 @@ class CyberSessionOrchestrator:
                     self._process_gap_declarations(response, profile, round_num, session_state, mode=mode)
             else:
                 # Pass raw response (may contain think blocks) — parse_from_text uses last-tag logic
-                self._process_attacker_response(response, profile, round_num, session_state, mode=mode)
+                self._process_attacker_response(
+                    response, profile, round_num, session_state,
+                    mode=mode, phase_c_review_list=phase_c_review_list,
+                )
 
         if phase in ("A", "B"):
             self._mark_gaps_as_routed(session_state)
@@ -1019,21 +1022,31 @@ class CyberSessionOrchestrator:
         else:
             specificity_hint = "Be specific, reference actual hosts and services from the infrastructure."
 
+        is_attacker_phase_c = (profile.tier == 2 and phase == "C")
+        if is_attacker_phase_c:
+            user_content = (
+                f"{phase_instruction}\n\n"
+                f"=== DISCUSSION SO FAR ===\n{prior_context}\n\n"
+                "⚠ FORMAT ENFORCEMENT — bắt buộc:\n"
+                "Dòng ĐẦU TIÊN của response phải là tag [ATTACKER_XXX].\n"
+                "KHÔNG được viết bất kỳ câu phân tích nào trước tag đầu tiên.\n"
+                "Mỗi claim trong UNVERIFIED CLAIMS LIST trên phải có 1 block riêng.\n"
+                "Bắt đầu response của bạn ngay bây giờ với [ATTACKER_CONFIRM/DISMISS/EXPLOIT]:"
+            )
+        else:
+            user_content = (
+                f"{phase_instruction}\n\n"
+                f"=== DISCUSSION SO FAR ===\n{prior_context}\n\n"
+                f"Provide your analysis for Round {round_num}. "
+                f"{specificity_hint}"
+            )
+
         messages = [
             {"role": "system", "content": profile.system_prompt},
-            {
-                "role": "user",
-                "content": (
-                    f"{phase_instruction}\n\n"
-                    f"=== DISCUSSION SO FAR ===\n{prior_context}\n\n"
-                    f"Provide your analysis for Round {round_num}. "
-                    f"{specificity_hint}"
-                )
-            }
+            {"role": "user", "content": user_content},
         ]
 
         # Stage 2: token override via env var + optional thinking disable
-        is_attacker_phase_c = (profile.tier == 2 and phase == "C")
         if stage == 2:
             stage2_max = int(os.environ.get("STAGE2_MAX_TOKENS", "0"))
             max_tok = stage2_max if stage2_max > 0 else (max_tokens if max_tokens is not None else 1500)
@@ -1122,6 +1135,67 @@ class CyberSessionOrchestrator:
             f"{finding.title} ({finding.severity})"
         )
 
+    def _rescue_attacker_action(
+        self,
+        narrative_text: str,
+        review_list: str,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Fix B: khi parse_from_text() trả None (agent viết narrative không có tag),
+        gọi LLM call ngắn để extract quyết định CONFIRM/DISMISS từ text đó.
+        Trả None nếu extract thất bại.
+        """
+        if len(narrative_text.strip()) < 80:
+            return None
+        try:
+            claims_preview = review_list[:600] if review_list else "unknown claims"
+            raw = self.llm.chat_json(
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You extract structured security decisions from analyst text. "
+                            "Return ONLY JSON, no prose."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": (
+                            "An attacker analyst wrote the following response WITHOUT using required tags.\n"
+                            "Extract their CONFIRM or DISMISS decisions for each claim.\n\n"
+                            f"CLAIMS BEING REVIEWED:\n{claims_preview}\n\n"
+                            f"ANALYST RESPONSE:\n{narrative_text[:2000]}\n\n"
+                            'Return JSON: {"actions": [{"action": "ATTACKER_CONFIRM or ATTACKER_DISMISS", '
+                            '"swc_id": "SWC-XXX", "func_name": "funcName()", "reason": "..."}]}'
+                        ),
+                    },
+                ],
+                temperature=0.1,
+                max_tokens=512,
+            )
+            actions = raw.get("actions", [])
+            if not actions:
+                return None
+            cm = _get_contract_modules()
+            ContractAttackerAction = cm["attacker_action"]
+            a = actions[0]
+            action_type = a.get("action", "ATTACKER_DISMISS")
+            if action_type not in ContractAttackerAction.ALL:
+                return None
+            logger.debug(f"Attacker rescue: extracted {action_type} swc={a.get('swc_id')} fn={a.get('func_name')}")
+            return {
+                "action_type":      action_type,
+                "swc_id":           a.get("swc_id", ""),
+                "func_name":        a.get("func_name", ""),
+                "finding_ref":      "",
+                "reason":           a.get("reason", ""),
+                "path":             "",
+                "confidence_delta": ContractAttackerAction.CONFIDENCE_DELTA.get(action_type, 0.0),
+            }
+        except Exception as e:
+            logger.debug(f"Attacker action rescue failed: {e}")
+            return None
+
     def _process_attacker_response(
         self,
         text: str,
@@ -1129,12 +1203,16 @@ class CyberSessionOrchestrator:
         round_num: int,
         session_state: CyberSessionState,
         mode: str = "network_security",
+        phase_c_review_list: str = "",
     ):
         """Parse attacker agent response → AttackerFinding or AttackerCorroboration."""
         if mode == "contract_audit":
             cm = _get_contract_modules()
             ContractAttackerAction = cm["attacker_action"]
             action = ContractAttackerAction.parse_from_text(text)
+            if not action:
+                # Fix B: rescue pass — extract từ narrative nếu không có tag
+                action = self._rescue_attacker_action(text, phase_c_review_list)
             if not action:
                 # Still check for SEMANTIC_FINDING in attacker post
                 self._process_semantic_response(

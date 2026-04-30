@@ -927,13 +927,14 @@ class ConsensusEngine:
                 continue
 
             best = max(candidates, key=lambda f: f.get("confidence", 0.0))
+            all_funcs = sorted({fn for f in candidates for fn in (f.get("affected_functions") or [])})
             unvalidated.append({
                 "swc_category":      category,
                 "swc_id":            best.get("swc_id", ""),
                 "title":             best.get("title", f"Potential {category} issue"),
                 "description":       best.get("description", ""),
                 "severity":          best.get("severity", "medium"),
-                "affected_functions": best.get("affected_functions", []),
+                "affected_functions": all_funcs,
                 "author_domain":     self._get_author_group(best),
                 "source_count":      len(candidates),
                 "domain_count":      len(distinct_domains),
@@ -956,12 +957,17 @@ class ConsensusEngine:
         self,
         vulns: List[ConsensusVulnerability],
         mode: str = "network_security",
+        expert_findings_raw: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """
         Tổng hợp gap analysis:
           - Domains không tìm ra gì (zero findings)
           - Findings chỉ có 1 group (low cross-group validation)
           - Attacker-only findings (bị expert bỏ sót)
+
+        expert_findings_raw: nếu được truyền vào, phân biệt
+          - silent_domain_groups: domain không sản xuất finding nào
+          - contributed_but_filtered: domain có findings nhưng bị dismissed/filtered
         """
         if mode == "contract_audit":
             all_groups = CONTRACT_DOMAIN_GROUPS
@@ -972,12 +978,24 @@ class ConsensusEngine:
         for v in vulns:
             groups_with_findings.update(v.supporting_groups)
 
-        silent_groups = all_groups - groups_with_findings
+        if expert_findings_raw:
+            domains_with_any = {
+                self._get_author_group(f)
+                for f in expert_findings_raw
+                if self._get_author_group(f) not in ("unknown", "")
+            } & all_groups
+            truly_silent = all_groups - domains_with_any
+            contributed_but_filtered = domains_with_any - groups_with_findings
+        else:
+            truly_silent = all_groups - groups_with_findings
+            contributed_but_filtered = set()
+
         low_cross = [v.title for v in vulns if v.cross_group_score < 0.25]
         attacker_only = [v.title for v in vulns if v.is_attacker_only]
 
         return {
-            "silent_domain_groups": list(silent_groups),
+            "silent_domain_groups": list(truly_silent),
+            "contributed_but_filtered": list(contributed_but_filtered),
             "low_cross_validation_findings": low_cross,
             "attacker_only_paths": attacker_only,
             "total_vulns": len(vulns),

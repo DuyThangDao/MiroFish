@@ -242,7 +242,7 @@ class ContractAuditReportAgent:
             tool_context=tool_context,
         )
 
-        coverage_gaps = engine.get_coverage_gaps(consensus_vulns, mode="contract_audit")
+        coverage_gaps = engine.get_coverage_gaps(consensus_vulns, mode="contract_audit", expert_findings_raw=expert_findings)
         invariant_coverage = _build_invariant_coverage(invariants or [], attacker_findings)
 
         return {
@@ -713,13 +713,14 @@ class _ContractToolContext:
 
     def _get_coverage_gaps(self, args: Dict) -> str:
         engine = ConsensusEngine()
-        gaps = engine.get_coverage_gaps(self.vulns, mode="contract_audit")
+        gaps = engine.get_coverage_gaps(self.vulns, mode="contract_audit", expert_findings_raw=self.expert_findings)
         lines = [
             "Coverage gap analysis:",
             f"  Total consensus vulns: {gaps['total_vulns']}",
             f"  Critical: {gaps['critical_count']}",
             f"  High: {gaps['high_count']}",
-            f"  Silent domain groups: {', '.join(gaps['silent_domain_groups']) or 'none'}",
+            f"  Silent domain groups (0 findings produced): {', '.join(gaps['silent_domain_groups']) or 'none'}",
+            f"  Contributed but filtered (findings dismissed/below threshold): {', '.join(gaps['contributed_but_filtered']) or 'none'}",
             f"  Low cross-validation findings: {len(gaps['low_cross_validation_findings'])}",
             f"  Attacker-only paths: {len(gaps['attacker_only_paths'])}",
         ]

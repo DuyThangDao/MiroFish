@@ -255,16 +255,21 @@ class PoCVerificationStage:
 
         try:
             candidates = self._select_candidates(gap_findings)
-            if not candidates:
-                logger.info("PoC: no eligible candidates — skipping stage")
-                return consensus_vulns, gap_findings
-
             logger.info(
-                f"PoC: {len(candidates)} candidates "
+                f"PoC: gap_findings={len(gap_findings)}, "
+                f"eligible candidates={len(candidates)} "
                 f"(unit={sum(1 for c in candidates if c.track=='unit')}, "
                 f"fuzz={sum(1 for c in candidates if c.track=='fuzz')}, "
                 f"llm={sum(1 for c in candidates if c.track=='llm')})"
             )
+            for c in candidates:
+                logger.debug(
+                    f"  candidate: {c.gap_id} track={c.track} "
+                    f"swc={c.swc_id} votes={c.source_count} fns={c.function_names}"
+                )
+            if not candidates:
+                logger.info("PoC: no eligible candidates — skipping stage")
+                return consensus_vulns, gap_findings
 
             upgraded_ids: Set[str] = set()
 
@@ -674,6 +679,9 @@ library console {
 
         # Create lib stubs for dev-only imports that may appear in forge-std or future tests
         remappings = self._setup_lib_stubs(workspace)
+        # Always include forge-std remapping explicitly so Docker container resolves it
+        if POC_SHARED_LIB.exists():
+            remappings = ["forge-std/=lib/forge-std/src/"] + [r for r in remappings if "forge-std" not in r]
 
         remappings_toml = (
             "remappings = [\n"
@@ -690,15 +698,24 @@ library console {
             "cache_path = \"cache\"\n"
             + remappings_toml
         )
+        logger.debug(f"PoC: foundry.toml =\n{toml_path.read_text()}")
         try:
             r = self._docker_forge(
-                ["build", "--silent"],
+                ["build"],
                 workspace=workspace,
                 contest_dir=contest_dir,
                 timeout=timeout,
             )
+            stdout_txt = r.stdout.decode(errors="replace") if isinstance(r.stdout, bytes) else (r.stdout or "")
+            stderr_txt = r.stderr.decode(errors="replace") if isinstance(r.stderr, bytes) else (r.stderr or "")
             if r.returncode != 0:
-                logger.warning(f"PoC: forge build failed: {r.stderr.decode()[:300]}")
+                logger.warning(
+                    f"PoC: forge build failed (exit={r.returncode})\n"
+                    f"  STDOUT: {stdout_txt[:400]}\n"
+                    f"  STDERR: {stderr_txt[:400]}"
+                )
+            else:
+                logger.info("PoC: forge build OK")
             return r.returncode == 0
         except subprocess.TimeoutExpired:
             logger.warning("PoC: forge build timed out")
@@ -725,7 +742,14 @@ library console {
                 timeout=timeout,
                 capture_stdout=True,
             )
-            return self._parse_forge_json(r.stdout)
+            stderr_txt = r.stderr.decode(errors="replace") if isinstance(r.stderr, bytes) else (r.stderr or "")
+            if r.returncode != 0:
+                logger.warning(f"PoC: forge test failed (exit={r.returncode}) stderr={stderr_txt[:300]}")
+            else:
+                logger.debug(f"PoC: forge test stdout={r.stdout[:500]}")
+            results = self._parse_forge_json(r.stdout)
+            logger.info(f"PoC: forge test results: {results}")
+            return results
         except subprocess.TimeoutExpired:
             logger.warning("PoC: forge test timed out")
             return {}

@@ -142,12 +142,21 @@ class ContractDepGraph:
         has_hardhat  = any(path.rglob("hardhat.config.*"))
 
         if has_foundry:
-            try:
-                forge_ok = subprocess.run(
-                    ["forge", "--version"], capture_output=True, timeout=5
-                ).returncode == 0
-            except Exception:
-                forge_ok = False
+            # Check forge in PATH and common install locations
+            _forge_candidates = [
+                "forge",
+                str(Path.home() / ".foundry" / "bin" / "forge"),
+                "/usr/local/bin/forge",
+            ]
+            forge_ok = False
+            for _fc in _forge_candidates:
+                try:
+                    if subprocess.run([_fc, "--version"], capture_output=True, timeout=5).returncode == 0:
+                        forge_ok = True
+                        logger.debug(f"Dep graph: forge found at {_fc}")
+                        break
+                except Exception:
+                    continue
             if forge_ok:
                 return str(path), None  # Slither will use forge
             logger.debug("foundry.toml found but forge unavailable — trying flat file fallback")

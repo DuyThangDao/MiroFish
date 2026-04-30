@@ -146,7 +146,7 @@ class VulnReportAgent:
             tool_context=tool_context,
         )
 
-        coverage_gaps = engine.get_coverage_gaps(consensus_vulns)
+        coverage_gaps = engine.get_coverage_gaps(consensus_vulns, expert_findings_raw=expert_findings)
 
         return {
             "session_id": session_id,
@@ -425,13 +425,14 @@ class _ToolContext:
 
     def _get_coverage_gaps(self, args: Dict) -> str:
         engine = ConsensusEngine()
-        gaps = engine.get_coverage_gaps(self.vulns)
+        gaps = engine.get_coverage_gaps(self.vulns, expert_findings_raw=self.expert_findings)
         lines = [
             f"Coverage gap analysis:",
             f"  Total consensus vulns: {gaps['total_vulns']}",
             f"  Critical: {gaps['critical_count']}",
             f"  High: {gaps['high_count']}",
-            f"  Silent domain groups: {', '.join(gaps['silent_domain_groups']) or 'none'}",
+            f"  Silent domain groups (0 findings produced): {', '.join(gaps['silent_domain_groups']) or 'none'}",
+            f"  Contributed but filtered (findings dismissed/below threshold): {', '.join(gaps['contributed_but_filtered']) or 'none'}",
             f"  Low cross-validation findings: {len(gaps['low_cross_validation_findings'])}",
             f"  Attacker-only paths: {len(gaps['attacker_only_paths'])}",
         ]
