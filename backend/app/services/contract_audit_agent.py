@@ -296,7 +296,7 @@ class ContractAuditReportAgent:
                     "high":      n_high,
                     "medium":    n_medium,
                     "exploitable_count": sum(
-                        1 for f in v2_confirmed if f.get("attacker_rate", 0) >= 0.4
+                        1 for v in consensus_vulns_raw if v.get("poc_verified")
                     ),
                 },
             }

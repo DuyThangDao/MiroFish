@@ -469,37 +469,31 @@ def run_audit(
         )
         report_result = _poll_task(task_manager, task_id, "Report Gen", timeout=1800)
 
-        # ── Step 5b: PoC Verification (post-consensus) ────────────────────────
-        logger.info("\n[STEP 4b/4] PoC Verification Stage...")
+        # ── Step 5b: PoC Enrichment (scenario-driven, post-consensus) ───────────
+        logger.info("\n[STEP 4b/4] PoC Enrichment Stage (scenario-driven)...")
         try:
             from app.services.poc_verification import PoCVerificationStage, PoCConfig
             poc_stage = PoCVerificationStage(
                 llm_client=orchestrator.llm,
                 config=PoCConfig(enabled=True),
             )
+            # Only confirmed findings go to PoC; discarded have been excluded already
             _consensus_vulns  = report_result.get("consensus_vulns", [])
-            _gap_findings     = report_result.get("unvalidated_swc_gaps", [])
             _semantic_results = report_result.get("semantic_results", [])
-            _contest_dir      = sol_path if (sol_path and os.path.isdir(sol_path)) else None
+            all_confirmed     = _consensus_vulns + _semantic_results
 
-            _upd_consensus, _upd_gaps, _upd_semantic = poc_stage.run(
-                consensus_vulns=_consensus_vulns,
-                gap_findings=_gap_findings,
+            enriched = poc_stage.run(
+                confirmed_findings=all_confirmed,
                 flat_source=source_code,
-                contest_dir=_contest_dir,
-                semantic_results=_semantic_results,
             )
-            if len(_upd_consensus) > len(_consensus_vulns):
-                upgraded = len(_upd_consensus) - len(_consensus_vulns)
-                logger.info(f"  PoC: {upgraded} finding(s) upgraded Tier-2 → Tier-1")
-                report_result["consensus_vulns"]      = _upd_consensus
-                report_result["unvalidated_swc_gaps"] = _upd_gaps
-            else:
-                logger.info("  PoC: no upgrades")
-            _poc_verified_sem = sum(1 for s in _upd_semantic if s.get("poc_verified"))
-            if _poc_verified_sem:
-                logger.info(f"  PoC: {_poc_verified_sem} semantic finding(s) marked poc_verified=True")
-                report_result["semantic_results"] = _upd_semantic
+
+            # Split back into consensus_vulns / semantic_results by original lengths
+            n_c = len(_consensus_vulns)
+            report_result["consensus_vulns"]  = enriched[:n_c]
+            report_result["semantic_results"] = enriched[n_c:]
+
+            _poc_verified = sum(1 for f in enriched if f.get("poc_verified"))
+            logger.info(f"  PoC: {_poc_verified}/{len(enriched)} finding(s) poc_verified=True")
         except Exception as _poc_err:
             logger.warning(f"  PoC stage skipped (non-fatal): {_poc_err}")
 
