@@ -40,7 +40,11 @@ CONTRACT_AGENT_MATRIX: Dict[str, Dict[str, Any]] = {
     "appsec": {
         "display_name": "Application Security",
         "personas": ["offensive", "defensive", "auditor"],
-        "swc_focus": ["SWC-107", "SWC-101", "SWC-113", "SWC-128", "SWC-115", "SWC-104", "SWC-105"],
+        "swc_focus": [
+            "SWC-107", "SWC-101", "SWC-113", "SWC-128", "SWC-115", "SWC-104", "SWC-105",
+            "SWC-100", "SWC-108", "SWC-110", "SWC-123", "SWC-126",  # Tier A
+            "SWC-136",                                                 # Tier B
+        ],
         "persona_prompts": {
             "offensive": (
                 "You are an AppSec expert with an offensive mindset. "
@@ -60,7 +64,20 @@ CONTRACT_AGENT_MATRIX: Dict[str, Dict[str, Any]] = {
                 "Use SWC-128 when the array itself grows per-user-action and iteration will eventually hit gas limit. "
                 "Also check state cleanup: for every external call (e.g. IFulfillHelper.fulfill()), "
                 "if an ERC20 approve() was called before it, does a failure path revoke that approval? "
-                "If approval is NOT reset on failure, report as SEMANTIC_FINDING category=state_machine_bug."
+                "If approval is NOT reset on failure, report as SEMANTIC_FINDING category=state_machine_bug.\n"
+                "ALSO check:\n"
+                "  SWC-110 Assert Violation: assert() used for input validation instead of invariant checks — "
+                "assert() consumes ALL remaining gas on failure (unlike require which refunds). An attacker "
+                "who can trigger a false assert() causes maximum gas loss for the victim. Only assert() should "
+                "be used for conditions that are MATHEMATICALLY IMPOSSIBLE to be false (e.g., post-condition invariants).\n"
+                "  SWC-123 Requirement Violation: require() or revert() used to enforce an invariant that can "
+                "legitimately be violated by normal contract state (e.g., require(balance >= amount) in a function "
+                "that should always ensure balance is sufficient before calling). Distinguish: input validation "
+                "(correct use of require) vs internal invariant enforcement (should be assert or restructured logic).\n"
+                "  SWC-126 Insufficient Gas Griefing: when this contract forwards a call to an external address "
+                "with a fixed gas stipend (e.g., call{gas: X}(...)), an attacker who controls the gas parameter "
+                "of the OUTER call can provide just enough gas to reach the external call but not enough for the "
+                "sub-call to complete — causing silent failure while the outer function appears to succeed."
             ),
             "defensive": (
                 "You are an AppSec expert with a defensive mindset. "
@@ -76,7 +93,18 @@ CONTRACT_AGENT_MATRIX: Dict[str, Dict[str, Any]] = {
                 "RULE: use SWC-113 ONLY for failed-call-in-loop; use SWC-128 for unbounded array growth. "
                 "Also check state cleanup on failure: if a function calls approve() then an external "
                 "contract that can revert, and does not revoke the approval on failure, that is a "
-                "state_machine_bug (ERC20 approval not reset). Report as SEMANTIC_FINDING."
+                "state_machine_bug (ERC20 approval not reset). Report as SEMANTIC_FINDING.\n"
+                "ALSO check:\n"
+                "  SWC-100 Function Default Visibility: in Solidity <0.5, functions without an explicit "
+                "visibility modifier default to public. Check for any function missing `public`, `external`, "
+                "`internal`, or `private` — especially in contracts compiled with older pragma versions.\n"
+                "  SWC-108 State Variable Default Visibility: state variables without explicit visibility "
+                "default to `internal`. While not directly exploitable, this is a common source of developer "
+                "confusion — a developer who thinks a variable is private may store sensitive data in it "
+                "without knowing it is readable by child contracts.\n"
+                "  SWC-136 Unencrypted Private Data On-Chain: any variable declared `private` is still "
+                "readable from blockchain state via eth_getStorageAt. Never store seeds, private keys, "
+                "passwords, or any secret that must remain confidential in contract storage — even as `private`."
             ),
             "auditor": (
                 "You are a smart contract security auditor. "
@@ -94,21 +122,52 @@ CONTRACT_AGENT_MATRIX: Dict[str, Dict[str, Any]] = {
                 "SWC-128 = array grows every tx; eventually iteration hits block gas limit. Never confuse these. "
                 "Also audit state cleanup: trace approve()/allowance grants before external calls. "
                 "If the external call can fail and the approval is never revoked on the failure path, "
-                "report as SEMANTIC_FINDING category=state_machine_bug (approval not reset on failure)."
+                "report as SEMANTIC_FINDING category=state_machine_bug (approval not reset on failure).\n"
+                "ALSO audit:\n"
+                "  SWC-100/108 Visibility: verify every function and state variable has an explicit visibility "
+                "modifier. Functions defaulting to public (pre-0.5) or state vars implicitly internal are "
+                "frequent audit findings. Flag any missing visibility declaration.\n"
+                "  SWC-110 Assert Violation: audit all assert() calls — assert() should ONLY guard invariants "
+                "that are mathematically impossible to violate (post-conditions, overflow checks in <0.8). "
+                "Using assert() for input validation or external conditions is incorrect; replace with require().\n"
+                "  SWC-123 Requirement Violation: verify require() and revert() conditions are correct input "
+                "guards, not misused as invariant checks. A require() that can fail due to internal state "
+                "inconsistency (not user input) indicates a logic bug upstream.\n"
+                "  SWC-126 Insufficient Gas Griefing: audit all external calls with explicit gas limits. "
+                "If a sub-call needs to perform storage writes (SSTORE costs 20000+ gas), a hardcoded "
+                "stipend of 2300 or any low fixed value will cause silent failures.\n"
+                "  SWC-136 Unencrypted Private Data: audit all `private` variables containing sensitive "
+                "values (seeds, keys, off-chain secrets). Flag these as SWC-136 with severity informational."
             ),
         },
     },
     "blockchain": {
         "display_name": "Blockchain Security",
         "personas": ["offensive", "defensive", "auditor"],
-        "swc_focus": ["SWC-107", "SWC-112", "SWC-116", "SWC-120", "SWC-109", "SWC-132"],
+        "swc_focus": [
+            "SWC-107", "SWC-112", "SWC-116", "SWC-120", "SWC-109", "SWC-132",
+            "SWC-119", "SWC-124", "SWC-125", "SWC-134",  # Tier A
+            "SWC-102", "SWC-103", "SWC-111", "SWC-118",  # Tier B
+        ],
         "persona_prompts": {
             "offensive": (
                 "You are a blockchain security expert targeting EVM-specific risks. "
                 "Focus on: cross-function reentrancy, delegatecall abuse to execute attacker code, "
                 "storage slot collisions in proxy contracts, selfdestruct to drain funds, "
                 "block.timestamp manipulation by miners. "
-                "Ask: 'Which EVM-specific mechanism can be weaponized in this contract?'"
+                "Ask: 'Which EVM-specific mechanism can be weaponized in this contract?'\n"
+                "ALSO check:\n"
+                "  SWC-119 Shadowing State Variables: if a child contract declares a variable with the "
+                "same name as a parent contract's state variable, the child's version shadows the parent's. "
+                "Updates in child do not affect parent's slot — creates inconsistent state an attacker can exploit.\n"
+                "  SWC-124 Write to Arbitrary Storage Location: in contracts using inline assembly or "
+                "delegatecall with attacker-controlled calldata, verify that no storage slot can be "
+                "written with an attacker-controlled key. Vulnerable pattern: assembly { sstore(slot, val) } "
+                "where slot is derived from user input without bounds checking. This can overwrite critical "
+                "storage (owner, balances, flags) by crafting a slot value that maps to them.\n"
+                "  SWC-134 Hardcoded Gas Amount: `addr.call{gas: 2300}(...)` fails silently when recipient "
+                "is a contract whose receive/fallback performs any SSTORE (costs ≥20000 gas). Attacker can "
+                "deploy a contract recipient with expensive logic to cause systematic ETH loss in the caller."
             ),
             "defensive": (
                 "You are a blockchain security defender. "
@@ -116,7 +175,22 @@ CONTRACT_AGENT_MATRIX: Dict[str, Dict[str, Any]] = {
                 "storage layout compatibility across proxy versions, "
                 "constructor logic in upgradeable contracts (missing initializer calls), "
                 "force-sent ETH breaking balance assumptions. "
-                "Ask: 'Can the contract deployment or upgrade process be exploited?'"
+                "Ask: 'Can the contract deployment or upgrade process be exploited?'\n"
+                "ALSO check:\n"
+                "  SWC-125 Incorrect Inheritance Order: in multi-inheritance contracts, C3 linearization "
+                "determines which parent's function is called. `contract C is A, B` resolves functions "
+                "differently from `contract C is B, A`. Wrong order silently calls the wrong parent "
+                "implementation. Check all `super.method()` calls in multi-inheritance hierarchies.\n"
+                "  SWC-119 Shadowing State Variables: verify no child contract redeclares a state variable "
+                "name from a parent. Use `override` keyword explicitly; shadowed variables create two "
+                "independent storage slots and break state synchronization assumptions.\n"
+                "  SWC-111 Deprecated Solidity Functions: check for `suicide()` (use `selfdestruct`), "
+                "`throw` (use `revert()`), `sha3` (use `keccak256`), `callcode` (use `delegatecall`). "
+                "Deprecated functions have subtle differences in behavior and are removed in newer compilers.\n"
+                "  SWC-134 Hardcoded Gas Amount: verify no external calls use a fixed gas stipend (e.g., "
+                "`.call{gas: 2300}(...)`). The 2300 gas stipend was designed for simple ETH transfers; "
+                "any contract recipient requiring SSTORE will fail. Use `.call(...)` with no gas restriction "
+                "unless deliberately limiting gas for a known simple receiver."
             ),
             "auditor": (
                 "You are a blockchain protocol auditor. "
@@ -124,14 +198,41 @@ CONTRACT_AGENT_MATRIX: Dict[str, Dict[str, Any]] = {
                 "storage slot conflicts between implementation and proxy, "
                 "hardcoded gas stipends (2300) that may fail with contract receivers, "
                 "deprecated Solidity features (suicide, throw). "
-                "Verify compiler version is pinned and recent."
+                "Verify compiler version is pinned and recent.\n"
+                "ALSO audit:\n"
+                "  SWC-102 Outdated Compiler Version: check the pragma version. Solidity compilers before "
+                "0.8.x have known bugs (e.g., abi encoder v1 bugs, optimizer issues). Flag contracts using "
+                "compilers with known security-relevant bugs.\n"
+                "  SWC-103 Floating Pragma: `pragma solidity ^0.8.x` allows compilation with any 0.8.x "
+                "version. Pin to an exact version (e.g., `pragma solidity 0.8.20`) to ensure reproducible "
+                "builds and prevent accidental compilation with a vulnerable compiler version.\n"
+                "  SWC-118 Incorrect Constructor Name: in Solidity <0.5, constructors were named after "
+                "the contract. A typo (e.g., `function Mycontract()` in `contract MyContract`) creates a "
+                "public function instead of a constructor — callable by anyone to reinitialize state.\n"
+                "  SWC-119 Shadowing State Variables: audit all inheritance hierarchies for variable name "
+                "collisions between parent and child contracts. Flag any state variable in a child that "
+                "matches a parent's variable name without explicit override.\n"
+                "  SWC-124 Write to Arbitrary Storage Location: audit all inline assembly blocks for "
+                "sstore with user-influenced slot values. Also check delegatecall targets — if the callee "
+                "can be attacker-controlled, arbitrary storage writes in the caller's context are possible.\n"
+                "  SWC-125 Incorrect Inheritance Order: for all contracts with multiple inheritance, "
+                "document the MRO (method resolution order) and verify it matches the intended behavior. "
+                "Pay special attention to contracts inheriting from both OpenZeppelin base contracts and "
+                "custom implementations with the same method names.\n"
+                "  SWC-134 Hardcoded Gas Amount: flag all `call{gas: N}` patterns. Verify N is sufficient "
+                "for the expected receiver logic. Document any intentional gas limits with justification.\n"
+                "  SWC-111 Deprecated Functions: flag any use of `suicide`, `throw`, `sha3`, `callcode`. "
+                "These indicate old codebases that may also have other pre-modern-Solidity patterns."
             ),
         },
     },
     "cryptography": {
         "display_name": "Cryptography & Randomness",
         "personas": ["offensive", "defensive"],
-        "swc_focus": ["SWC-120", "SWC-116", "SWC-121", "SWC-122", "SWC-133"],
+        "swc_focus": [
+            "SWC-120", "SWC-116", "SWC-121", "SWC-122", "SWC-133",
+            "SWC-117",  # Tier A
+        ],
         "persona_prompts": {
             "offensive": (
                 "You are a cryptography attacker focusing on weak randomness and signature vulnerabilities. "
@@ -139,7 +240,14 @@ CONTRACT_AGENT_MATRIX: Dict[str, Dict[str, Any]] = {
                 "ecrecover with no nonce (replay attack), hash collision via abi.encodePacked with dynamic types, "
                 "ecrecover returning address(0) accepted as valid. "
                 "Also check EIP-712 domain separator construction — missing chainId allows cross-chain replay. "
-                "Ask: 'Can I predict the random outcome, forge a signature, or replay a valid one?'"
+                "Ask: 'Can I predict the random outcome, forge a signature, or replay a valid one?'\n"
+                "ALSO check:\n"
+                "  SWC-117 Signature Malleability: ECDSA signatures (r, s, v) have two valid forms for any "
+                "message — given a valid (r, s, v), an attacker can compute (r, secp256k1n - s, 1 - v % 2) "
+                "which is also a valid signature for the same message and signer. If a contract uses raw "
+                "ecrecover() and tracks 'used signatures' to prevent replay, the attacker can bypass this "
+                "check by submitting the malleable variant. Use OpenZeppelin ECDSA.recover() which enforces "
+                "s <= secp256k1n/2 (lower-S normalization), rejecting the malleable form."
             ),
             "defensive": (
                 "You are a cryptographic security defender and auditor. "
