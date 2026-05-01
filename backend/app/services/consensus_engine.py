@@ -1137,7 +1137,9 @@ class ConsensusEngine:
             fn_list  = [fn_name] if fn_name else []
             r2_score = f.get("round2_score", 0.0)
             att_rate = f.get("attacker_rate", 0.0)
-            conf     = round(r2_score * att_rate, 4)
+            att_factor = f.get("attacker_factor", 0.5)
+            # Use pre-computed confidence from orchestrator (new formula: r2 × attacker_factor)
+            conf     = round(f.get("confidence", f.get("final_score", r2_score * att_rate)), 4)
             uid      = _hashlib.md5(f.get("pair_id", "").encode()).hexdigest()[:8]
 
             if f.get("kind") == "semantic":
@@ -1162,9 +1164,12 @@ class ConsensusEngine:
                     }),
                     "is_attacker_surfaced": att_rate > 0,
                     "source_finding_ids": [f.get("pair_id", uid)],
-                    "v2_pair_id":        f.get("pair_id"),
-                    "v2_round2_score":   r2_score,
-                    "v2_attacker_rate":  att_rate,
+                    "poc_verified":       False,
+                    "poc_results":        [],
+                    "v2_pair_id":         f.get("pair_id"),
+                    "v2_round2_score":    r2_score,
+                    "v2_attacker_rate":   att_rate,
+                    "v2_attacker_factor": att_factor,
                 })
             else:
                 swc_id = f.get("swc_id", "")
@@ -1191,9 +1196,12 @@ class ConsensusEngine:
                     "attacker_finding_ids": [],
                     "is_attacker_only":   False,
                     "needs_review":       conf < 0.5,
+                    "poc_verified":       False,
+                    "poc_results":        [],
                     "v2_pair_id":         f.get("pair_id"),
                     "v2_round2_score":    r2_score,
                     "v2_attacker_rate":   att_rate,
+                    "v2_attacker_factor": att_factor,
                 })
 
         for f in discarded:

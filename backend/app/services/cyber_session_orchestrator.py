@@ -1886,8 +1886,9 @@ class CyberSessionOrchestrator:
     # ─── v2 — 3-Round Contract Audit Flow ────────────────────────────────────
 
     # Thresholds (can be overridden via env vars)
-    _R2_THRESHOLD   = float(os.environ.get("R2_SCORE_THRESHOLD",    "0.35"))
-    _R3_CONFIRMED   = float(os.environ.get("R3_CONFIRMED_THRESHOLD", "0.40"))
+    _R2_THRESHOLD        = float(os.environ.get("R2_SCORE_THRESHOLD",      "0.35"))
+    _R3_ATTACKER_BASE    = float(os.environ.get("R3_ATTACKER_FACTOR_BASE", "0.5"))
+    _R3_CONFIRMED        = float(os.environ.get("R3_CONFIRMED_THRESHOLD",  "0.35"))
 
     # Gemini 3 Flash Preview (thinking model) uses ~30K tokens for internal reasoning
     # before generating visible output. Any max_tokens below ~32K results in content=None.
@@ -2508,25 +2509,29 @@ class CyberSessionOrchestrator:
             attacker_rate = weighted_sum / effective_M
 
             finding = dict(finding)  # copy to avoid mutating candidate_pool
+            r2_score        = finding.get("round2_score", 0.0)
+            attacker_factor = self._R3_ATTACKER_BASE + (1.0 - self._R3_ATTACKER_BASE) * attacker_rate
+            confidence      = r2_score * attacker_factor
+
             finding["attacker_rate"]         = attacker_rate
             finding["effective_attackers"]   = effective_M
             finding["attacker_verdicts"]     = verdicts
             finding["not_applicable_count"]  = not_applicable
-            finding["final_score"]           = finding.get("round2_score", 0) * 0.4 + attacker_rate * 0.6
+            finding["attacker_factor"]       = attacker_factor
+            finding["confidence"]            = confidence
+            finding["final_score"]           = confidence   # alias for backward compat
 
             logger.info(
                 f"[v2 R3] pair_id={pair_id} attacker_rate={attacker_rate:.2f} "
-                f"effective_M={effective_M} r2_score={finding.get('round2_score',0):.2f}"
+                f"attacker_factor={attacker_factor:.2f} confidence={confidence:.3f} "
+                f"effective_M={effective_M} r2_score={r2_score:.2f}"
             )
 
-            if attacker_rate == 0.0:
-                finding["v2_status"] = "discarded"
-                discarded.append(finding)
-            elif attacker_rate < self._R3_CONFIRMED or effective_M < 2:
-                finding["v2_status"] = "borderline"
-                borderline.append(finding)
-            else:
+            if confidence >= self._R3_CONFIRMED:
                 finding["v2_status"] = "confirmed"
                 confirmed.append(finding)
+            else:
+                finding["v2_status"] = "discarded"
+                discarded.append(finding)
 
         return confirmed, borderline, discarded

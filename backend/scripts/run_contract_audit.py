@@ -441,10 +441,10 @@ def run_audit(
         v2_borderline     = session_result.get("v2_borderline", [])
         v2_discarded      = session_result.get("v2_discarded", [])
 
+        _r3_confirmed_threshold = float(os.environ.get("R3_CONFIRMED_THRESHOLD", "0.35"))
         _pv = session_result.get("pipeline_version", "v1")
         if v2_confirmed is not None:
-            logger.info(f"  [v2] Confirmed   : {len(v2_confirmed)}")
-            logger.info(f"  [v2] Borderline  : {len(v2_borderline)}")
+            logger.info(f"  [v2] Confirmed   : {len(v2_confirmed)} (confidence ≥ {_r3_confirmed_threshold})")
             logger.info(f"  [v2] Discarded   : {len(v2_discarded)}")
         else:
             logger.info(f"  Expert findings  : {len(expert_findings)}")
