@@ -91,18 +91,20 @@ LLM_QUERY_TEMPLATES: Dict[str, str] = {
 
 @dataclass
 class PoCConfig:
-    enabled:               bool  = True
-    min_agent_votes:       int   = 2      # minimum source_count to PoC
-    max_unit_candidates:   int   = 10
-    max_fuzz_candidates:   int   = 4
-    max_llm_candidates:    int   = 8
-    llm_timeout_s:         int   = 30
-    llm_max_tokens:        int   = 200
-    snippet_max_lines:     int   = 60
-    forge_compile_timeout: int   = 90
-    forge_test_timeout:    int   = 120
-    fuzz_runs:             int   = 128
-    stage_timeout_s:       int   = 300
+    enabled:                  bool  = True
+    min_agent_votes:          int   = 2      # minimum source_count to PoC (gap_findings)
+    min_semantic_confidence:  float = 0.25   # minimum confidence_score for semantic PoC
+    max_unit_candidates:      int   = 10
+    max_fuzz_candidates:      int   = 4
+    max_llm_candidates:       int   = 8
+    max_semantic_candidates:  int   = 8      # cap on semantic Track-3 candidates
+    llm_timeout_s:            int   = 30
+    llm_max_tokens:           int   = 200
+    snippet_max_lines:        int   = 60
+    forge_compile_timeout:    int   = 90
+    forge_test_timeout:       int   = 120
+    fuzz_runs:                int   = 128
+    stage_timeout_s:          int   = 300
 
 
 @dataclass
@@ -239,56 +241,89 @@ class PoCVerificationStage:
 
     def run(
         self,
-        consensus_vulns: List[Dict[str, Any]],
-        gap_findings: List[Dict[str, Any]],
-        flat_source: str,
-        contest_dir: Optional[str] = None,
-    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        consensus_vulns:  List[Dict[str, Any]],
+        gap_findings:     List[Dict[str, Any]],
+        flat_source:      str,
+        contest_dir:      Optional[str] = None,
+        semantic_results: Optional[List[Dict[str, Any]]] = None,
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
         """
-        Returns (updated_consensus_vulns, updated_gap_findings).
-        All failures are safe: findings never deleted, only potentially upgraded.
+        Returns (updated_consensus_vulns, updated_gap_findings, updated_semantic_results).
+
+        Root fix: semantic_results are now a first-class input.
+        S-track findings (incorrect_accounting, access_control, state_machine_bug, …)
+        are routed to Track 3 (LLM targeted query) independently of gap_findings.
+        Confirmed semantic findings are marked poc_verified=True in their dict —
+        they stay in semantic_results (evaluated separately by evaluator) rather than
+        being promoted to consensus_vulns.
+
+        All failures are safe: findings never deleted, only potentially upgraded/marked.
         """
-        if not self._cfg.enabled or not gap_findings:
-            return consensus_vulns, gap_findings
+        semantic_results = list(semantic_results or [])
+
+        if not self._cfg.enabled or (not gap_findings and not semantic_results):
+            return consensus_vulns, gap_findings, semantic_results
 
         stage_start = time.monotonic()
 
         try:
-            candidates = self._select_candidates(gap_findings)
+            # ── Gap candidates (SWC-routed: Track 1/2/3) ─────────────────────
+            gap_candidates = self._select_candidates(gap_findings)
+            sem_candidates = self._select_semantic_candidates(semantic_results)
+
             logger.info(
-                f"PoC: gap_findings={len(gap_findings)}, "
-                f"eligible candidates={len(candidates)} "
-                f"(unit={sum(1 for c in candidates if c.track=='unit')}, "
-                f"fuzz={sum(1 for c in candidates if c.track=='fuzz')}, "
-                f"llm={sum(1 for c in candidates if c.track=='llm')})"
+                f"PoC: gap_findings={len(gap_findings)} → "
+                f"{len(gap_candidates)} gap candidates "
+                f"(unit={sum(1 for c in gap_candidates if c.track=='unit')}, "
+                f"fuzz={sum(1 for c in gap_candidates if c.track=='fuzz')}, "
+                f"llm={sum(1 for c in gap_candidates if c.track=='llm')}); "
+                f"semantic={len(semantic_results)} → {len(sem_candidates)} semantic candidates"
             )
-            for c in candidates:
-                logger.debug(
-                    f"  candidate: {c.gap_id} track={c.track} "
-                    f"swc={c.swc_id} votes={c.source_count} fns={c.function_names}"
-                )
-            if not candidates:
+
+            if not gap_candidates and not sem_candidates:
                 logger.info("PoC: no eligible candidates — skipping stage")
-                return consensus_vulns, gap_findings
+                return consensus_vulns, gap_findings, semantic_results
 
-            upgraded_ids: Set[str] = set()
+            upgraded_gap_ids:  Set[str] = set()
+            verified_sem_ids:  Set[str] = set()  # semantic_vuln_ids confirmed by Track 3
 
-            # Track 3: LLM targeted query (always available)
-            llm_candidates = [c for c in candidates if c.track == "llm"]
-            if llm_candidates:
+            # ── Track 3: LLM query (gap findings with semantic category) ──────
+            llm_gap_candidates = [c for c in gap_candidates if c.track == "llm"]
+            if llm_gap_candidates:
                 remaining = self._cfg.stage_timeout_s - int(time.monotonic() - stage_start)
                 if remaining > 30:
-                    llm_results = self._run_track3(llm_candidates, flat_source,
-                                                    timeout=min(remaining - 10, 120))
+                    llm_results = self._run_track3(
+                        llm_gap_candidates, flat_source,
+                        timeout=min(remaining - 10, 120),
+                    )
                     for cid, result in llm_results.items():
                         if _should_upgrade(result):
-                            upgraded_ids.add(cid)
-                            logger.info(f"PoC T3 UPGRADE: {cid} — {result.evidence[:80]}")
+                            upgraded_gap_ids.add(cid)
+                            logger.info(f"PoC T3 gap UPGRADE: {cid} — {result.evidence[:80]}")
                         else:
-                            logger.debug(f"PoC T3 skip: {cid} verdict={result.verdict}")
+                            logger.debug(f"PoC T3 gap skip: {cid} verdict={result.verdict}")
 
-            # Track 1+2: forge (stubbed when forge unavailable)
-            forge_candidates = [c for c in candidates if c.track in ("unit", "fuzz")]
+            # ── Track 3: LLM query (semantic_results — S-track root fix) ──────
+            if sem_candidates:
+                remaining = self._cfg.stage_timeout_s - int(time.monotonic() - stage_start)
+                if remaining > 30:
+                    sem_results_map = self._run_track3(
+                        sem_candidates, flat_source,
+                        timeout=min(remaining - 10, 120),
+                    )
+                    for cid, result in sem_results_map.items():
+                        if _should_upgrade(result):
+                            verified_sem_ids.add(cid)
+                            logger.info(
+                                f"PoC T3 semantic VERIFIED: {cid} — {result.evidence[:80]}"
+                            )
+                        else:
+                            logger.debug(
+                                f"PoC T3 semantic skip: {cid} verdict={result.verdict}"
+                            )
+
+            # ── Track 1+2: forge unit/fuzz (gap findings only) ────────────────
+            forge_candidates = [c for c in gap_candidates if c.track in ("unit", "fuzz")]
             if forge_candidates:
                 if self._forge:
                     remaining = self._cfg.stage_timeout_s - int(time.monotonic() - stage_start)
@@ -297,31 +332,44 @@ class PoCVerificationStage:
                             forge_candidates, flat_source, contest_dir,
                             timeout=remaining - 10,
                         )
-                        upgraded_ids.update(forge_upgrades)
+                        upgraded_gap_ids.update(forge_upgrades)
                 else:
                     logger.debug(
                         f"PoC: {len(forge_candidates)} forge candidates deferred "
                         f"(forge unavailable) — install Foundry to enable Track 1/2"
                     )
 
-            if not upgraded_ids:
-                logger.info("PoC: no findings upgraded")
-                return consensus_vulns, gap_findings
+            # ── Integrate gap upgrades ────────────────────────────────────────
+            if upgraded_gap_ids:
+                new_vulns, remaining_gaps = self._integrate(
+                    upgraded_gap_ids, gap_findings, consensus_vulns
+                )
+                elapsed = int(time.monotonic() - stage_start)
+                logger.info(
+                    f"PoC: +{len(new_vulns) - len(consensus_vulns)} gap findings "
+                    f"upgraded Tier-2 → Tier-1 in {elapsed}s"
+                )
+                consensus_vulns = new_vulns
+                gap_findings    = remaining_gaps
+            else:
+                logger.info("PoC: no gap findings upgraded")
 
-            # Integrate results
-            new_vulns, remaining_gaps = self._integrate(
-                upgraded_ids, gap_findings, consensus_vulns
-            )
-            elapsed = int(time.monotonic() - stage_start)
-            logger.info(
-                f"PoC: +{len(new_vulns) - len(consensus_vulns)} upgraded to Tier-1 "
-                f"in {elapsed}s"
-            )
-            return new_vulns, remaining_gaps
+            # ── Mark verified semantic findings ───────────────────────────────
+            if verified_sem_ids:
+                for sr in semantic_results:
+                    if sr.get("semantic_vuln_id") in verified_sem_ids:
+                        sr["poc_verified"] = True
+                logger.info(
+                    f"PoC: {len(verified_sem_ids)} semantic finding(s) marked poc_verified=True"
+                )
+            else:
+                logger.info("PoC: no semantic findings verified")
+
+            return consensus_vulns, gap_findings, semantic_results
 
         except Exception as exc:
             logger.warning(f"PoC stage error (non-fatal): {exc}")
-            return consensus_vulns, gap_findings
+            return consensus_vulns, gap_findings, semantic_results
 
     # ── candidate selection ───────────────────────────────────────────────────
 
@@ -371,6 +419,45 @@ class PoCVerificationStage:
             + fuzz[:self._cfg.max_fuzz_candidates]
             + llm[:self._cfg.max_llm_candidates]
         )
+
+    def _select_semantic_candidates(
+        self, semantic_results: List[Dict[str, Any]]
+    ) -> List[_PoCCandidate]:
+        """
+        Select S-track findings eligible for Track-3 LLM verification.
+        Filters by min_semantic_confidence and LLM_QUERY_CATEGORIES membership.
+        Already-verified findings are skipped.
+        """
+        candidates = []
+        for sr in semantic_results:
+            if sr.get("poc_verified"):
+                continue
+            conf = sr.get("confidence_score", 0.0)
+            if conf < self._cfg.min_semantic_confidence:
+                continue
+            sem_cat = sr.get("category", "")
+            if sem_cat not in LLM_QUERY_CATEGORIES:
+                continue
+            fns = sr.get("affected_functions", [])
+            if not fns:
+                continue
+            sem_id = sr.get("semantic_vuln_id") or sr.get("id", "")
+            if not sem_id:
+                continue
+            contract = sr.get("contract") or (sr.get("title", "Contract").split()[0])
+            candidates.append(_PoCCandidate(
+                gap_id=sem_id,
+                swc_id="",
+                swc_category=sem_cat,
+                semantic_cat=sem_cat,
+                contract_name=contract,
+                function_names=fns,
+                description=sr.get("description", ""),
+                source_count=0,
+                track="llm",
+                gap_finding=sr,
+            ))
+        return candidates[:self._cfg.max_semantic_candidates]
 
     # ── Track 3: LLM targeted query ───────────────────────────────────────────
 
@@ -520,50 +607,142 @@ class PoCVerificationStage:
 
         return upgraded
 
+    # ── LLM test generation system prompt ────────────────────────────────────
+
+    _POC_SYSTEM_PROMPT = """\
+You are a smart contract security researcher writing Forge unit tests to PROVE \
+a vulnerability exists.
+
+Rules:
+- Output ONLY the Solidity function body (no function signature, no contract wrapper).
+- The test PASSES when the exploit succeeds (use assertTrue / assertGt / assertEq \
+as appropriate).
+- Use vm.deal, vm.prank, vm.expectRevert from forge-std when needed.
+- Never import anything other than forge-std/Test.sol.
+- If a deployment constructor is complex, use a minimal inline mock instead.
+- Max 25 lines. No comments explaining the rules — only code."""
+
+    def _llm_generate_test_body(
+        self,
+        c: _PoCCandidate,
+        flat_source: str,
+    ) -> Optional[str]:
+        """
+        Ask the LLM to generate a Solidity test function body for one candidate.
+        Returns the raw body string (to be inserted inside the test function), or
+        None on failure — caller falls back to a compile-only stub.
+        """
+        fn      = c.function_names[0].rstrip("()") if c.function_names else "unknown"
+        snippet = _extract_snippet(flat_source, fn, self._cfg.snippet_max_lines)
+        if not snippet:
+            return None
+
+        swc_desc = {
+            "SWC-101": "integer overflow / unsafe cast — a value wraps around type(uintN).max",
+            "SWC-107": "reentrancy — external call before state update lets attacker re-enter",
+            "SWC-105": "unprotected function — missing access control on privileged operation",
+            "SWC-112": "delegatecall to untrusted callee — storage corruption via proxy",
+            "SWC-114": "transaction order dependence — frontrunning changes outcome for victim",
+            "SWC-128": "unbounded loop — gas exhaustion DoS on iteration over growing array",
+        }.get(c.swc_id, c.description[:120])
+
+        user_msg = (
+            f"Vulnerability: {c.swc_id} — {swc_desc}\n"
+            f"Target function: {fn}()\n"
+            f"Contract: {c.contract_name}\n\n"
+            f"Relevant source:\n```solidity\n{snippet}\n```\n\n"
+            f"Write the body of a Forge test function that PASSES only when "
+            f"the {c.swc_id} vulnerability in {fn}() is successfully exploited.\n"
+            f"Output ONLY the function body (statements inside the curly braces). "
+            f"No function signature. No imports. No contract wrapper."
+        )
+
+        try:
+            body = self._llm.chat(
+                messages=[
+                    {"role": "system", "content": self._POC_SYSTEM_PROMPT},
+                    {"role": "user",   "content": user_msg},
+                ],
+                temperature=0.1,
+                max_tokens=512,
+            )
+            # Strip markdown fences if LLM wraps output
+            body = re.sub(r"^```[a-z]*\s*", "", body.strip(), flags=re.IGNORECASE)
+            body = re.sub(r"\s*```$", "", body)
+            # Basic sanity: must contain at least one Solidity statement
+            if not any(kw in body for kw in ("assert", "vm.", "require", "revert", "=")):
+                logger.debug(f"PoC LLM body for {c.swc_id}/{fn} has no statements — using stub")
+                return None
+            return body.strip()
+        except Exception as e:
+            logger.debug(f"PoC LLM generation failed for {c.swc_id}/{fn}: {e}")
+            return None
+
     def _generate_poc_file(
         self, candidates: List[_PoCCandidate], flat_source: str
     ) -> str:
-        """Generate a single PoC.t.sol with all test functions."""
+        """
+        Generate a single PoC.t.sol with one test function per candidate.
+
+        Fix 2: each test body is LLM-generated (exploit logic + assertions) instead
+        of a compile-only stub.  Falls back to a stub if LLM fails so the pipeline
+        never blocks.  A stub always compiles but has no assertions — it will PASS
+        trivially and NOT trigger an upgrade (upgrade requires a PASS on a test that
+        has real assertions; empty stubs are caught by the evidence guard in Track 3).
+        """
         test_fns = []
-        setup_lines = []
+        setup_lines: List[str] = []
         seen_contracts: Set[str] = set()
 
         for c in candidates:
-            fn = c.function_names[0].rstrip("()") if c.function_names else "fn"
+            fn        = c.function_names[0].rstrip("()") if c.function_names else "fn"
             swc_short = c.swc_id.replace("-", "").lower()
             contract  = c.contract_name.split()[0] if c.contract_name else "Target"
 
             if contract not in seen_contracts:
                 seen_contracts.add(contract)
                 setup_lines.append(
-                    f"        // {contract} target_{contract.lower()} = new {contract}();"
+                    f"        // setUp: deploy {contract} here if needed"
                 )
+
+            # Ask LLM for exploit body; fall back to minimal compilable stub
+            llm_body = self._llm_generate_test_body(c, flat_source)
+            if llm_body:
+                body_lines = "\n".join(f"        {ln}" for ln in llm_body.splitlines())
+                logger.debug(f"PoC: LLM body generated for {c.swc_id}/{fn}")
+            else:
+                # Stub: compiles but has no assertions → always PASS trivially.
+                # upgrade() will NOT fire because the test_name lookup succeeds but
+                # the forge test result is a trivial pass with no evidence.
+                body_lines = (
+                    f"        // Stub — LLM generation failed for {c.swc_id} in {fn}.\n"
+                    f"        // Replace with exploit logic + assertion to enable upgrade."
+                )
+                logger.debug(f"PoC: using stub for {c.swc_id}/{fn} (LLM unavailable)")
 
             if c.track == "fuzz":
                 test_fns.append(
                     f"    function testFuzz_{swc_short}_{fn}(uint16 param) public {{\n"
-                    f"        // Fuzz PoC for {c.swc_id} in {fn}\n"
-                    f"        // TODO: implement for {contract}\n"
+                    f"{body_lines}\n"
                     f"    }}"
                 )
             else:
                 test_fns.append(
                     f"    function test_{swc_short}_{fn}() public {{\n"
-                    f"        // Unit PoC for {c.swc_id} in {fn}\n"
-                    f"        // TODO: implement for {contract}\n"
+                    f"{body_lines}\n"
                     f"    }}"
                 )
 
         return (
-            '// SPDX-License-Identifier: UNLICENSED\n'
-            'pragma solidity ^0.8.0;\n\n'
+            "// SPDX-License-Identifier: UNLICENSED\n"
+            "pragma solidity ^0.8.0;\n\n"
             'import "forge-std/Test.sol";\n\n'
-            'contract _poc_mirofish is Test {\n\n'
-            '    function setUp() public {\n'
+            "contract _poc_mirofish is Test {\n\n"
+            "    function setUp() public {\n"
             + "\n".join(setup_lines) + "\n"
-            '    }\n\n'
+            "    }\n\n"
             + "\n\n".join(test_fns) + "\n"
-            '}\n'
+            "}\n"
         )
 
     def _docker_forge(
@@ -766,7 +945,10 @@ library console {
             for contract_results in data.values():
                 test_results = contract_results.get("test_results", {})
                 for test_name, test_data in test_results.items():
-                    results[test_name] = test_data.get("status") == "Success"
+                    # Fix 3: forge JSON uses "functionName()" signatures; strip trailing
+                    # "()" so lookup via test_name (built without parens) always matches.
+                    normalized = test_name.rstrip("()")
+                    results[normalized] = test_data.get("status") == "Success"
         except Exception:
             pass
         return results
@@ -810,3 +992,97 @@ library console {
                 remaining_gaps.append(gap)
 
         return consensus_vulns + newly_confirmed, remaining_gaps
+
+    # ─── v2 interface — borderline findings from Round 3 ─────────────────────
+
+    @staticmethod
+    def _best_attacker_scenario(finding: Dict[str, Any]) -> str:
+        """Extract the most informative attacker scenario from Round 3 verdicts."""
+        verdicts = finding.get("attacker_verdicts", {})
+        if not verdicts:
+            return ""
+        _prio = {"CONFIRMED": 2, "PLAUSIBLE": 1, "INVALID": 0, "NOT_APPLICABLE": -1}
+        best = max(verdicts.values(), key=lambda v: _prio.get(v.get("verdict","INVALID"), 0))
+        steps = " ".join(best.get("attack_steps", []))
+        entry = best.get("entry_point", "")
+        if best.get("verdict") in ("CONFIRMED", "PLAUSIBLE") and (steps or entry):
+            return f"Entry: {entry}. Steps: {steps}. Outcome: {best.get('expected_outcome','')}"
+        return ""
+
+    @staticmethod
+    def _normalize_borderline(finding: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Normalise a v2 borderline finding to the format expected by
+        _select_candidates() and _integrate() (same as v1 gap_findings).
+        """
+        fn = finding.get("function_name", "")
+        affected = [fn] if fn else []
+        return {
+            "finding_id":         finding.get("pair_id", ""),
+            "title":              f"{finding.get('swc_id') or finding.get('category','?')} in {fn}",
+            "swc_id":             finding.get("swc_id", ""),
+            "swc_category":       finding.get("category", ""),
+            "severity":           finding.get("severity", "medium"),
+            "affected_functions": affected,
+            "description":        finding.get("description", ""),
+            "source_count":       len(finding.get("submitters", [1])),  # >= 1
+            "confidence":         finding.get("round2_score", 0.3),
+            "exploit_scenario":   PoCVerificationStage._best_attacker_scenario(finding),
+            "attacker_rate":      finding.get("attacker_rate", 0.0),
+            "v2_borderline":      True,
+        }
+
+    def run_v2_borderline(
+        self,
+        borderline_findings:  List[Dict[str, Any]],
+        flat_source:          str,
+        consensus_vulns:      Optional[List[Dict[str, Any]]] = None,
+        contest_dir:          Optional[str] = None,
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """
+        v2 PoC interface: accepts borderline findings from Round 3
+        (0 < attacker_rate < 0.4 or effective_M < 2).
+
+        Converts them to v1 gap_findings format internally, then runs the
+        same Track 1/2/3 logic. Logic inside _select_candidates() and
+        _integrate() is NOT changed.
+
+        Returns (updated_consensus_vulns, remaining_borderline, updated_semantic).
+        """
+        consensus_vulns = list(consensus_vulns or [])
+        if not self._cfg.enabled or not borderline_findings:
+            return consensus_vulns, borderline_findings, []
+
+        # Separate SWC vs semantic borderline
+        swc_borderline = [f for f in borderline_findings if f.get("kind") != "semantic"]
+        sem_borderline = [f for f in borderline_findings if f.get("kind") == "semantic"]
+
+        # Normalise SWC borderline to gap_findings format
+        gap_findings = [self._normalize_borderline(f) for f in swc_borderline]
+
+        # Normalise semantic borderline to semantic_results format
+        semantic_as_results = []
+        for f in sem_borderline:
+            fn = f.get("function_name", "")
+            semantic_as_results.append({
+                "finding_id":       f.get("pair_id",""),
+                "category":         f.get("category","other"),
+                "severity":         f.get("severity","medium"),
+                "affected_functions": [fn] if fn else [],
+                "evidence":         " | ".join(f.get("evidence_snippets",[])),
+                "confidence_score": f.get("round2_score", 0.3),
+                "semantic_vuln_id": f.get("pair_id",""),
+                "poc_verified":     False,
+                "v2_borderline":    True,
+            })
+
+        # Delegate to existing run() — all internal logic unchanged
+        upd_consensus, upd_gaps, upd_semantic = self.run(
+            consensus_vulns=consensus_vulns,
+            gap_findings=gap_findings,
+            flat_source=flat_source,
+            contest_dir=contest_dir,
+            semantic_results=semantic_as_results,
+        )
+
+        return upd_consensus, upd_gaps, upd_semantic

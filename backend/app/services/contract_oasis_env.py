@@ -1087,6 +1087,54 @@ def parse_semantic_finding_from_text(
     }
 
 
+# ─── v2 Multi-finding Parser ─────────────────────────────────────────────────
+
+def parse_all_contract_findings_from_text(
+    text: str,
+    agent_profile: "ContractAgentProfile",
+    round_num: int,
+    known_functions: Optional[set] = None,
+) -> Dict[str, List[Dict[str, Any]]]:
+    """
+    Parse ALL FINDING and SEMANTIC_FINDING blocks from a single agent response.
+
+    Unlike parse_contract_finding_from_text() which stops at the first block,
+    this function extracts every block in the response.
+
+    Returns:
+        {
+            "swc_findings":      [dict, ...],   # from FINDING: blocks
+            "semantic_findings": [dict, ...],   # from SEMANTIC_FINDING: blocks
+        }
+    """
+    swc_findings: List[Dict[str, Any]] = []
+    semantic_findings: List[Dict[str, Any]] = []
+
+    # Split text into segments at each top-level FINDING/SEMANTIC_FINDING marker.
+    # We use a zero-width split so the marker stays at the start of each segment.
+    segment_pattern = re.compile(
+        r'(?=(?:^|\n)(?:FINDING|SEMANTIC_FINDING)\s*:)',
+        re.IGNORECASE,
+    )
+    segments = segment_pattern.split(text)
+
+    for seg in segments:
+        seg = seg.strip()
+        if not seg:
+            continue
+
+        if re.match(r'(?i)^SEMANTIC_FINDING\s*:', seg):
+            result = parse_semantic_finding_from_text(seg, agent_profile, round_num, known_functions)
+            if result:
+                semantic_findings.append(result)
+        elif re.match(r'(?i)^FINDING\s*:', seg):
+            result = parse_contract_finding_from_text(seg, agent_profile, round_num, known_functions)
+            if result:
+                swc_findings.append(result)
+
+    return {"swc_findings": swc_findings, "semantic_findings": semantic_findings}
+
+
 # ─── OASIS Config Builder ─────────────────────────────────────────────────────
 
 @dataclass
@@ -1305,3 +1353,595 @@ SWC-121 (Signature Replay). For DeFi-only patterns: `DEFI-<PATTERN>`.
 
 Start the audit. Report your first findings based on the contract context above.
 """
+
+
+# ─── v2 Round Prompt Builders ─────────────────────────────────────────────────
+
+def build_round1_prompt(
+    agent_profile: "ContractAgentProfile",
+    context_summary: str,
+    dep_graph_text: str = "",
+    intent_summary: str = "",
+    focus_directive: str = "",
+) -> str:
+    """
+    Round 1 — Independent Discovery.
+
+    Rules:
+    - No prior findings injected (blind discovery)
+    - Agent must enumerate ALL functions touched by each SWC it finds
+    - Only FINDING / SEMANTIC_FINDING format allowed — no CLAIM/VALIDATE/CHALLENGE/CONFIRM/DISMISS
+    """
+    swc_focus_block = ""
+    if agent_profile.swc_focus:
+        swc_focus_block = (
+            "\nYour domain is particularly sensitive to these SWC IDs: "
+            + ", ".join(agent_profile.swc_focus)
+            + ". Prioritize these patterns but do not limit your search.\n"
+        )
+
+    dep_block = f"\n=== STATIC DATA-FLOW SUMMARY ===\n{dep_graph_text}\n" if dep_graph_text else ""
+    intent_block = f"\n=== CONTRACT INTENT ===\n{intent_summary}\n" if intent_summary else ""
+    focus_block = f"\n{focus_directive}\n" if focus_directive else ""
+
+    return f"""\
+=== ROUND 1 — INDEPENDENT DISCOVERY ===
+You are {agent_profile.agent_id} ({agent_profile.domain_group}/{agent_profile.persona}).
+{agent_profile.system_prompt}
+{swc_focus_block}
+⚠ ROUND 1 FORMAT OVERRIDE — Use ONLY FINDING / SEMANTIC_FINDING blocks.
+  Do NOT write CLAIM, VALIDATE, CHALLENGE, CONFIRM, or DISMISS in this round.
+  Any such blocks will be discarded. Output format is strictly FINDING or SEMANTIC_FINDING.
+
+{focus_block}{intent_block}{dep_block}
+=== CONTRACT UNDER REVIEW ===
+{context_summary}
+
+=== INSTRUCTIONS ===
+Perform an independent security analysis. No other expert's findings are shared at this stage.
+
+MANDATORY COVERAGE — before writing any FINDING, explicitly check each of these:
+  1. Reentrancy (SWC-107): external calls before state updates, callbacks, hooks
+  2. Integer issues (SWC-101): explicit casts uint128(x), int24(y), unchecked{{}} blocks
+     ⚠ Solidity 0.8 only protects arithmetic operators (+,-,*) — NOT explicit casts
+  3. Access control (SWC-105): unprotected state-modifying functions, missing onlyOwner
+  4. DoS / unbounded loops (SWC-113/128): loops over user-controlled arrays
+  5. Oracle / price manipulation (DEFI-FLASH_LOAN, DEFI-ORACLE_MANIP)
+  6. Business-logic invariants: accounting errors, wrong ordering, economic edge cases
+
+COVERAGE RULE — if a vulnerability pattern appears in MULTIPLE functions, write one FINDING per function.
+Do NOT collapse "function A and B" into a single FINDING. A missed function = a missed bug.
+
+OUTPUT FORMAT — use ONLY these two formats. No CLAIM, VALIDATE, CHALLENGE, CONFIRM, or DISMISS.
+
+For SWC-tagged findings:
+  FINDING: <concise title>
+  SWC: <SWC-NNN or DEFI-PATTERN>
+  SEVERITY: <critical|high|medium|low>
+  FUNCTION: <exact function name from contract>
+  EVIDENCE: <code snippet or specific pattern>
+  DESCRIPTION: <why this is exploitable>
+  PATCH: <concrete fix>
+
+For business-logic / semantic bugs (no SWC applies):
+  SEMANTIC_FINDING: <concise title>
+  CATEGORY: <{SEMANTIC_CATEGORY_PIPE_STRING}>
+  SEVERITY: <critical|high|medium|low>
+  FUNCTION: <exact function name from contract>
+  EVIDENCE: <code snippet or economic invariant violated>
+  ATTACK_PATH: <step-by-step exploit scenario>
+  PATCH: <concrete fix>
+
+⚠ EVIDENCE GATE: every FINDING must include at least one of:
+  - A real function name that exists in the contract source
+  - A specific code snippet (assignment, require(), call pattern)
+  Hypothetical findings without code evidence will be dropped.
+
+Write ALL findings you can identify. Do not stop at the first one.
+"""
+
+
+def build_round2_prompt(
+    agent_profile: "ContractAgentProfile",
+    candidate_pairs: List[Dict[str, Any]],
+) -> str:
+    """
+    Round 2 — Blind Voting.
+
+    candidate_pairs: list of dicts, each has:
+      - pair_id: str
+      - kind:    "swc" | "semantic"
+      - swc_id:  str (for swc kind)
+      - category: str (for semantic kind)
+      - function_name: str
+      - evidence_snippets: list[str]  (aggregated from Round 1 — shown for initial vote)
+
+    Self-exclusion: pairs submitted by this agent are already removed by the orchestrator.
+    """
+    if not candidate_pairs:
+        return (
+            f"=== ROUND 2 — BLIND VOTING ===\n"
+            f"Agent: {agent_profile.agent_id}\n\n"
+            "No candidate pairs assigned to you in this round "
+            "(all submitted pairs were your own). No action required.\n"
+        )
+
+    pair_lines: List[str] = []
+    for idx, p in enumerate(candidate_pairs, start=1):
+        if p.get("kind") == "semantic":
+            label = f"SEMANTIC [{p.get('category', '?')}]"
+        else:
+            label = f"SWC [{p.get('swc_id', '?')}]"
+        fn = p.get("function_name", "?")
+        snippets = p.get("evidence_snippets", [])
+        snip_text = " | ".join(snippets[:2]) if snippets else "(no evidence provided)"
+        pair_lines.append(
+            f"  [{idx}] pair_id={p['pair_id']}  {label}  function={fn}\n"
+            f"       evidence: {snip_text[:200]}"
+        )
+
+    pairs_block = "\n".join(pair_lines)
+
+    return f"""\
+=== ROUND 2 — BLIND VOTING ===
+Agent: {agent_profile.agent_id} ({agent_profile.domain_group}/{agent_profile.persona})
+
+You are reviewing candidate vulnerability pairs discovered in Round 1 by OTHER experts.
+You do NOT know who submitted each pair. Current vote counts are hidden.
+
+=== CANDIDATE PAIRS TO VOTE ON ===
+{pairs_block}
+
+=== VOTING INSTRUCTIONS ===
+For each pair above, write one vote block. Do NOT skip any pair.
+
+ACCEPT if: you can independently verify from the contract source that the vulnerability pattern
+           is present in the named function AND it is exploitable.
+REJECT  if: the pattern is absent, the function does not exist, or it is a false positive.
+
+Vote format (one block per pair, in any order):
+  VOTE: ACCEPT | REJECT
+  PAIR: <pair_id>
+  EVIDENCE: <code snippet from contract that confirms or refutes>
+  REASON: <one-sentence justification>
+
+Rules:
+  - You MUST cast exactly one vote per pair listed above.
+  - EVIDENCE must reference actual code in THIS contract. "I agree" is not evidence.
+  - Do NOT write FINDING/SEMANTIC_FINDING in this round — only VOTE blocks.
+  - Do NOT change your vote based on other agents' reasoning (votes are blind).
+
+Write all vote blocks now.
+"""
+
+
+def build_round2_update_prompt(
+    agent_profile: "ContractAgentProfile",
+    revealed_evidence: List[Dict[str, Any]],
+) -> str:
+    """
+    Round 2 — Evidence Reveal Update.
+
+    revealed_evidence: list of dicts, each has:
+      - pair_id: str
+      - kind: "swc" | "semantic"
+      - swc_id / category: str
+      - function_name: str
+      - all_evidence: list[str]  (aggregated from ALL voters, anonymized)
+      - agent_vote: "ACCEPT" | "REJECT"  (this agent's initial vote)
+
+    Agents may change their vote ONLY if new evidence reveals something they missed in the code.
+    """
+    if not revealed_evidence:
+        return ""
+
+    reveal_lines: List[str] = []
+    for p in revealed_evidence:
+        if p.get("kind") == "semantic":
+            label = f"SEMANTIC [{p.get('category', '?')}]"
+        else:
+            label = f"SWC [{p.get('swc_id', '?')}]"
+        fn = p.get("function_name", "?")
+        your_vote = p.get("agent_vote", "?")
+        all_ev = p.get("all_evidence", [])
+        ev_text = "\n       ".join(f"• {e[:180]}" for e in all_ev[:4])
+        reveal_lines.append(
+            f"  pair_id={p['pair_id']}  {label}  function={fn}  YOUR_VOTE={your_vote}\n"
+            f"  Aggregated evidence from all reviewers:\n"
+            f"       {ev_text}"
+        )
+
+    reveal_block = "\n\n".join(reveal_lines)
+
+    return f"""\
+=== ROUND 2 — EVIDENCE REVEAL (Update Phase) ===
+Agent: {agent_profile.agent_id} ({agent_profile.domain_group}/{agent_profile.persona})
+
+Below are aggregated evidence snippets collected from all reviewers (anonymized).
+You may update your vote ONCE if the new evidence reveals code you had not seen.
+
+=== REVEALED EVIDENCE ===
+{reveal_block}
+
+=== UPDATE INSTRUCTIONS ===
+Write an UPDATE_VOTE block ONLY for pairs where you are changing your vote.
+If you are keeping your original vote, write nothing for that pair.
+
+CRITICAL — you may NOT change your vote solely because:
+  - Many agents voted ACCEPT (bandwagon)
+  - You feel uncertain
+Only change if the revealed code snippet shows a concrete pattern you missed.
+
+Update format:
+  UPDATE_VOTE: ACCEPT | REJECT
+  PAIR: <pair_id>
+  NEW_EVIDENCE: <specific code path that changed your assessment>
+  REASON: <what you missed previously>
+
+If you are keeping ALL original votes, write:
+  NO_CHANGES
+"""
+
+
+def build_round3_prompt(
+    attacker_profile: "ContractAgentProfile",
+    finding: Dict[str, Any],
+    contract_source: str,
+) -> str:
+    """
+    Round 3 — Blind Attacker Validation.
+
+    finding: dict with keys:
+      - pair_id: str
+      - kind: "swc" | "semantic"
+      - swc_id / category: str
+      - function_name: str
+      - round2_score: float
+
+    contract_source: full flattened contract source.
+
+    No other attacker's scenario is injected. No Round 2 evidence shown.
+    """
+    if finding.get("kind") == "semantic":
+        vuln_label = f"SEMANTIC CATEGORY: {finding.get('category', '?')}"
+    else:
+        vuln_label = f"SWC ID: {finding.get('swc_id', '?')}"
+
+    fn = finding.get("function_name", "?")
+    pair_id = finding.get("pair_id", "?")
+    r2_score = finding.get("round2_score", 0.0)
+
+    return f"""\
+=== ROUND 3 — ATTACKER VALIDATION ===
+Attacker: {attacker_profile.agent_id} ({attacker_profile.domain_group}/{attacker_profile.persona})
+{attacker_profile.system_prompt}
+
+=== TARGET FINDING ===
+  pair_id      : {pair_id}
+  {vuln_label}
+  FUNCTION     : {fn}
+  Round-2 score: {r2_score:.2f}  (0=no votes, 1=all voted ACCEPT)
+
+=== CONTRACT SOURCE ===
+{contract_source[:12000]}
+
+=== YOUR TASK ===
+Independently assess whether this vulnerability is exploitable from your attacker profile.
+You have NOT seen other attackers' assessments. Approach this with adversarial creativity.
+
+VERDICT OPTIONS:
+  CONFIRMED     — you can construct a concrete, step-by-step exploit
+  PLAUSIBLE     — the vulnerability exists but full exploit requires assumptions you cannot verify
+  INVALID       — the vulnerability is NOT present or is protected by mitigations in the code
+  NOT_APPLICABLE — this finding type is outside your attacker domain (use sparingly)
+
+Response format:
+
+If CONFIRMED or PLAUSIBLE:
+  VERDICT: CONFIRMED | PLAUSIBLE
+  ENTRY_POINT: <function or transaction sequence that starts the attack>
+  PRE_CONDITION: <on-chain state required before the attack>
+  ATTACK_STEPS: <numbered step-by-step sequence>
+  EXPECTED_OUTCOME: <what the attacker gains / what invariant is broken>
+
+If INVALID:
+  VERDICT: INVALID
+  ENTRY_POINT: <function you checked>
+  REASON: <specific mitigation or code pattern that prevents the exploit>
+
+If NOT_APPLICABLE:
+  VERDICT: NOT_APPLICABLE
+  REASON: <why this finding type is outside your domain>
+
+⚠ RULES:
+  - DEFAULT STANCE: INVALID. Do not confirm without a traceable exploit path.
+  - CONFIRM only if you can trace the attack through THIS contract's actual code.
+  - Do NOT use FINDING/SEMANTIC_FINDING/VOTE format in this round.
+  - pair_id must appear exactly as shown above in your verdict.
+  PAIR: {pair_id}
+"""
+
+
+def build_round3_update_prompt(
+    attacker_profile: "ContractAgentProfile",
+    finding: Dict[str, Any],
+    invalid_attacker_scenarios: List[Dict[str, Any]],
+) -> str:
+    """
+    Round 3 — Evidence Reveal Update for INVALID verdicts.
+
+    invalid_attacker_scenarios: list of dicts from other attackers who returned INVALID,
+    including their REASON. Used to see if any missed a mitigation bypass.
+    This is only called for attackers who initially returned INVALID.
+    """
+    pair_id = finding.get("pair_id", "?")
+    fn = finding.get("function_name", "?")
+
+    reason_lines: List[str] = []
+    for s in invalid_attacker_scenarios[:3]:
+        reason_lines.append(f"  • {s.get('reason', '(no reason)')[:200]}")
+    reasons_block = "\n".join(reason_lines) if reason_lines else "  (none)"
+
+    return f"""\
+=== ROUND 3 — EVIDENCE REVEAL (INVALID Update) ===
+Attacker: {attacker_profile.agent_id}
+pair_id : {pair_id}  function={fn}
+
+Other attackers who also returned INVALID cited these reasons:
+{reasons_block}
+
+If you now believe your INVALID verdict was wrong after reading the above, you may update ONCE:
+
+  UPDATE_VERDICT: PLAUSIBLE
+  PAIR: {pair_id}
+  NEW_FINDING: <specific code path or condition you had not considered>
+
+If you are keeping your INVALID verdict, write:
+  VERDICT_UNCHANGED
+  PAIR: {pair_id}
+"""
+
+
+# ─── v2 Round Response Parsers ────────────────────────────────────────────────
+
+def parse_round2_votes_from_text(
+    text: str,
+    agent_id: str,
+) -> List[Dict[str, Any]]:
+    """
+    Parse all VOTE blocks from a Round 2 response.
+
+    Expected format (one block per pair):
+      VOTE: ACCEPT | REJECT
+      PAIR: <pair_id>
+      EVIDENCE: <text>
+      REASON: <text>
+
+    Returns list of vote dicts.
+    """
+    results: List[Dict[str, Any]] = []
+    # Split on each VOTE: line
+    blocks = re.split(r'(?im)^VOTE\s*:', text)
+    for block in blocks[1:]:
+        lines = block.strip().splitlines()
+        vote_val = lines[0].strip().upper() if lines else ""
+        if vote_val not in ("ACCEPT", "REJECT"):
+            continue
+
+        pair_id = evidence = reason = ""
+        for ln in lines[1:]:
+            stripped = ln.strip()
+            lower = stripped.lower()
+            if lower.startswith("pair:"):
+                pair_id = stripped.split(":", 1)[1].strip()
+            elif lower.startswith("evidence:"):
+                evidence = stripped.split(":", 1)[1].strip()
+            elif lower.startswith("reason:"):
+                reason = stripped.split(":", 1)[1].strip()
+
+        if not pair_id:
+            continue
+
+        results.append({
+            "agent_id":  agent_id,
+            "pair_id":   pair_id,
+            "vote":      vote_val,
+            "evidence":  evidence,
+            "reason":    reason,
+        })
+
+    return results
+
+
+def parse_round2_update_votes_from_text(
+    text: str,
+    agent_id: str,
+) -> List[Dict[str, Any]]:
+    """
+    Parse UPDATE_VOTE blocks from a Round 2 update response.
+
+    Format:
+      UPDATE_VOTE: ACCEPT | REJECT
+      PAIR: <pair_id>
+      NEW_EVIDENCE: <text>
+      REASON: <text>
+
+    Returns list of update dicts (empty if NO_CHANGES).
+    """
+    if re.search(r'(?i)\bNO_CHANGES\b', text):
+        return []
+
+    results: List[Dict[str, Any]] = []
+    blocks = re.split(r'(?im)^UPDATE_VOTE\s*:', text)
+    for block in blocks[1:]:
+        lines = block.strip().splitlines()
+        vote_val = lines[0].strip().upper() if lines else ""
+        if vote_val not in ("ACCEPT", "REJECT"):
+            continue
+
+        pair_id = new_evidence = reason = ""
+        for ln in lines[1:]:
+            stripped = ln.strip()
+            lower = stripped.lower()
+            if lower.startswith("pair:"):
+                pair_id = stripped.split(":", 1)[1].strip()
+            elif lower.startswith("new_evidence:"):
+                new_evidence = stripped.split(":", 1)[1].strip()
+            elif lower.startswith("reason:"):
+                reason = stripped.split(":", 1)[1].strip()
+
+        if not pair_id:
+            continue
+
+        results.append({
+            "agent_id":     agent_id,
+            "pair_id":      pair_id,
+            "updated_vote": vote_val,
+            "new_evidence": new_evidence,
+            "reason":       reason,
+        })
+
+    return results
+
+
+_VERDICT_VALUES = frozenset({"CONFIRMED", "PLAUSIBLE", "INVALID", "NOT_APPLICABLE"})
+
+
+def parse_round3_verdict_from_text(
+    text: str,
+    attacker_id: str,
+) -> Optional[Dict[str, Any]]:
+    """
+    Parse a Round 3 attacker verdict from response text.
+
+    Accepted formats:
+      VERDICT: CONFIRMED | PLAUSIBLE | INVALID | NOT_APPLICABLE
+      PAIR: <pair_id>
+      ENTRY_POINT: ...
+      PRE_CONDITION: ...
+      ATTACK_STEPS: ...
+      EXPECTED_OUTCOME: ...
+      REASON: ...  (for INVALID / NOT_APPLICABLE)
+
+    Returns dict or None if no valid verdict found.
+    """
+    # Find the LAST VERDICT: line (ignores think-block noise)
+    verdict_matches = list(re.finditer(r'(?im)^VERDICT\s*:\s*(\S+)', text))
+    if not verdict_matches:
+        return None
+
+    m = verdict_matches[-1]
+    verdict_raw = m.group(1).strip().upper().rstrip(".,;")
+    if verdict_raw not in _VERDICT_VALUES:
+        return None
+
+    # Parse fields from the text after the matched VERDICT line
+    tail = text[m.start():]
+
+    pair_id = entry_point = pre_condition = reason = expected_outcome = ""
+    attack_steps: List[str] = []
+    current_field: Optional[str] = None
+    current_value: List[str] = []
+
+    _FIELD_RE_R3 = re.compile(
+        r'(?i)^(VERDICT|PAIR|ENTRY_POINT|PRE_CONDITION|ATTACK_STEPS|EXPECTED_OUTCOME|REASON)\s*:',
+    )
+
+    def _flush_r3():
+        nonlocal pair_id, entry_point, pre_condition, reason, expected_outcome, attack_steps
+        if not current_field or not current_value:
+            return
+        val = " ".join(v for v in current_value if v)
+        f = current_field
+        if f == "pair":
+            pair_id = val
+        elif f == "entry_point":
+            entry_point = val
+        elif f == "pre_condition":
+            pre_condition = val
+        elif f == "reason":
+            reason = val
+        elif f == "expected_outcome":
+            expected_outcome = val
+        elif f == "attack_steps":
+            attack_steps = [v for v in current_value if v]
+
+    for line in tail.splitlines():
+        stripped = line.strip()
+        fm = _FIELD_RE_R3.match(stripped)
+        if fm:
+            _flush_r3()
+            current_field = fm.group(1).lower().replace("_", "_")
+            current_value = [stripped.split(":", 1)[1].strip()]
+        elif current_field and stripped and not _PROTOCOL_KW_RE.match(stripped):
+            current_value.append(stripped)
+
+    _flush_r3()
+
+    # Require pair_id for SWC/semantic findings
+    if not pair_id:
+        # Try to extract from anywhere in the text as fallback
+        pair_match = re.search(r'(?i)PAIR\s*:\s*(\S+)', text)
+        if pair_match:
+            pair_id = pair_match.group(1).strip()
+
+    return {
+        "attacker_id":      attacker_id,
+        "pair_id":          pair_id,
+        "verdict":          verdict_raw,
+        "entry_point":      entry_point,
+        "pre_condition":    pre_condition,
+        "attack_steps":     attack_steps,
+        "expected_outcome": expected_outcome,
+        "reason":           reason,
+    }
+
+
+def parse_round3_update_verdict_from_text(
+    text: str,
+    attacker_id: str,
+) -> Optional[Dict[str, Any]]:
+    """
+    Parse Round 3 update verdict (INVALID → PLAUSIBLE change).
+
+    Format:
+      UPDATE_VERDICT: PLAUSIBLE
+      PAIR: <pair_id>
+      NEW_FINDING: <text>
+
+    or:
+      VERDICT_UNCHANGED
+      PAIR: <pair_id>
+    """
+    if re.search(r'(?i)\bVERDICT_UNCHANGED\b', text):
+        pair_match = re.search(r'(?i)PAIR\s*:\s*(\S+)', text)
+        return {
+            "attacker_id": attacker_id,
+            "pair_id":     pair_match.group(1).strip() if pair_match else "",
+            "updated_verdict": None,  # no change
+            "new_finding": "",
+        }
+
+    m = re.search(r'(?im)^UPDATE_VERDICT\s*:\s*(\S+)', text)
+    if not m:
+        return None
+
+    verdict_raw = m.group(1).strip().upper()
+    if verdict_raw not in _VERDICT_VALUES:
+        return None
+
+    pair_id = new_finding = ""
+    for ln in text[m.start():].splitlines()[1:]:
+        stripped = ln.strip()
+        lower = stripped.lower()
+        if lower.startswith("pair:"):
+            pair_id = stripped.split(":", 1)[1].strip()
+        elif lower.startswith("new_finding:"):
+            new_finding = stripped.split(":", 1)[1].strip()
+
+    return {
+        "attacker_id":      attacker_id,
+        "pair_id":          pair_id,
+        "updated_verdict":  verdict_raw,
+        "new_finding":      new_finding,
+    }

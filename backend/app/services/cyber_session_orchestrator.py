@@ -47,6 +47,12 @@ def _get_contract_modules():
         build_published_registry as contract_published_registry,
         get_phase_for_round as contract_get_phase,
         extract_known_functions,
+        # v2 parsers
+        parse_all_contract_findings_from_text,
+        build_round1_prompt, build_round2_prompt, build_round2_update_prompt,
+        build_round3_prompt, build_round3_update_prompt,
+        parse_round2_votes_from_text, parse_round2_update_votes_from_text,
+        parse_round3_verdict_from_text, parse_round3_update_verdict_from_text,
     )
     return {
         "env_builder":          ContractAuditEnvBuilder,
@@ -58,6 +64,17 @@ def _get_contract_modules():
         "published_registry":   contract_published_registry,
         "get_phase":            contract_get_phase,
         "extract_funcs":        extract_known_functions,
+        # v2
+        "parse_all_findings":   parse_all_contract_findings_from_text,
+        "r1_prompt":            build_round1_prompt,
+        "r2_prompt":            build_round2_prompt,
+        "r2_update_prompt":     build_round2_update_prompt,
+        "r3_prompt":            build_round3_prompt,
+        "r3_update_prompt":     build_round3_update_prompt,
+        "parse_r2_votes":       parse_round2_votes_from_text,
+        "parse_r2_upd":         parse_round2_update_votes_from_text,
+        "parse_r3_verdict":     parse_round3_verdict_from_text,
+        "parse_r3_upd":         parse_round3_update_verdict_from_text,
     }
 
 logger = get_logger("mirofish.cyber_orchestrator")
@@ -507,10 +524,25 @@ class CyberSessionOrchestrator:
             )
             self._save_session_state(session_state)
 
+            # v2 feature flag — 3-round architecture
+            _audit_v = os.environ.get("AUDIT_PIPELINE_VERSION", "v1").lower()
+            if mode == "contract_audit" and _audit_v == "v2":
+                self._run_contract_audit_v2(
+                    task_id=task_id,
+                    session_id=session_id,
+                    graph_id=graph_id,
+                    network_summary=network_summary,
+                    profiles=profiles,
+                    known_functions=known_functions,
+                    session_state=session_state,
+                    invariants=invariants,
+                )
+                return
+
             # RC-3 Two-step Phase C: computed after round 7, injected into Phase C rounds
             phase_c_review_list = ""
 
-            # Chạy 10 rounds
+            # v1: Chạy 10 rounds
             for round_num in range(1, TOTAL_ROUNDS + 1):
                 phase = get_phase(round_num)
                 progress = 5 + int((round_num - 1) / TOTAL_ROUNDS * 85)
@@ -1850,3 +1882,651 @@ class CyberSessionOrchestrator:
         except Exception:
             pass
         return self.llm
+
+    # ─── v2 — 3-Round Contract Audit Flow ────────────────────────────────────
+
+    # Thresholds (can be overridden via env vars)
+    _R2_THRESHOLD   = float(os.environ.get("R2_SCORE_THRESHOLD",    "0.35"))
+    _R3_CONFIRMED   = float(os.environ.get("R3_CONFIRMED_THRESHOLD", "0.40"))
+
+    # Gemini 3 Flash Preview (thinking model) uses ~30K tokens for internal reasoning
+    # before generating visible output. Any max_tokens below ~32K results in content=None.
+    # thinkingConfig/thinkingBudget is silently ignored by this model's endpoint.
+    _V2_R1_MAX_TOKENS  = int(os.environ.get("V2_R1_MAX_TOKENS",  "65536"))
+    _V2_R2_MAX_TOKENS  = int(os.environ.get("V2_R2_MAX_TOKENS",  "32768"))
+    _V2_R3_MAX_TOKENS  = int(os.environ.get("V2_R3_MAX_TOKENS",  "32768"))
+
+    def _call_agent_v2(
+        self,
+        prompt: str,
+        use_boost: bool = False,
+        max_tokens: int = 65536,
+    ) -> str:
+        """Simple LLM call for v2 rounds — prompt is fully pre-built."""
+        llm = self.boost_llm if use_boost else self.llm
+        messages = [{"role": "user", "content": prompt}]
+        return llm.chat(messages, temperature=0.7, max_tokens=max_tokens, strip_think=True)
+
+    def _run_contract_audit_v2(
+        self,
+        task_id: str,
+        session_id: str,
+        graph_id: str,
+        network_summary: str,
+        profiles: list,
+        known_functions: Optional[set],
+        session_state: "CyberSessionState",
+        invariants: Optional[list] = None,
+    ):
+        """
+        v2 entry point — replaces 10-round Phase A/B/C with 3-round flow.
+        Stores results in session_state and completes the task.
+        """
+        cm = _get_contract_modules()
+        t1 = [p for p in profiles if p.tier == 1]
+        t2 = [p for p in profiles if p.tier == 2]
+        n  = len(t1)
+
+        # ── Round 1: Independent Discovery ───────────────────────────────────
+        self.task_manager.update_task(
+            task_id, progress=10,
+            message=f"Round 1/3 — Independent Discovery ({n} tier-1 agents)"
+        )
+        candidate_pool = self._run_discovery_round(
+            cm=cm,
+            t1_profiles=t1,
+            network_summary=network_summary,
+            known_functions=known_functions,
+            session_id=session_id,
+        )
+        n_r1 = len(candidate_pool)
+        logger.info(f"[v2] Round 1 complete: {n_r1} unique (kind,fn) pairs discovered")
+        session_state.current_round = 1
+        self._save_session_state(session_state)
+
+        if not candidate_pool:
+            logger.warning("[v2] Round 1 produced 0 candidates — nothing to vote on")
+            self._v2_complete_task(task_id, session_id, graph_id, session_state, {}, [])
+            return
+
+        # ── Round 2: Blind Voting ─────────────────────────────────────────────
+        self.task_manager.update_task(
+            task_id, progress=35,
+            message=f"Round 2/3 — Blind Voting ({n_r1} pairs, {n} agents)"
+        )
+        accepted_findings, all_votes = self._run_voting_round(
+            cm=cm,
+            t1_profiles=t1,
+            candidate_pool=candidate_pool,
+            n_agents=n,
+        )
+        n_r2 = len(accepted_findings)
+        logger.info(
+            f"[v2] Round 2 complete: {n_r2}/{n_r1} pairs accepted "
+            f"(threshold={self._R2_THRESHOLD:.2f})"
+        )
+        session_state.current_round = 2
+        self._save_session_state(session_state)
+
+        if not accepted_findings:
+            logger.warning("[v2] Round 2 produced 0 accepted findings")
+            self._v2_complete_task(task_id, session_id, graph_id, session_state, all_votes, [])
+            return
+
+        # ── Round 3: Attacker Validation ──────────────────────────────────────
+        self.task_manager.update_task(
+            task_id, progress=65,
+            message=f"Round 3/3 — Attacker Validation ({n_r2} findings, {len(t2)} attackers)"
+        )
+        confirmed, borderline, discarded = self._run_attacker_round(
+            cm=cm,
+            t2_profiles=t2,
+            accepted_findings=accepted_findings,
+            contract_source=network_summary,
+        )
+        logger.info(
+            f"[v2] Round 3 complete: {len(confirmed)} confirmed, "
+            f"{len(borderline)} borderline (PoC), {len(discarded)} discarded"
+        )
+        session_state.current_round = 3
+        session_state.current_phase = "done"
+        self._save_session_state(session_state)
+
+        self._v2_complete_task(task_id, session_id, graph_id, session_state, all_votes,
+                               confirmed, borderline, discarded)
+
+    # Agent-id prefix → domain group (must match _get_author_group in consensus_engine)
+    _AGENT_PREFIX_TO_DOMAIN: dict = {
+        "apps": "appsec",
+        "bloc": "blockchain",
+        "cryp": "cryptography",
+        "defi": "defi",
+        "smar": "smart_contract_economics",
+        "gove": "governance",
+        "toke": "token_standards",
+        "math": "defi_math",
+    }
+
+    @classmethod
+    def _v2_findings_to_consensus_compat(
+        cls, confirmed: list
+    ) -> tuple:
+        """
+        Expand each v2 confirmed finding into per-domain sub-findings so the
+        consensus engine's cross_score and intra_score calculations are meaningful.
+
+        Semantic findings → session_state.semantic_findings (S-track).
+        SWC findings      → session_state.expert_findings   (L-track).
+
+        Why per-domain expansion: _score_semantic_cluster uses author_domain to
+        compute cross_score = len(unique_domains) / total_domains. A single finding
+        dict with no author_domain gives cross_score=0 → confidence=0 → filtered.
+        Expanding into one entry per submitter domain makes all submitting domains
+        visible to the cluster scorer.
+        """
+        expert_out:   list = []
+        semantic_out: list = []
+
+        for f in confirmed:
+            pair_id       = f.get("pair_id", "")
+            kind          = f.get("kind", "swc")
+            category      = f.get("category", "")
+            fn_name       = f.get("function_name", "") or f.get("_fallback_fn", "")
+            submitters    = f.get("submitters", [])
+            evidence      = " | ".join(f.get("evidence_snippets", [])[:2])
+            attacker_rate = f.get("attacker_rate", 0.0)
+            swc_id        = f.get("swc_id", "")
+
+            # Extract best attacker scenario (CONFIRMED > PLAUSIBLE) for recommendations.
+            # _is_tier1() requires non-empty recommendations to put findings in
+            # consensus_vulns (vs unvalidated_swc_gaps).
+            _verdict_rank = {"CONFIRMED": 2, "PLAUSIBLE": 1}
+            _best_verdict = max(
+                (v for v in f.get("attacker_verdicts", {}).values()
+                 if v.get("verdict") in _verdict_rank),
+                key=lambda v: _verdict_rank[v["verdict"]],
+                default=None,
+            )
+            if _best_verdict:
+                _steps = _best_verdict.get("attack_steps", "")
+                _outcome = _best_verdict.get("expected_outcome", "")
+                _entry = _best_verdict.get("entry_point", fn_name)
+                patch_suggestion = (
+                    f"Entry: {_entry}. Steps: {_steps}. Outcome: {_outcome}"
+                ).strip(" .")
+            else:
+                patch_suggestion = f"Validate and restrict access to {fn_name}" if fn_name else ""
+
+            # Unique domains from submitters, preserving first-seen order
+            domains_seen: dict = {}
+            for agent_id in submitters:
+                prefix = agent_id.split("_")[0]
+                domain = cls._AGENT_PREFIX_TO_DOMAIN.get(prefix, "unknown")
+                if domain not in domains_seen:
+                    domains_seen[domain] = agent_id
+            if not domains_seen:
+                domains_seen = {"blockchain": "v2_fallback"}
+
+            title = f"{category} vulnerability in {fn_name}" if fn_name else f"{category} vulnerability"
+
+            if kind == "semantic":
+                for domain in domains_seen:
+                    semantic_out.append({
+                        "finding_id":           f"{pair_id}_{domain}",
+                        "title":                title,
+                        "category":             category,
+                        "affected_functions":   [fn_name] if fn_name else [],
+                        "is_attacker_surfaced": True,
+                        "author_domain":        domain,
+                        "evidence":             evidence,
+                        "attack_path":          [],
+                        "patch_suggestion":     patch_suggestion,
+                        "challenged_by":        [],
+                        "validated_by":         [],
+                        "swc_id":               swc_id,
+                        "v2_pair_id":           pair_id,
+                        "v2_attacker_rate":     attacker_rate,
+                    })
+            else:
+                # SWC finding — one entry per domain so cluster scorer sees diversity
+                for domain in domains_seen:
+                    expert_out.append({
+                        "finding_id":            f"{pair_id}_{domain}",
+                        "swc_id":                swc_id,
+                        "function_name":         fn_name,
+                        "affected_functions":    [fn_name] if fn_name else [],
+                        "author_domain":         domain,
+                        "evidence":              evidence,
+                        "severity":              "high",
+                        "confidence":            attacker_rate,
+                        "is_attacker_confirmed": True,
+                        "patch_suggestion":      patch_suggestion,
+                        "challenged_by":         [],
+                        "validated_by":          [],
+                        "v2_pair_id":            pair_id,
+                        "v2_attacker_rate":      attacker_rate,
+                    })
+
+        return expert_out, semantic_out
+
+    def _v2_complete_task(
+        self,
+        task_id: str,
+        session_id: str,
+        graph_id: str,
+        session_state: "CyberSessionState",
+        all_votes: dict,
+        confirmed_findings: list,
+        borderline_findings: list,
+        discarded_findings: list,
+    ):
+        """Complete the v2 task with structured result."""
+        self.task_manager.complete_task(task_id, {
+            "session_id":          session_id,
+            "graph_id":            graph_id,
+            # v2 instance-level results — consumed by build_v2_output in report agent
+            "v2_confirmed":        confirmed_findings,
+            "v2_borderline":       borderline_findings,
+            "v2_discarded":        discarded_findings,
+            "v2_votes":            all_votes,
+            # legacy fields kept for logging/debugging (empty for v2)
+            "expert_findings":     [],
+            "attacker_findings":   session_state.attacker_findings,
+            "semantic_findings":   [],
+            "total_findings":      len(confirmed_findings),
+            "rounds_completed":    3,
+            "pipeline_version":    "v2",
+        })
+
+    # ── Round 1 helper ────────────────────────────────────────────────────────
+
+    def _run_discovery_round(
+        self,
+        cm: dict,
+        t1_profiles: list,
+        network_summary: str,
+        known_functions: Optional[set],
+        session_id: str,
+    ) -> dict:
+        """
+        Call all N tier-1 agents in parallel.
+        Returns candidate_pool: Dict[pair_id → meta_dict]
+
+        meta_dict keys:
+          pair_id, kind, swc_id/category, function_name,
+          submitters (list[str]), evidence_snippets (list[str])
+
+        Round 1 parsing uses known_functions=None (no function-list filter) because:
+        - The KG summary typically only captures 3-5 functions, far fewer than
+          the actual contract.  Applying the filter here would silently drop
+          every finding that references a function not in that tiny list.
+        - Function validation happens implicitly: the evidence gate still
+          requires at least one Solidity-specific code marker or a named function
+          that survived RC-1 token filtering.
+        """
+        max_workers = int(os.environ.get("LLM_MAX_WORKERS", "1"))
+        submit_delay = float(os.environ.get("LLM_SUBMIT_DELAY_S", "0"))
+
+        # Dump dir for raw agent responses (debug)
+        _debug_dir = os.environ.get("V2_DEBUG_DIR", "")
+
+        # raw_pool: (kind, swc_or_cat, fn_lower) → meta
+        raw_pool: dict = {}
+
+        def _discover_one(profile) -> list:
+            t0 = time.time()
+            prompt = cm["r1_prompt"](profile, network_summary)
+            try:
+                response = self._call_agent_v2(prompt, max_tokens=self._V2_R1_MAX_TOKENS)
+            except Exception as e:
+                logger.warning(f"[v2 R1] agent={profile.agent_id} error: {e}")
+                return []
+            elapsed = time.time() - t0
+            logger.info(f"[TIMING] Phase=v2 R1 agent={profile.agent_id} latency={elapsed:.1f}s")
+
+            # Dump raw response for post-mortem analysis
+            if _debug_dir:
+                try:
+                    import pathlib
+                    pathlib.Path(_debug_dir).mkdir(parents=True, exist_ok=True)
+                    resp_path = os.path.join(_debug_dir, f"r1_{profile.agent_id}.txt")
+                    with open(resp_path, "w") as fh:
+                        fh.write(response)
+                except Exception:
+                    pass
+
+            # Pass known_functions=None — do NOT apply known-function filter in Round 1.
+            # The filter cuts findings referencing valid contract functions that the KG
+            # failed to index (KG only captures a small fraction of all functions).
+            parsed = cm["parse_all_findings"](response, profile, 1, known_functions=None)
+
+            n_swc = len(parsed.get("swc_findings", []))
+            n_sem = len(parsed.get("semantic_findings", []))
+            logger.info(
+                f"[v2 R1] agent={profile.agent_id}: "
+                f"raw_response={len(response)}chars "
+                f"parsed={n_swc}swc+{n_sem}sem"
+            )
+
+            results = []
+            for f in parsed.get("swc_findings", []):
+                fns = f.get("affected_functions") or []
+                # If parser couldn't extract a function name, use the SWC ID itself
+                # as a placeholder so the finding still enters the candidate pool.
+                if not fns:
+                    logger.debug(
+                        f"[v2 R1] {profile.agent_id}: SWC finding '{f.get('title','')[:50]}' "
+                        f"has no affected_functions — using placeholder"
+                    )
+                    fns = [f"_nofunc_{f.get('swc_id','UNK')}"]
+                ev = (f.get("evidence") or [""])[0]
+                for fn in fns:
+                    results.append(("swc", f.get("swc_id",""), fn, ev))
+
+            for f in parsed.get("semantic_findings", []):
+                fns = f.get("affected_functions") or []
+                if not fns:
+                    logger.debug(
+                        f"[v2 R1] {profile.agent_id}: semantic finding '{f.get('title','')[:50]}' "
+                        f"has no affected_functions — using placeholder"
+                    )
+                    fns = [f"_nofunc_{f.get('category','other')}"]
+                ev = f.get("evidence", "")
+                for fn in fns:
+                    results.append(("semantic", f.get("category","other"), fn, ev))
+
+            return results
+
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures = {}
+            for profile in t1_profiles:
+                if submit_delay > 0:
+                    time.sleep(submit_delay)
+                futures[ex.submit(_discover_one, profile)] = profile
+
+            for future, profile in futures.items():
+                try:
+                    findings = future.result()
+                    for kind, swc_or_cat, fn, ev in findings:
+                        fn_norm = fn.rstrip("()").lower()
+                        key = (kind, swc_or_cat, fn_norm)
+                        if key not in raw_pool:
+                            raw_pool[key] = {
+                                "pair_id":        f"p_{uuid.uuid4().hex[:8]}",
+                                "kind":           kind,
+                                "swc_id":         swc_or_cat if kind == "swc" else "",
+                                "category":       swc_or_cat if kind == "semantic" else "",
+                                "function_name":  fn,
+                                "submitters":     [],
+                                "evidence_snippets": [],
+                            }
+                        raw_pool[key]["submitters"].append(profile.agent_id)
+                        if ev and ev not in raw_pool[key]["evidence_snippets"]:
+                            raw_pool[key]["evidence_snippets"].append(ev[:300])
+                except Exception as e:
+                    logger.warning(f"[v2 R1] result error {profile.agent_id}: {e}")
+
+        # Index by pair_id for downstream use
+        return {v["pair_id"]: v for v in raw_pool.values()}
+
+    # ── Round 2 helper ────────────────────────────────────────────────────────
+
+    def _run_voting_round(
+        self,
+        cm: dict,
+        t1_profiles: list,
+        candidate_pool: dict,
+        n_agents: int,
+    ) -> tuple:
+        """
+        Blind voting round. Returns (accepted_findings_list, all_votes_dict).
+        score = (k + r) / n   where k=submitters, r=ACCEPT votes, n=total agents
+        """
+        max_workers = int(os.environ.get("LLM_MAX_WORKERS", "1"))
+        submit_delay = float(os.environ.get("LLM_SUBMIT_DELAY_S", "0"))
+
+        all_pairs = list(candidate_pool.values())
+
+        # votes[pair_id][agent_id] = "ACCEPT" | "REJECT"
+        votes: dict = {p["pair_id"]: {} for p in all_pairs}
+        # evidence_by_pair: pair_id → list of evidence snippets from voters
+        evidence_by_pair: dict = {p["pair_id"]: [] for p in all_pairs}
+
+        def _vote_one(profile) -> list:
+            # Self-exclusion: skip pairs where this agent was a submitter
+            agent_pairs = [
+                p for p in all_pairs
+                if profile.agent_id not in p["submitters"]
+            ]
+            if not agent_pairs:
+                return []
+            t0 = time.time()
+            prompt = cm["r2_prompt"](profile, agent_pairs)
+            try:
+                response = self._call_agent_v2(prompt, max_tokens=self._V2_R2_MAX_TOKENS)
+            except Exception as e:
+                logger.warning(f"[v2 R2] agent={profile.agent_id} error: {e}")
+                return []
+            elapsed = time.time() - t0
+            logger.info(f"[TIMING] Phase=v2 R2 agent={profile.agent_id} latency={elapsed:.1f}s")
+            return cm["parse_r2_votes"](response, profile.agent_id)
+
+        # Initial voting
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures = {}
+            for profile in t1_profiles:
+                if submit_delay > 0:
+                    time.sleep(submit_delay)
+                futures[ex.submit(_vote_one, profile)] = profile
+
+            for future, profile in futures.items():
+                try:
+                    for vote in future.result():
+                        pid = vote["pair_id"]
+                        if pid in votes:
+                            votes[pid][profile.agent_id] = vote["vote"]
+                            if vote.get("evidence"):
+                                evidence_by_pair[pid].append(vote["evidence"][:250])
+                except Exception as e:
+                    logger.warning(f"[v2 R2 collect] {profile.agent_id}: {e}")
+
+        # Evidence reveal — build revealed_evidence per agent
+        def _build_revealed(profile) -> list:
+            revealed = []
+            agent_voted_pairs = [
+                pid for pid, pair_votes in votes.items()
+                if profile.agent_id in pair_votes
+            ]
+            for pid in agent_voted_pairs:
+                meta = candidate_pool[pid]
+                revealed.append({
+                    "pair_id":      pid,
+                    "kind":         meta["kind"],
+                    "swc_id":       meta.get("swc_id",""),
+                    "category":     meta.get("category",""),
+                    "function_name": meta["function_name"],
+                    "all_evidence": evidence_by_pair.get(pid, []),
+                    "agent_vote":   votes[pid].get(profile.agent_id, "?"),
+                })
+            return revealed
+
+        def _update_vote_one(profile) -> list:
+            revealed = _build_revealed(profile)
+            if not revealed:
+                return []
+            t0 = time.time()
+            prompt = cm["r2_update_prompt"](profile, revealed)
+            if not prompt:
+                return []
+            try:
+                response = self._call_agent_v2(prompt, max_tokens=self._V2_R2_MAX_TOKENS)
+            except Exception as e:
+                logger.warning(f"[v2 R2u] agent={profile.agent_id} error: {e}")
+                return []
+            elapsed = time.time() - t0
+            logger.info(f"[TIMING] Phase=v2 R2u agent={profile.agent_id} latency={elapsed:.1f}s")
+            return cm["parse_r2_upd"](response, profile.agent_id)
+
+        # Update phase
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures = {}
+            for profile in t1_profiles:
+                if submit_delay > 0:
+                    time.sleep(submit_delay)
+                futures[ex.submit(_update_vote_one, profile)] = profile
+
+            for future, profile in futures.items():
+                try:
+                    for upd in future.result():
+                        pid = upd["pair_id"]
+                        if pid in votes:
+                            votes[pid][profile.agent_id] = upd["updated_vote"]
+                            if upd.get("new_evidence"):
+                                evidence_by_pair[pid].append(upd["new_evidence"][:250])
+                except Exception as e:
+                    logger.warning(f"[v2 R2u collect] {profile.agent_id}: {e}")
+
+        # Score and filter
+        accepted = []
+        for pair_id, meta in candidate_pool.items():
+            k = len(meta["submitters"])
+            r = sum(1 for v in votes.get(pair_id, {}).values() if v == "ACCEPT")
+            score = (k + r) / n_agents
+            meta["round2_score"] = score
+            meta["accept_votes"] = r
+            meta["reject_votes"] = sum(1 for v in votes.get(pair_id, {}).values() if v == "REJECT")
+            if score >= self._R2_THRESHOLD:
+                accepted.append(meta)
+                logger.debug(f"[v2 R2] ACCEPTED pair_id={pair_id} score={score:.2f} "
+                             f"({meta['kind']} {meta.get('swc_id') or meta.get('category')} {meta['function_name']})")
+            else:
+                logger.debug(f"[v2 R2] REJECTED pair_id={pair_id} score={score:.2f}")
+
+        return accepted, votes
+
+    # ── Round 3 helper ────────────────────────────────────────────────────────
+
+    def _run_attacker_round(
+        self,
+        cm: dict,
+        t2_profiles: list,
+        accepted_findings: list,
+        contract_source: str,
+    ) -> tuple:
+        """
+        Attacker validation. Returns (confirmed, borderline, discarded).
+        Weights: CONFIRMED=1.0, PLAUSIBLE=0.5, INVALID=0.0
+        attacker_rate = weighted_sum / effective_M
+        """
+        max_workers = int(os.environ.get("LLM_MAX_WORKERS", "1"))
+        submit_delay = float(os.environ.get("LLM_SUBMIT_DELAY_S", "0"))
+        M = len(t2_profiles)
+        _weights = {"CONFIRMED": 1.0, "PLAUSIBLE": 0.5, "INVALID": 0.0}
+
+        confirmed:  list = []
+        borderline: list = []
+        discarded:  list = []
+
+        for finding in accepted_findings:
+            pair_id = finding["pair_id"]
+            verdicts: dict = {}  # attacker_id → verdict dict
+
+            # Initial attacker pass
+            def _atk_one(attacker, finding=finding) -> Optional[dict]:
+                t0 = time.time()
+                prompt = cm["r3_prompt"](attacker, finding, contract_source)
+                try:
+                    response = self._call_agent_v2(prompt, use_boost=True, max_tokens=self._V2_R3_MAX_TOKENS)
+                except Exception as e:
+                    logger.warning(f"[v2 R3] attacker={attacker.agent_id} error: {e}")
+                    return None
+                elapsed = time.time() - t0
+                logger.info(f"[TIMING] Phase=v2 R3 agent={attacker.agent_id} latency={elapsed:.1f}s")
+                return cm["parse_r3_verdict"](response, attacker.agent_id)
+
+            with ThreadPoolExecutor(max_workers=max_workers) as ex:
+                futures = {}
+                for attacker in t2_profiles:
+                    if submit_delay > 0:
+                        time.sleep(submit_delay)
+                    futures[ex.submit(_atk_one, attacker)] = attacker
+                for future, attacker in futures.items():
+                    try:
+                        v = future.result()
+                        if v:
+                            verdicts[attacker.agent_id] = v
+                    except Exception as e:
+                        logger.warning(f"[v2 R3 collect] {attacker.agent_id}: {e}")
+
+            # Evidence reveal for INVALID verdicts (1 update pass)
+            invalid_reasons = [
+                {"attacker_id": aid, "reason": v.get("reason","")}
+                for aid, v in verdicts.items()
+                if v.get("verdict") == "INVALID"
+            ]
+            if invalid_reasons and len(invalid_reasons) < M:
+                # Some non-INVALID verdicts exist — give INVALID attackers a chance to reconsider
+                def _atk_update(attacker, finding=finding, invalid_reasons=invalid_reasons) -> Optional[dict]:
+                    if verdicts.get(attacker.agent_id, {}).get("verdict") != "INVALID":
+                        return None
+                    t0 = time.time()
+                    prompt = cm["r3_update_prompt"](attacker, finding, invalid_reasons)
+                    try:
+                        response = self._call_agent_v2(prompt, use_boost=True, max_tokens=self._V2_R3_MAX_TOKENS)
+                    except Exception as e:
+                        logger.warning(f"[v2 R3u] attacker={attacker.agent_id} error: {e}")
+                        return None
+                    elapsed = time.time() - t0
+                    logger.info(f"[TIMING] Phase=v2 R3u agent={attacker.agent_id} latency={elapsed:.1f}s")
+                    return cm["parse_r3_upd"](response, attacker.agent_id)
+
+                with ThreadPoolExecutor(max_workers=max_workers) as ex:
+                    upd_futures = {}
+                    for attacker in t2_profiles:
+                        if submit_delay > 0:
+                            time.sleep(submit_delay)
+                        upd_futures[ex.submit(_atk_update, attacker)] = attacker
+                    for future, attacker in upd_futures.items():
+                        try:
+                            upd = future.result()
+                            if upd and upd.get("updated_verdict") and upd["pair_id"] == pair_id:
+                                verdicts[attacker.agent_id]["verdict"] = upd["updated_verdict"]
+                        except Exception as e:
+                            logger.warning(f"[v2 R3u collect] {attacker.agent_id}: {e}")
+
+            # Score
+            not_applicable = sum(1 for v in verdicts.values() if v.get("verdict") == "NOT_APPLICABLE")
+            effective_M = M - not_applicable
+            if effective_M < 1:
+                effective_M = 1  # avoid div-by-zero
+
+            weighted_sum = sum(
+                _weights.get(v.get("verdict","INVALID"), 0.0)
+                for v in verdicts.values()
+                if v.get("verdict") != "NOT_APPLICABLE"
+            )
+            attacker_rate = weighted_sum / effective_M
+
+            finding = dict(finding)  # copy to avoid mutating candidate_pool
+            finding["attacker_rate"]         = attacker_rate
+            finding["effective_attackers"]   = effective_M
+            finding["attacker_verdicts"]     = verdicts
+            finding["not_applicable_count"]  = not_applicable
+            finding["final_score"]           = finding.get("round2_score", 0) * 0.4 + attacker_rate * 0.6
+
+            logger.info(
+                f"[v2 R3] pair_id={pair_id} attacker_rate={attacker_rate:.2f} "
+                f"effective_M={effective_M} r2_score={finding.get('round2_score',0):.2f}"
+            )
+
+            if attacker_rate == 0.0:
+                finding["v2_status"] = "discarded"
+                discarded.append(finding)
+            elif attacker_rate < self._R3_CONFIRMED or effective_M < 2:
+                finding["v2_status"] = "borderline"
+                borderline.append(finding)
+            else:
+                finding["v2_status"] = "confirmed"
+                confirmed.append(finding)
+
+        return confirmed, borderline, discarded

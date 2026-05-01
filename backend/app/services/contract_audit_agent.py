@@ -191,6 +191,9 @@ class ContractAuditReportAgent:
         graph_id: Optional[str] = None,
         semantic_findings: Optional[List[Dict[str, Any]]] = None,
         invariants: Optional[List[Dict[str, Any]]] = None,
+        v2_confirmed: Optional[List[Dict[str, Any]]] = None,
+        v2_borderline: Optional[List[Dict[str, Any]]] = None,
+        v2_discarded: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         """
         Generate audit report trong background thread.
@@ -204,7 +207,8 @@ class ContractAuditReportAgent:
         thread = threading.Thread(
             target=self._generate_worker,
             args=(task_id, session_id, expert_findings, attacker_findings,
-                  contract_summary, graph_id, semantic_findings, invariants),
+                  contract_summary, graph_id, semantic_findings, invariants,
+                  v2_confirmed, v2_borderline, v2_discarded),
             daemon=True
         )
         thread.start()
@@ -219,8 +223,85 @@ class ContractAuditReportAgent:
         graph_id: Optional[str] = None,
         semantic_findings: Optional[List[Dict[str, Any]]] = None,
         invariants: Optional[List[Dict[str, Any]]] = None,
+        v2_confirmed: Optional[List[Dict[str, Any]]] = None,
+        v2_borderline: Optional[List[Dict[str, Any]]] = None,
+        v2_discarded: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
-        """Synchronous version — trả về report dict trực tiếp."""
+        """Synchronous version — trả về report dict trực tiếp.
+
+        v2 path: if v2_confirmed is provided, use ConsensusEngine.build_v2_output()
+        which produces instance-level (1 function = 1 entry) findings per architecture.
+        v1 path: fall back to engine.run() with cluster-by-SWC.
+        """
+        invariant_coverage = _build_invariant_coverage(invariants or [], attacker_findings)
+
+        if v2_confirmed is not None:
+            # v2 path — instance-level, per architecture design
+            v2_out = ConsensusEngine.build_v2_output(
+                confirmed=v2_confirmed,
+                borderline=v2_borderline or [],
+                discarded=v2_discarded or [],
+            )
+            consensus_vulns_raw  = v2_out["consensus_vulns"]
+            semantic_results     = v2_out["semantic_results"]
+            unvalidated_swc_gaps = v2_out["unvalidated_swc_gaps"]
+
+            logger.info(
+                f"Consensus (v2): {len(consensus_vulns_raw)} SWC findings, "
+                f"{len(semantic_results)} semantic findings, "
+                f"{len(unvalidated_swc_gaps)} gap findings"
+            )
+
+            tool_context = _ContractToolContext(
+                consensus_vulns=[],          # v2 uses raw dicts, not dataclasses
+                expert_findings=expert_findings,
+                attacker_findings=attacker_findings,
+                unvalidated_swc_gaps=unvalidated_swc_gaps,
+                semantic_results=semantic_results,
+            )
+            report_text = self._run_react_loop(
+                contract_summary=contract_summary,
+                tool_context=tool_context,
+            )
+
+            n_high   = sum(1 for v in consensus_vulns_raw if v.get("severity") == "high")
+            n_medium = sum(1 for v in consensus_vulns_raw if v.get("severity") == "medium")
+            n_crit   = sum(1 for v in consensus_vulns_raw if v.get("severity") == "critical")
+
+            return {
+                "session_id":           session_id,
+                "graph_id":             graph_id,
+                "generated_at":         datetime.now().isoformat(),
+                "pipeline_version":     "v2",
+                "report":               report_text,
+                "consensus_vulns":      consensus_vulns_raw,
+                "semantic_results":     semantic_results,
+                "unvalidated_swc_gaps": unvalidated_swc_gaps,
+                "coverage_gaps":        [],
+                "invariant_coverage":   invariant_coverage,
+                "stats": {
+                    "total_expert_findings":   len(v2_confirmed),
+                    "total_attacker_findings": len(attacker_findings),
+                    "total_semantic_findings": sum(
+                        1 for f in v2_confirmed if f.get("kind") == "semantic"
+                    ),
+                    "consensus_vulns":         len(consensus_vulns_raw),
+                    "semantic_consensus":      len(semantic_results),
+                    "unvalidated_swc_gaps":    len(unvalidated_swc_gaps),
+                    "invariants_extracted":    len(invariants or []),
+                    "invariants_violated":     sum(
+                        1 for ic in invariant_coverage if ic["status"] == "VIOLATED"
+                    ),
+                    "critical":  n_crit,
+                    "high":      n_high,
+                    "medium":    n_medium,
+                    "exploitable_count": sum(
+                        1 for f in v2_confirmed if f.get("attacker_rate", 0) >= 0.4
+                    ),
+                },
+            }
+
+        # v1 path — cluster-by-SWC (legacy)
         engine = ConsensusEngine()
         consensus_vulns, semantic_results = engine.run(
             expert_findings, attacker_findings,
@@ -243,12 +324,12 @@ class ContractAuditReportAgent:
         )
 
         coverage_gaps = engine.get_coverage_gaps(consensus_vulns, mode="contract_audit", expert_findings_raw=expert_findings)
-        invariant_coverage = _build_invariant_coverage(invariants or [], attacker_findings)
 
         return {
             "session_id":          session_id,
             "graph_id":            graph_id,
             "generated_at":        datetime.now().isoformat(),
+            "pipeline_version":    "v1",
             "report":              report_text,
             "consensus_vulns":     [asdict(v) for v in consensus_vulns],
             "semantic_results":    semantic_results,
@@ -288,6 +369,9 @@ class ContractAuditReportAgent:
         graph_id: Optional[str],
         semantic_findings: Optional[List[Dict[str, Any]]] = None,
         invariants: Optional[List[Dict[str, Any]]] = None,
+        v2_confirmed: Optional[List[Dict[str, Any]]] = None,
+        v2_borderline: Optional[List[Dict[str, Any]]] = None,
+        v2_discarded: Optional[List[Dict[str, Any]]] = None,
     ):
         try:
             self.task_manager.update_task(
@@ -303,6 +387,9 @@ class ContractAuditReportAgent:
                 graph_id=graph_id,
                 semantic_findings=semantic_findings,
                 invariants=invariants,
+                v2_confirmed=v2_confirmed,
+                v2_borderline=v2_borderline,
+                v2_discarded=v2_discarded,
             )
 
             self.task_manager.update_task(task_id, progress=90, message="Saving report...")

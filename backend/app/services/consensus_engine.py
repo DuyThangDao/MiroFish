@@ -72,6 +72,26 @@ SWC_ANCHOR_KEYWORDS: Dict[str, List[str]] = {
     "front_running":  ["SWC-114", "front-run", "frontrunning", "front running", "MEV", "transaction order", "sandwich attack"],
 }
 
+# Fix 1: authoritative SWC ID mapping for enforce_swc_coverage().
+# Used to check `in_consensus` via SWC ID match instead of keyword match,
+# preventing keyword collisions where a consensus_vuln for SWC-X accidentally
+# contains a keyword that belongs to SWC-Y (e.g. "overflow" in an SWC-114 title
+# masking the absence of SWC-101 from consensus output).
+CATEGORY_TO_SWC_IDS: Dict[str, Set[str]] = {
+    "reentrancy":     {"SWC-107", "SWC-131"},
+    "overflow":       {"SWC-101"},
+    "access_control": {"SWC-105", "SWC-115"},
+    "oracle":         {"SWC-114"},
+    "flash_loan":     {"SWC-132"},
+    "governance":     {"SWC-116"},
+    "randomness":     {"SWC-120"},
+    "selfdestruct":   {"SWC-106"},
+    "delegatecall":   {"SWC-112"},
+    "signature":      {"SWC-121", "SWC-122"},
+    "dos_gas":        {"SWC-128"},
+    "front_running":  {"SWC-114"},
+}
+
 # Semantic category anchors for S-category (Web3Bugs) findings.
 SEMANTIC_ANCHOR_KEYWORDS: Dict[str, List[str]] = {
     "access_control":        ["access control", "missing restriction", "unauthorized", "anyone can", "arbitrary caller", "privilege", "onlyOwner"],
@@ -475,10 +495,13 @@ class ConsensusEngine:
         for f in cluster:
             group_counts[self._get_author_group(f)] += 1
 
-        # Giả sử mỗi group có 2-3 agents; intra score = tỉ lệ groups có >1 member trong cluster
+        # Fix 2: binary intra_score — "did any domain corroborate internally?"
+        # Old formula (ratio) penalised multi-domain clusters where each domain
+        # has only 1 agent, even though diverse cross-domain detection is stronger
+        # evidence than single-domain pile-up.
+        # New: 1.0 if at least one domain has ≥2 agents agreeing; 0.0 otherwise.
         groups_with_multiple = sum(1 for cnt in group_counts.values() if cnt >= 2)
-        total_groups_in_cluster = len(group_counts)
-        intra_score = groups_with_multiple / max(total_groups_in_cluster, 1)
+        intra_score = 1.0 if groups_with_multiple > 0 else 0.0
 
         # ── Layer 2: Cross-group ──────────────────────────────────────────────
         # % domain groups khác nhau đã đề cập finding này
@@ -732,8 +755,7 @@ class ConsensusEngine:
             group_counts[self._get_author_group(f)] += 1
 
         groups_with_multiple = sum(1 for cnt in group_counts.values() if cnt >= 2)
-        total_groups_in_cluster = len(group_counts)
-        intra_score = groups_with_multiple / max(total_groups_in_cluster, 1)
+        intra_score = 1.0 if groups_with_multiple > 0 else 0.0
         cross_score = len(group_counts) / domain_group_count
 
         attacker_surfaced = any(f.get("is_attacker_surfaced") for f in cluster)
@@ -896,15 +918,25 @@ class ConsensusEngine:
         unvalidated: List[Dict[str, Any]] = []
 
         for category, keywords in SWC_ANCHOR_KEYWORDS.items():
-            # Check if category already covered in consensus
-            in_consensus = any(
-                any(
-                    self._anchor_in_text(kw.lower(), v.title.lower())
-                    or self._anchor_in_text(kw.lower(), v.description.lower())
-                    for kw in keywords
+            # Fix 1: check coverage via SWC ID match (authoritative), not keyword
+            # match against titles/descriptions (prone to cross-SWC collisions).
+            # E.g. "overflow" in an SWC-114 title must NOT mark SWC-101 as covered.
+            expected_swc_ids = CATEGORY_TO_SWC_IDS.get(category, set())
+            if expected_swc_ids:
+                in_consensus = any(
+                    bool(set(v.swc_ids) & expected_swc_ids)
+                    for v in consensus_vulns
                 )
-                for v in consensus_vulns
-            )
+            else:
+                # Fallback: keyword match for categories without an explicit SWC mapping
+                in_consensus = any(
+                    any(
+                        self._anchor_in_text(kw.lower(), v.title.lower())
+                        or self._anchor_in_text(kw.lower(), v.description.lower())
+                        for kw in keywords
+                    )
+                    for v in consensus_vulns
+                )
             if in_consensus:
                 continue
 
@@ -1001,4 +1033,187 @@ class ConsensusEngine:
             "total_vulns": len(vulns),
             "critical_count": sum(1 for v in vulns if v.severity == "critical"),
             "high_count": sum(1 for v in vulns if v.severity == "high"),
+        }
+
+    # ─── v2 Instance-Pair Scoring ─────────────────────────────────────────────
+
+    @staticmethod
+    def _score_by_instance_pair(
+        candidate_pool: Dict[str, Any],
+        votes: Dict[str, Dict[str, str]],
+        n_agents: int,
+        threshold: float = 0.35,
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """
+        v2 scoring — score each (kind, swc/category, function) pair directly.
+
+        Formula: score = (k + r) / n
+          k = number of submitters (co-discoverers from Round 1)
+          r = number of ACCEPT votes from Round 2 voters
+          n = total tier-1 agents
+
+        Args:
+            candidate_pool: pair_id → meta dict (from Round 1)
+            votes:          pair_id → {agent_id → "ACCEPT"|"REJECT"} (from Round 2)
+            n_agents:       total number of tier-1 agents
+            threshold:      minimum score to accept (default 0.35)
+
+        Returns:
+            Tuple of:
+              - accepted: list of scored metas with round2_score >= threshold
+              - rejected: list of scored metas below threshold
+        """
+        accepted: List[Dict[str, Any]] = []
+        rejected: List[Dict[str, Any]] = []
+
+        for pair_id, meta in candidate_pool.items():
+            k = len(meta.get("submitters", []))
+            pair_votes = votes.get(pair_id, {})
+            r = sum(1 for v in pair_votes.values() if v == "ACCEPT")
+            score = (k + r) / max(n_agents, 1)
+
+            scored = dict(meta)
+            scored["round2_score"]  = score
+            scored["k_submitters"]  = k
+            scored["r_accept_votes"] = r
+            scored["n_total_agents"] = n_agents
+            scored["accept_voters"]  = [aid for aid, v in pair_votes.items() if v == "ACCEPT"]
+            scored["reject_voters"]  = [aid for aid, v in pair_votes.items() if v == "REJECT"]
+
+            if score >= threshold:
+                accepted.append(scored)
+            else:
+                rejected.append(scored)
+
+        accepted.sort(key=lambda x: x["round2_score"], reverse=True)
+        return accepted, rejected
+
+    @staticmethod
+    def build_v2_output(
+        confirmed: List[Dict[str, Any]],
+        borderline: List[Dict[str, Any]],
+        discarded: List[Dict[str, Any]],
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Map v2 R3 results to the canonical schema expected by evaluate_web3bugs.py.
+
+        Each confirmed finding is ONE instance-level entry (1 function = 1 entry).
+        Per architecture: Đơn vị finding = (swc_id, function_name) pair, not SWC class.
+
+        consensus_vulns schema (L-track):
+          vuln_id, swc_ids (list), affected_assets (list), affected_functions (list),
+          confidence_score, severity, recommendations, title, description
+
+        semantic_results schema (S-track):
+          semantic_vuln_id, category, affected_functions (list),
+          confidence_score, severity, title, evidence, patch_suggestions (list)
+
+        unvalidated_swc_gaps: SWC findings from discarded (attacker_rate=0) +
+                              borderline that couldn't be PoC-verified.
+        """
+        import hashlib as _hashlib
+
+        def _severity(conf: float) -> str:
+            if conf >= 0.7:  return "high"
+            if conf >= 0.4:  return "medium"
+            return "low"
+
+        def _extract_patch(f: Dict[str, Any]) -> List[str]:
+            recs = []
+            for v in f.get("attacker_verdicts", {}).values():
+                if v.get("verdict") in ("CONFIRMED", "PLAUSIBLE"):
+                    entry   = v.get("entry_point", "")
+                    steps   = v.get("attack_steps", "")
+                    outcome = v.get("expected_outcome", "")
+                    recs.append(f"Entry: {entry}. Steps: {steps}. Outcome: {outcome}".strip(" ."))
+            return recs or [f"Validate and restrict access to {f.get('function_name', '')}"]
+
+        consensus_vulns: List[Dict[str, Any]] = []
+        semantic_results: List[Dict[str, Any]] = []
+        unvalidated_swc_gaps: List[Dict[str, Any]] = []
+
+        for f in confirmed:
+            fn_name  = f.get("function_name", "") or ""
+            fn_list  = [fn_name] if fn_name else []
+            r2_score = f.get("round2_score", 0.0)
+            att_rate = f.get("attacker_rate", 0.0)
+            conf     = round(r2_score * att_rate, 4)
+            uid      = _hashlib.md5(f.get("pair_id", "").encode()).hexdigest()[:8]
+
+            if f.get("kind") == "semantic":
+                cat = f.get("category", "")
+                semantic_results.append({
+                    "semantic_vuln_id":  f"sv_{uid}",
+                    "title":             f"{cat} vulnerability in {fn_name}" if fn_name else f"{cat} vulnerability",
+                    "category":          cat,
+                    "display_label":     None,
+                    "exclude_from_eval": False,
+                    "severity":          _severity(conf),
+                    "affected_functions": fn_list,
+                    "evidence":          " | ".join(f.get("evidence_snippets", [])[:2]),
+                    "attack_path":       [],
+                    "patch_suggestions": _extract_patch(f),
+                    "confidence_score":  conf,
+                    "intra_score":       r2_score,
+                    "cross_score":       att_rate,
+                    "attacker_score":    att_rate,
+                    "supporting_domains": list({
+                        ag.split("_")[0] for ag in f.get("submitters", [])
+                    }),
+                    "is_attacker_surfaced": att_rate > 0,
+                    "source_finding_ids": [f.get("pair_id", uid)],
+                    "v2_pair_id":        f.get("pair_id"),
+                    "v2_round2_score":   r2_score,
+                    "v2_attacker_rate":  att_rate,
+                })
+            else:
+                swc_id = f.get("swc_id", "")
+                recs   = _extract_patch(f)
+                consensus_vulns.append({
+                    "vuln_id":            f"vuln_{uid}",
+                    "title":              f"{swc_id} in {fn_name}" if fn_name else swc_id,
+                    "description":        " | ".join(f.get("evidence_snippets", [])[:2]),
+                    "affected_assets":    fn_list,
+                    "affected_functions": fn_list,
+                    "severity":           _severity(conf),
+                    "intra_group_score":  r2_score,
+                    "cross_group_score":  att_rate,
+                    "attacker_score":     att_rate,
+                    "confidence_score":   conf,
+                    "supporting_groups":  list({
+                        ag.split("_")[0] for ag in f.get("submitters", [])
+                    }),
+                    "supporting_attackers":  [],
+                    "dismissing_attackers":  [],
+                    "recommendations":    recs,
+                    "swc_ids":            [swc_id] if swc_id else [],
+                    "source_finding_ids": [f.get("pair_id", uid)],
+                    "attacker_finding_ids": [],
+                    "is_attacker_only":   False,
+                    "needs_review":       conf < 0.5,
+                    "v2_pair_id":         f.get("pair_id"),
+                    "v2_round2_score":    r2_score,
+                    "v2_attacker_rate":   att_rate,
+                })
+
+        for f in discarded:
+            if f.get("kind") == "semantic":
+                continue
+            fn_name = f.get("function_name", "") or ""
+            swc_id  = f.get("swc_id", "")
+            unvalidated_swc_gaps.append({
+                "swc_id":            swc_id,
+                "swc_category":      swc_id,
+                "affected_functions": [fn_name] if fn_name else [],
+                "description":       " | ".join(f.get("evidence_snippets", [])[:2]),
+                "source_count":      len(f.get("submitters", [])),
+                "round2_score":      f.get("round2_score", 0.0),
+                "attacker_rate":     f.get("attacker_rate", 0.0),
+                "v2_pair_id":        f.get("pair_id"),
+            })
+
+        return {
+            "consensus_vulns":      consensus_vulns,
+            "semantic_results":     semantic_results,
+            "unvalidated_swc_gaps": unvalidated_swc_gaps,
         }

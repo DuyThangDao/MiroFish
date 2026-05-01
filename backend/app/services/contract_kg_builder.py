@@ -15,11 +15,14 @@ KG structure:
     contract → HAS_STATE_VAR → state_var
 """
 
+import os
 import re
 import time
 import threading
 import uuid
 from typing import Callable, Dict, List, Any, Optional
+
+_ENABLE_ZEP = os.getenv("ENABLE_ZEP", "false").lower() == "true"
 
 
 def _zep_retry(fn: Callable, max_attempts: int = 8, retry_episode_limit: bool = True):
@@ -139,7 +142,8 @@ class ContractKGBuilder:
         graph_service: Optional[GraphBuilderService] = None,
     ):
         self.parser = parser or ContractParser()
-        self.graph_service = graph_service or GraphBuilderService()
+        self._zep_enabled = _ENABLE_ZEP
+        self.graph_service = graph_service or (GraphBuilderService() if self._zep_enabled else None)
         self.task_manager = TaskManager()
         self._partial_graph_ids: dict = {}  # task_id -> graph_id, for cleanup on timeout
 
@@ -568,7 +572,7 @@ class ContractKGBuilder:
     # ─── Workers ──────────────────────────────────────────────────────────────
 
     def _build_worker(self, task_id: str, source_code: str, graph_name: str, contract_name: str = ""):
-        """Full pipeline: parse source → store to Zep."""
+        """Full pipeline: parse source → (optional) store to Zep → build context summary."""
         try:
             self.task_manager.update_task(
                 task_id, status=TaskStatus.PROCESSING,
@@ -576,15 +580,22 @@ class ContractKGBuilder:
             )
             entity = self.parser.parse_from_source(source_code, contract_name=contract_name)
 
-            self.task_manager.update_task(
-                task_id, progress=40,
-                message=f"Parsed {entity.contract_id}: {len(entity.functions)} functions. Building Zep KG..."
-            )
-            graph_id = self._store_to_zep(graph_name, entity, task_id=task_id)
+            graph_id = None
+            if self._zep_enabled:
+                self.task_manager.update_task(
+                    task_id, progress=40,
+                    message=f"Parsed {entity.contract_id}: {len(entity.functions)} functions. Building Zep KG..."
+                )
+                graph_id = self._store_to_zep(graph_name, entity, task_id=task_id)
+            else:
+                self.task_manager.update_task(
+                    task_id, progress=40,
+                    message=f"Parsed {entity.contract_id}: {len(entity.functions)} functions. Building context summary (Zep disabled)..."
+                )
 
             context_summary = self.build_context_summary(entity)
 
-            self._partial_graph_ids.pop(task_id, None)  # no longer partial
+            self._partial_graph_ids.pop(task_id, None)
             self.task_manager.complete_task(task_id, {
                 "graph_id": graph_id,
                 "contract_id": entity.contract_id,
@@ -601,11 +612,18 @@ class ContractKGBuilder:
     def _store_worker(self, task_id: str, entity: ContractEntity, graph_name: str):
         """Skip parse step — entity already available."""
         try:
-            self.task_manager.update_task(
-                task_id, status=TaskStatus.PROCESSING,
-                progress=20, message=f"Building Zep KG for {entity.contract_id}..."
-            )
-            graph_id = self._store_to_zep(graph_name, entity)
+            graph_id = None
+            if self._zep_enabled:
+                self.task_manager.update_task(
+                    task_id, status=TaskStatus.PROCESSING,
+                    progress=20, message=f"Building Zep KG for {entity.contract_id}..."
+                )
+                graph_id = self._store_to_zep(graph_name, entity)
+            else:
+                self.task_manager.update_task(
+                    task_id, status=TaskStatus.PROCESSING,
+                    progress=20, message=f"Building context summary for {entity.contract_id} (Zep disabled)..."
+                )
             context_summary = self.build_context_summary(entity)
 
             self.task_manager.complete_task(task_id, {

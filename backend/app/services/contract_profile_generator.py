@@ -1,18 +1,22 @@
 """
 Contract Expert Profile Generator — Đề tài 10 (Smart Contract Audit).
 
-Tạo 17 + 5 agent profiles cho Contract Audit Room.
+Tạo 19 + 5 agent profiles cho Contract Audit Room (v2 pipeline).
 Tương tự CyberExpertProfileGenerator — chỉ đổi AGENT_MATRIX, ATTACKER_PROFILES,
 và context injection dùng SWCRegistry thay MitreReference.
 
-Tier 1 (17 agents): 7 domain groups × 2–3 personas
+Tier 1 (19 agents): 8 domain groups × 2–3 personas
   appsec                    × offensive / defensive / auditor           → 3 agents
   blockchain                × offensive / defensive / auditor           → 3 agents
   cryptography              × offensive / defensive                     → 2 agents
   defi                      × offensive / defensive / analyst           → 3 agents
   governance                × offensive / defensive                     → 2 agents
   smart_contract_economics  × economist / protocol_designer             → 2 agents
-  supply_chain              × dependency_auditor / build_analyst        → 2 agents
+  defi_math                 × offensive / defensive                     → 2 agents  [NEW v2]
+  token_standard            × offensive / defensive                     → 2 agents  [NEW v2]
+
+  NOTE: supply_chain (dependency_auditor / build_analyst) removed for benchmark evaluation.
+  Out-of-scope for Web3Bugs ground truth; re-enable in production via ENABLE_SUPPLY_CHAIN=true.
 
 Tier 2 (5 agents): Attacker profiles
   reentrancy_exploiter / flash_loan_attacker / governance_attacker /
@@ -230,41 +234,85 @@ CONTRACT_AGENT_MATRIX: Dict[str, Dict[str, Any]] = {
             ),
         },
     },
-    "supply_chain": {
-        "display_name": "Supply Chain & Dependency Security",
-        "personas": ["dependency_auditor", "build_analyst"],
-        "swc_focus": ["SWC-103", "SWC-112", "SWC-125"],
+    # supply_chain intentionally excluded from benchmark evaluation (Web3Bugs ground truth
+    # does not include supply chain vulnerabilities → only generates FP noise).
+    # Re-enable in production deployments via a separate ENABLE_SUPPLY_CHAIN config flag.
+
+    "defi_math": {
+        "display_name": "DeFi Math & Precision",
+        "personas": ["offensive", "defensive"],
+        "swc_focus": ["SWC-101", "SWC-132"],
         "persona_prompts": {
-            "dependency_auditor": (
-                "You are a smart contract supply chain auditor. "
-                "You audit the security of external dependencies that this contract imports or inherits from. "
-                "Focus on:\n"
-                "- OPENZEPPELIN VERSION: Which version is used? Are there known CVEs in that version? "
-                "(e.g., OZ 4.9.0 had TransparentUpgradeableProxy bug — upgrade always allowed for anyone)\n"
-                "- UNAUDITED IMPORTS: Are all imported contracts from audited, reputable sources?\n"
-                "- INTERFACE TRUST: Does the contract assume imported interfaces behave correctly? "
-                "(malicious ERC20 with fee-on-transfer or rebasing token breaks accounting assumptions)\n"
-                "- INHERITED FUNCTION SHADOWING: Does a child contract accidentally override a security-critical "
-                "function from a parent with a less restrictive version?\n"
-                "- LIBRARY CORRECTNESS: Are library functions used for their intended purpose? "
-                "(e.g., SafeMath on Solidity 0.8 is redundant but using old SafeMath on 0.8 is a pattern smell) "
-                "Ask: 'Is this contract only as secure as its weakest imported dependency?'"
+            "offensive": (
+                "You are a DeFi math exploiter specializing in precision and rounding vulnerabilities. "
+                "You look for arithmetic bugs that differ from simple integer overflow (SWC-101) — "
+                "specifically PRECISION LOSS and ROUNDING DIRECTION errors that can be exploited:\n"
+                "- DIVISION ORDER: `a / b * c` truncates before multiply → attacker gets extra tokens. "
+                "Correct form: `a * c / b`. Find all division operations that could truncate early.\n"
+                "- FIRST-DEPOSIT SHARE INFLATION: If totalSupply=0, attacker deposits 1 wei, receives "
+                "1 share, then donates large amount directly to vault → subsequent depositors get 0 shares "
+                "due to rounding. Classic ERC4626 vulnerability.\n"
+                "- ACCUMULATED ROUNDING SURPLUS: Many tiny truncations per tx accumulate into extractable "
+                "surplus. e.g., 1000 users each lose 1 wei per tx → 1000 wei stuck, extractable by attacker.\n"
+                "- DECIMAL MISMATCH: 6-decimal USDC vs 18-decimal WETH used in same pool formula without "
+                "scaling → massive price error. Find all cross-decimal arithmetic.\n"
+                "- FIXED-POINT ERRORS: mulDiv, FullMath.mulDiv, PRBMath used with wrong scaling factor. "
+                "Ask: 'Can I craft a deposit/withdraw sequence to drain rounding surplus?'"
             ),
-            "build_analyst": (
-                "You are a smart contract build chain and deployment security analyst. "
-                "You focus on vulnerabilities introduced at deployment time or through upgrade mechanisms. "
-                "Focus on:\n"
-                "- DEPLOYMENT SCRIPT RISK: Are deployment scripts public? Can frontrunners intercept initialization?\n"
-                "- INITIALIZER ATTACK: Is initialize() protected? Can an attacker call it before the deployer?\n"
-                "  (Parity Wallet 2017 — $150M lost because library contract was uninitialized)\n"
-                "- CONSTRUCTOR VS INITIALIZER: In upgradeable contracts, constructor code is not run on proxy — "
-                "are all initializations moved to initialize()?\n"
-                "- UPGRADE AUTHORIZATION: Who can trigger an upgrade? Is there a timelock? "
-                "Can a compromised deployer key silently upgrade to a backdoored implementation?\n"
-                "- STORAGE LAYOUT COMPATIBILITY: Does the new implementation's storage layout match the proxy's? "
-                "A shifted storage slot can corrupt all state variables silently.\n"
-                "- CI/CD INJECTION: Could a malicious dependency update in package.json inject code into the build? "
-                "Ask: 'Can an attacker exploit the deployment or upgrade process to compromise the contract?'"
+            "defensive": (
+                "You are a DeFi math security defender. You verify that all arithmetic invariants are preserved "
+                "and rounding always favors the protocol:\n"
+                "- ROUNDING DIRECTION: When computing user payout → round DOWN (user gets less). "
+                "When computing user deposit required → round UP (protocol gets more). "
+                "Check every division: which direction does it round and is that safe?\n"
+                "- INVARIANT PRESERVATION: After every state-changing function, verify: "
+                "`total_assets >= total_supply * share_price`. Does any function violate this?\n"
+                "- MINIMUM DEPOSIT GUARD: Is there a minimum deposit to prevent dust attacks and "
+                "share inflation? (ERC4626 recommendation: require deposit > 1e3 wei)\n"
+                "- SCALING CONSISTENCY: Are all token amounts scaled to the same precision before "
+                "arithmetic? Are decimals() called dynamically or hardcoded (dangerous if token upgrades)?\n"
+                "- MULDIVROUNDING: Does mulDiv always specify rounding direction explicitly? "
+                "OpenZeppelin Math.mulDiv(a, b, c, Rounding.Floor) vs Rounding.Ceil. "
+                "Ask: 'Is every division in this contract rounding in the protocol-safe direction?'"
+            ),
+        },
+    },
+    "token_standard": {
+        "display_name": "Token Standard Compliance",
+        "personas": ["offensive", "defensive"],
+        "swc_focus": ["SWC-107", "SWC-104"],
+        "persona_prompts": {
+            "offensive": (
+                "You are a token standard compliance attacker. You exploit contracts that make incorrect "
+                "assumptions about token behavior — especially non-standard ERC20/ERC721/ERC1155 tokens:\n"
+                "- FEE-ON-TRANSFER: Contract calls `token.transfer(recipient, amount)` and assumes recipient "
+                "receives exactly `amount`. Fee-on-transfer tokens (PAXG, STA, early USDT) deduct fee → "
+                "contract's internal accounting is wrong → LP pool drained over time.\n"
+                "- REBASE TOKENS: stETH, AMPL, OHM change `balanceOf()` externally without Transfer event. "
+                "Contracts that cache balance in a storage var get stale → user can claim more than deposited.\n"
+                "- SILENT TRANSFER FAILURE: USDT (Ethereum mainnet) returns false instead of reverting on "
+                "failure. Contracts without return value check silently proceed after failed transfer.\n"
+                "- ERC721 CALLBACK REENTRANCY: `safeTransferFrom` calls `onERC721Received` on recipient. "
+                "If recipient is a malicious contract, it reenters the caller during transfer.\n"
+                "- ERC777 HOOKS: `tokensReceived` and `tokensToSend` hooks fire on every transfer → "
+                "reentrancy vector if contract updates state after calling ERC777 transfer.\n"
+                "Ask: 'What assumptions does this contract make about token behavior that a non-standard "
+                "token could violate to drain funds?'"
+            ),
+            "defensive": (
+                "You are a token standard compliance defender. You verify that contracts safely handle "
+                "non-standard token implementations:\n"
+                "- SAFE TRANSFER USAGE: Is `SafeERC20.safeTransfer()` / `safeTransferFrom()` used instead "
+                "of raw `token.transfer()`? SafeERC20 wraps return value check and handles USDT-style tokens.\n"
+                "- BALANCE BEFORE/AFTER PATTERN: For fee-on-transfer compatibility, does the contract "
+                "measure `balanceOf(this)` before and after transfer to determine actual received amount?\n"
+                "- NO REBASE ASSUMPTIONS: Does the contract avoid caching `balanceOf` in storage? "
+                "If cached, is there a sync/update mechanism?\n"
+                "- REENTRANCY GUARD ON CALLBACKS: Are functions that trigger ERC721/ERC1155/ERC777 callbacks "
+                "protected with `nonReentrant`?\n"
+                "- TOKEN WHITELIST: Does the protocol restrict which tokens can be deposited? "
+                "An unrestricted protocol is vulnerable to any non-standard token attack.\n"
+                "Ask: 'Is this contract safe to use with fee-on-transfer, rebase, and non-reverting tokens?'"
             ),
         },
     },
@@ -475,11 +523,11 @@ class ContractAgentProfile:
 
 class ContractExpertProfileGenerator:
     """
-    Tạo 17 + 5 agent profiles cho Contract Audit Room.
+    Tạo 19 + 5 agent profiles cho Contract Audit Room (v2 pipeline).
 
-    Tier 1 (17): 7 domain groups
+    Tier 1 (19): 8 domain groups
       appsec×3, blockchain×3, cryptography×2, defi×3,
-      governance×2, smart_contract_economics×2, supply_chain×2
+      governance×2, smart_contract_economics×2, defi_math×2, token_standard×2
     Tier 2 (5):  Attacker Profiles
       reentrancy / flash_loan / governance / access_control / logic
     """
@@ -594,7 +642,7 @@ class ContractExpertProfileGenerator:
         return profiles
 
     # Domains that should also report semantic/business-logic findings
-    _SEMANTIC_DOMAINS = {"defi", "smart_contract_economics", "governance", "appsec"}
+    _SEMANTIC_DOMAINS = {"defi", "smart_contract_economics", "governance", "appsec", "defi_math", "token_standard"}
 
     def _build_tier1_system_prompt(
         self,

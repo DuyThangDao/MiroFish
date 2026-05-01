@@ -324,3 +324,103 @@ class ContractDepGraph:
             )
         except Exception as e:
             logger.warning(f"Memgraph persist error (non-fatal): {e}")
+
+
+def extract_function_bodies(source: str, function_names: List[str], max_chars: int = 20000) -> str:
+    """
+    Extract full Solidity function bodies for the given function names.
+
+    Names may be qualified ("Contract::swap") or plain ("swap").
+    Only the simple name after "::" is used for matching in source.
+    Skips Slither-internal names (slitherConstructorConstantVariables etc.).
+
+    Returns a formatted block ready to append to contract_summary.
+    Caps total output at max_chars to stay within context budget.
+    """
+    seen: set = set()
+    simple_names: List[str] = []
+    for qn in function_names:
+        sn = qn.split("::")[-1].strip()
+        if sn and sn not in seen and not sn.startswith("slither") and not sn.startswith("constructor"):
+            seen.add(sn)
+            simple_names.append(sn)
+
+    if not simple_names:
+        return ""
+
+    blocks: List[str] = []
+    total = 0
+
+    for name in simple_names:
+        pattern = re.compile(r'\bfunction\s+' + re.escape(name) + r'\s*\(', re.MULTILINE)
+        match = pattern.search(source)
+        if not match:
+            continue
+
+        brace_pos = source.find('{', match.start())
+        if brace_pos == -1:
+            continue
+
+        depth = 0
+        end_pos = brace_pos
+        for i in range(brace_pos, len(source)):
+            ch = source[i]
+            if ch == '{':
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+                if depth == 0:
+                    end_pos = i
+                    break
+
+        body = source[match.start(): end_pos + 1].strip()
+        if not body:
+            continue
+
+        block = f"// --- function {name} ---\n{body}"
+        if total + len(block) > max_chars:
+            break
+        blocks.append(block)
+        total += len(block)
+
+    if not blocks:
+        return ""
+
+    return (
+        "=== CRITICAL FUNCTIONS — full source (most complex / most callers) ===\n"
+        + "\n\n".join(blocks)
+    )
+
+
+def pick_critical_functions_from_summary(contract_summary: str, top_n: int = 6) -> List[str]:
+    """
+    Parse the CALL GRAPH section already present in contract_summary to find the
+    top-N functions by number of callees. These are the most complex / risky functions
+    in the primary contract, without needing to re-run Slither.
+
+    Falls back to empty list if CALL GRAPH section is absent.
+    """
+    # Find CALL GRAPH block
+    cg_match = re.search(r'CALL GRAPH:\s*\n(.*?)(?:\n\n|\Z)', contract_summary, re.DOTALL)
+    if not cg_match:
+        return []
+
+    # Parse lines like: "  swap() → calls: _transfer, _updateFees, ..."
+    callee_count: Dict[str, int] = {}
+    leaf_pattern = re.compile(r'^\s+(\w+)\(\)\s*→\s*calls:\s*(.+)$')
+    for line in cg_match.group(1).splitlines():
+        m = leaf_pattern.match(line)
+        if m:
+            fn_name = m.group(1)
+            callees = [c.strip() for c in m.group(2).split(',') if c.strip()]
+            callee_count[fn_name] = len(callees)
+
+    # Also include functions with external calls (→ [EXTERNAL: ...])
+    ext_pattern = re.compile(r'^\s+(\w+)\(\)\s*→\s*\[EXTERNAL', re.MULTILINE)
+    for m in ext_pattern.finditer(cg_match.group(1)):
+        fn = m.group(1)
+        callee_count[fn] = callee_count.get(fn, 0) + 10  # boost external-call functions
+
+    # Sort by callee count descending, take top_n
+    ranked = sorted(callee_count, key=lambda f: callee_count[f], reverse=True)
+    return ranked[:top_n]

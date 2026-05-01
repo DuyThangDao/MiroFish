@@ -286,9 +286,29 @@ class LLMClient:
                     raise
 
         choice = response.choices[0] if response.choices else None
-        content = (choice.message.content if choice and choice.message else None) or ""
+        raw_content = (choice.message.content if choice and choice.message else None) or ""
+        pre_strip_len = len(raw_content)
         if strip_think:
-            content = re.sub(r'<think>[\s\S]*?</think>', '', content).strip()
+            content = re.sub(r'<think>[\s\S]*?</think>', '', raw_content).strip()
+        else:
+            content = raw_content
+        if pre_strip_len > 0 and len(content) == 0:
+            _logger.warning(
+                f"[llm_client] strip_think removed ALL content "
+                f"(pre={pre_strip_len}chars post=0) — model likely returned only <think> block"
+            )
+        elif pre_strip_len == 0 and choice and choice.message:
+            # content was None/empty from API — log available message attributes for diagnosis
+            msg = choice.message
+            extra_fields = {k: (len(v) if isinstance(v, str) else v)
+                            for k, v in vars(msg).items()
+                            if k not in ("content", "role") and v}
+            if extra_fields:
+                _logger.warning(
+                    f"[llm_client] content=None from API; non-empty message fields: {extra_fields}"
+                )
+            else:
+                _logger.warning(f"[llm_client] content=None from API; finish_reason={getattr(choice, 'finish_reason', '?')}")
         return content
 
     def chat_json(

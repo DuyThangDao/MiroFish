@@ -395,10 +395,33 @@ def run_audit(
         _save_json(output_dir, "profiles.json", _profiles_to_dicts(profiles))
 
         # ── Step 4: Run audit session ──────────────────────────────────────────
-        logger.info("\n[STEP 3/4] Running 10-round audit session (Phase A → B → C)...")
+        _audit_v = os.environ.get("AUDIT_PIPELINE_VERSION", "v1").lower()
+        if _audit_v == "v2":
+            # v2: use enriched contract_summary (KG + dep graph + intent + invariants)
+            # as base context — same approach as v1 to avoid hallucination from
+            # overwhelming agents with 54K chars of raw source.
+            # Append full bodies of the most complex functions (by callee count in
+            # CALL GRAPH) so agents can cite real code evidence.
+            from app.services.contract_dep_graph import (
+                extract_function_bodies,
+                pick_critical_functions_from_summary,
+            )
+            _raw_src = locals().get("kg_source") or source_code
+            _critical_fns = pick_critical_functions_from_summary(contract_summary, top_n=6)
+            _critical_block = extract_function_bodies(_raw_src, _critical_fns) if _critical_fns else ""
+            _v2_session_summary = contract_summary + ("\n\n" + _critical_block if _critical_block else "")
+            logger.info(
+                f"\n[STEP 3/4] Running 3-round v2 audit (Round 1 discovery / 2 voting / 3 attacker)..."
+                f"\n  context for agents: {len(_v2_session_summary)} chars "
+                f"(enriched summary + {len(_critical_fns)} critical functions)"
+            )
+        else:
+            _v2_session_summary = contract_summary
+            logger.info("\n[STEP 3/4] Running 10-round audit session (Phase A → B → C)...")
+
         task_id = orchestrator.run_session_async(
             graph_id=graph_id,
-            network_summary=contract_summary,
+            network_summary=_v2_session_summary,
             profiles=profiles,
             mode="contract_audit",
             invariants=invariants,
@@ -414,15 +437,24 @@ def run_audit(
         expert_findings   = session_result.get("expert_findings", [])
         attacker_findings = session_result.get("attacker_findings", [])
         semantic_findings = session_result.get("semantic_findings", [])
+        v2_confirmed      = session_result.get("v2_confirmed")   # None for v1 runs
+        v2_borderline     = session_result.get("v2_borderline", [])
+        v2_discarded      = session_result.get("v2_discarded", [])
 
-        logger.info(f"  Expert findings  : {len(expert_findings)}")
-        logger.info(f"  Attacker findings: {len(attacker_findings)}")
-        logger.info(f"  Semantic findings: {len(semantic_findings)}")
+        _pv = session_result.get("pipeline_version", "v1")
+        if v2_confirmed is not None:
+            logger.info(f"  [v2] Confirmed   : {len(v2_confirmed)}")
+            logger.info(f"  [v2] Borderline  : {len(v2_borderline)}")
+            logger.info(f"  [v2] Discarded   : {len(v2_discarded)}")
+        else:
+            logger.info(f"  Expert findings  : {len(expert_findings)}")
+            logger.info(f"  Attacker findings: {len(attacker_findings)}")
+            logger.info(f"  Semantic findings: {len(semantic_findings)}")
 
         _save_json(output_dir, "session_result.json", session_result)
 
         # ── Step 5: Generate report ────────────────────────────────────────────
-        logger.info("\n[STEP 4/4] Generating audit report...")
+        logger.info(f"\n[STEP 4/4] Generating audit report ({_pv})...")
         task_id = report_agent.generate_report_async(
             session_id=session_id,
             expert_findings=expert_findings,
@@ -431,6 +463,9 @@ def run_audit(
             graph_id=graph_id,
             semantic_findings=semantic_findings,
             invariants=invariants,
+            v2_confirmed=v2_confirmed,
+            v2_borderline=v2_borderline,
+            v2_discarded=v2_discarded,
         )
         report_result = _poll_task(task_manager, task_id, "Report Gen", timeout=1800)
 
@@ -442,23 +477,29 @@ def run_audit(
                 llm_client=orchestrator.llm,
                 config=PoCConfig(enabled=True),
             )
-            _consensus_vulns = report_result.get("consensus_vulns", [])
-            _gap_findings    = report_result.get("unvalidated_swc_gaps", [])
-            _contest_dir     = sol_path if (sol_path and os.path.isdir(sol_path)) else None
+            _consensus_vulns  = report_result.get("consensus_vulns", [])
+            _gap_findings     = report_result.get("unvalidated_swc_gaps", [])
+            _semantic_results = report_result.get("semantic_results", [])
+            _contest_dir      = sol_path if (sol_path and os.path.isdir(sol_path)) else None
 
-            _upd_consensus, _upd_gaps = poc_stage.run(
+            _upd_consensus, _upd_gaps, _upd_semantic = poc_stage.run(
                 consensus_vulns=_consensus_vulns,
                 gap_findings=_gap_findings,
                 flat_source=source_code,
                 contest_dir=_contest_dir,
+                semantic_results=_semantic_results,
             )
             if len(_upd_consensus) > len(_consensus_vulns):
                 upgraded = len(_upd_consensus) - len(_consensus_vulns)
                 logger.info(f"  PoC: {upgraded} finding(s) upgraded Tier-2 → Tier-1")
-                report_result["consensus_vulns"]    = _upd_consensus
+                report_result["consensus_vulns"]      = _upd_consensus
                 report_result["unvalidated_swc_gaps"] = _upd_gaps
             else:
                 logger.info("  PoC: no upgrades")
+            _poc_verified_sem = sum(1 for s in _upd_semantic if s.get("poc_verified"))
+            if _poc_verified_sem:
+                logger.info(f"  PoC: {_poc_verified_sem} semantic finding(s) marked poc_verified=True")
+                report_result["semantic_results"] = _upd_semantic
         except Exception as _poc_err:
             logger.warning(f"  PoC stage skipped (non-fatal): {_poc_err}")
 
