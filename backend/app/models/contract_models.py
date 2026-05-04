@@ -172,8 +172,6 @@ class ContractFinding:
     title:                str
     description:          str
     affected_functions:   List[str]     # function names bị ảnh hưởng
-    swc_id:               str           # "SWC-107"
-    swc_name:             str           # "Reentrancy"
     severity:             str           # AuditSeverity value
     confidence:           float         # 0.0 – 1.0
     evidence:             List[str]     # trích dẫn từ contract code / KG facts
@@ -191,6 +189,10 @@ class ContractFinding:
     cross_domain_validated:  bool = False
 
     attacker_corroborations: List[AttackerCorroboration] = field(default_factory=list)
+
+    # NL migration fields
+    contract_name:        str = ""
+    attack_path:          Optional[str] = None
 
 
 @dataclass
@@ -225,8 +227,8 @@ SEMANTIC_CATEGORIES = {
 @dataclass
 class SemanticFinding:
     """
-    Business-logic / semantic vulnerability without a SWC ID.
-    Parallel to ContractFinding but captures S-category bugs (Web3Bugs taxonomy).
+    DEPRECATED: S-track removed in NL migration. Use ContractFinding with contract_name/attack_path.
+    Kept for backwards compatibility — do not use in new code.
     """
     finding_id:          str
     author_domain:       str

@@ -1,0 +1,121 @@
+[
+  {
+    "h_id": "H-01",
+    "title": "Unsafe cast in ConcentratedLiquidityPool.burn leads to attack",
+    "description": "The burn function performs an unsafe cast of amount (uint128) to -int128(amount). When amount = 2^128 - 1, this is interpreted as -1 as a signed integer, so -(-1)=1 adds 1 liquidity unit to the position instead of removing it. This allows an attacker to mint LP tokens for free while redeeming extremely large token amounts corresponding to the unmodified uint128 value, effectively stealing pool tokens.",
+    "function_name": "burn",
+    "contract_name": "ConcentratedLiquidityPool"
+  },
+  {
+    "h_id": "H-02",
+    "title": "Wrong usage of positionId in ConcentratedLiquidityPoolManager",
+    "description": "In the subscribe function, the incentive is looked up as incentives[pool][positionId], but positionId should be incentiveId (a counter that increments with each new incentive). Using positionId causes wrong incentive lookups and generally causes transactions to revert because the endTime condition fails. The same bug affects the getReward and claimReward functions.",
+    "function_name": "subscribe",
+    "contract_name": "ConcentratedLiquidityPoolManager"
+  },
+  {
+    "h_id": "H-03",
+    "title": "ConcentratedLiquidityPoolManager's incentives can be stolen",
+    "description": "The reclaimIncentive function does not decrement incentive.rewardsUnclaimed after withdrawing tokens. An attacker can create an incentive with a target token, wait for expiry, then repeatedly call reclaimIncentive with the same rewardsUnclaimed amount to drain all tokens of that type from the PoolManager, including tokens belonging to other incentives.",
+    "function_name": "reclaimIncentive",
+    "contract_name": "ConcentratedLiquidityPoolManager"
+  },
+  {
+    "h_id": "H-04",
+    "title": "Overflow in the mint function of ConcentratedLiquidityPool causes LPs' funds to be stolen",
+    "description": "The mint function checks amount1Actual + reserve1 <= _balance(token1) inside an unchecked block. An attacker can choose mint parameters such that amount1Actual is near type(uint128).max, causing amount1Actual + reserve1 to overflow to a small number, bypassing the balance check. The attacker receives large liquidity while paying a tiny amount, and can burn to steal other LPs' funds.",
+    "function_name": "mint",
+    "contract_name": "ConcentratedLiquidityPool"
+  },
+  {
+    "h_id": "H-05",
+    "title": "Incorrect usage of typecasting in _getAmountsForLiquidity lets an attacker steal funds from the pool",
+    "description": "The _getAmountsForLiquidity function explicitly casts the results of DyDxMath.getDy and DyDxMath.getDx from uint256 to uint128 without checking for overflow. An attacker can choose parameters such that the actual amount exceeds type(uint128).max, causing the cast to silently truncate the value to a tiny number. The attacker pays the truncated tiny amount while receiving large liquidity, then burns for profit.",
+    "function_name": "_getAmountsForLiquidity",
+    "contract_name": "ConcentratedLiquidityPool"
+  },
+  {
+    "h_id": "H-06",
+    "title": "Users may get double the amount of yield when they call collect() before burn()",
+    "description": "When a user calls collect() to collect fees, it calculates yield from rangeFeeGrowth and the position's feeGrowthInside values. If there is sufficient bento balance, pool.collect() is not called. When the user subsequently calls burn(), it automatically collects fees again from the pool contract. This causes the user to receive double yield at the expense of other LPs.",
+    "function_name": "collect",
+    "contract_name": "ConcentratedLiquidityPosition"
+  },
+  {
+    "h_id": "H-07",
+    "title": "ConcentratedLiquidityPosition.burn() wrong implementation allows attackers to steal yield",
+    "description": "ConcentratedLiquidityPosition.burn() passes the external recipient directly to pool.burn(), which returns all fees for the entire tick range (lower, upper) to that recipient. An attacker can mint a small position with the same lower and upper ticks as a victim, then call burn() to steal all accumulated fees for that tick range including fees belonging to the victim's much larger position.",
+    "function_name": "burn",
+    "contract_name": "ConcentratedLiquidityPosition"
+  },
+  {
+    "h_id": "H-08",
+    "title": "Wrong inequality when adding/removing liquidity in current price range",
+    "description": "The mint and burn functions update the active liquidity only when priceLower < currentPrice && currentPrice < priceUpper (strict inequality on lower bound). When currentPrice == priceLower, liquidity is not updated even though the position is active. This leads to incorrect liquidity accounting and wrong swap amounts, causing potential fund loss for LPs who add liquidity exactly at the current price's lower tick boundary.",
+    "function_name": "mint",
+    "contract_name": "ConcentratedLiquidityPool"
+  },
+  {
+    "h_id": "H-09",
+    "title": "rangeFeeGrowth underflow causes pool to become permanently broken",
+    "description": "rangeFeeGrowth calculates feeGrowthInside = feeGrowthGlobal - feeGrowthBelow - feeGrowthAbove. When crossing a tick, only one of feeGrowthOutside0 or feeGrowthOutside1 is updated, so feeGrowthBelow + feeGrowthAbove can legitimately exceed feeGrowthGlobal. Solidity 0.8.x default overflow checks cause the subtraction to revert. Users cannot mint, burn, or cross the affected tick, permanently breaking the pool.",
+    "function_name": "rangeFeeGrowth",
+    "contract_name": "ConcentratedLiquidityPool"
+  },
+  {
+    "h_id": "H-10",
+    "title": "ConcentratedLiquidityPool.burn() wrong reserve update",
+    "description": "The burn function decrements reserves only by the fee amounts (reserve0 -= amount0fees; reserve1 -= amount1fees) instead of the full amounts transferred out (amount0, amount1). After any burn, the reserve variables greatly exceed the pool's actual token balances. Subsequent mint and swap operations fail or require users to overpay because the balance check uses the inflated reserve values.",
+    "function_name": "burn",
+    "contract_name": "ConcentratedLiquidityPool"
+  },
+  {
+    "h_id": "H-11",
+    "title": "ConcentratedLiquidityPool: incorrect feeGrowthGlobal accounting when crossing ticks",
+    "description": "In Ticks.cross(), when zeroForOne is true (fees collected in token1), the code updates feeGrowthOutside0 instead of feeGrowthOutside1, and vice versa. This is the opposite of the correct behavior based on how feeGrowthGlobal is assigned in the swap cache. The reversed assignment causes systematic wrong fee accounting, leading to incorrect fee distribution to LPs.",
+    "function_name": "cross",
+    "contract_name": "Ticks"
+  },
+  {
+    "h_id": "H-12",
+    "title": "secondsPerLiquidity should be updated before liquidity changes in mint and burn",
+    "description": "secondsPerLiquidity is updated as secondsPerLiquidity += (diff << 128) / liquidity. When mint() or burn() changes the active liquidity (when lowerTick <= currentTick < upperTick), secondsPerLiquidity must be updated prior to the change using the old liquidity value. The current code applies the update after changing liquidity, resulting in incorrect secondsPerLiquidity values that distort staking reward calculations.",
+    "function_name": "mint",
+    "contract_name": "ConcentratedLiquidityPool"
+  },
+  {
+    "h_id": "H-13",
+    "title": "Burning does not update reserves correctly",
+    "description": "The burn function sends out amount0 and amount1 tokens to the recipient but only decreases the reserves by the fee portions (amount0fees, amount1fees). The pool's actual balance becomes much lower than the reserve variables after any burn. This causes mint to fail (balance check uses inflated reserves requiring users to overpay) and swap to malfunction in the same way, making the pool essentially unusable.",
+    "function_name": "burn",
+    "contract_name": "ConcentratedLiquidityPool"
+  },
+  {
+    "h_id": "H-14",
+    "title": "ConcentratedLiquidityPool: rangeFeeGrowth and secondsPerLiquidity math needs to be unchecked",
+    "description": "The Uniswap V3 fee growth mechanism intentionally relies on wrapping (modular) arithmetic to handle negative feeGrowthInside values. rangeFeeGrowth() and rangeSecondsInside() must use unchecked math because the subtraction feeGrowthGlobal - feeGrowthBelow - feeGrowthAbove can legitimately underflow. With Solidity 0.8.x default overflow protection, these functions revert in valid scenarios, breaking fee collection and liquidity operations.",
+    "function_name": "rangeFeeGrowth",
+    "contract_name": "ConcentratedLiquidityPool"
+  },
+  {
+    "h_id": "H-15",
+    "title": "ConcentratedLiquidityPool: initialPrice not validated against allowable range",
+    "description": "The initialize function does not verify that initialPrice is within the range [MIN_SQRT_RATIO, MAX_SQRT_RATIO]. Setting initialPrice to zero or any out-of-bounds value causes Ticks.insert() to fail when calculating the tick via TickMath.getTickAtSqrtRatio(currentPrice), preventing any user from minting positions. All pool functions (mint, swap, burn) become permanently unusable.",
+    "function_name": "initialize",
+    "contract_name": "ConcentratedLiquidityPool"
+  },
+  {
+    "h_id": "H-16",
+    "title": "Possible JIT liquidity attack on secondsPerLiquidity reward calculation",
+    "description": "The claimReward function distributes incentive tokens based on secondsPerLiquidity. An attacker can exploit this by minting a tight-range position at the current price (giving high position.liquidity), frontruing price changes to always stay in range, claiming rewards, then burning and reminting at the new price. This JIT strategy earns a disproportionate share of rewards without bearing meaningful liquidity risk.",
+    "function_name": "claimReward",
+    "contract_name": "ConcentratedLiquidityPoolManager"
+  },
+  {
+    "h_id": "H-17",
+    "title": "nearestTick is unsuitable as reference point for fee growth mechanism",
+    "description": "The fee growth mechanism requires a clear distinction between Case 1 (initialized tick <= pool tick, feeGrowthOutside towards MIN_TICK) and Case 2 (initialized tick > pool tick, feeGrowthOutside towards MAX_TICK). Using nearestTick instead of the actual pool tick makes this distinction ambiguous. When a position tick equals nearestTick, feeGrowthOutside is initialized incorrectly (0 when it should be feeGrowthGlobal or vice versa), causing wrong fee calculations and incorrect rangeFeeGrowth results.",
+    "function_name": "rangeFeeGrowth",
+    "contract_name": "ConcentratedLiquidityPool"
+  }
+]

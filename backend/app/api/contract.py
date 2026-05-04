@@ -608,7 +608,7 @@ def get_report(session_id: str):
     Lấy audit report đã generated.
 
     Returns:
-        { report, consensus_vulns[], unvalidated_swc_gaps[], coverage_gaps, stats }
+        { report, findings[], unvalidated_gaps[], coverage_gaps, stats }
     """
     report_data = ContractAuditReportAgent.load_report(session_id)
     if not report_data:

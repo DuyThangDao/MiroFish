@@ -470,12 +470,13 @@ def run_audit(
         report_result = _poll_task(task_manager, task_id, "Report Gen", timeout=1800)
 
         # ── Step 5b: PoC Enrichment (scenario-driven, post-consensus) ───────────
-        logger.info("\n[STEP 4b/4] PoC Enrichment Stage (scenario-driven)...")
+        _poc_enabled = os.environ.get("POC_ENABLED", "false").lower() in ("1", "true", "yes")
+        logger.info(f"\n[STEP 4b/4] PoC Enrichment Stage — {'running' if _poc_enabled else 'SKIPPED (POC_ENABLED=false)'}...")
         try:
             from app.services.poc_verification import PoCVerificationStage, PoCConfig
             poc_stage = PoCVerificationStage(
                 llm_client=orchestrator.llm,
-                config=PoCConfig(enabled=True),
+                config=PoCConfig(enabled=_poc_enabled),
             )
             # Only confirmed findings go to PoC; discarded have been excluded already
             _consensus_vulns  = report_result.get("consensus_vulns", [])

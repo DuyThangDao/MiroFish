@@ -42,7 +42,6 @@ def _get_contract_modules():
     from .contract_oasis_env import (
         ContractAuditEnvBuilder,
         ContractAttackerAction, parse_contract_finding_from_text,
-        parse_semantic_finding_from_text,
         parse_contract_gap_declarations, build_gap_context_for_agent as contract_gap_context,
         build_published_registry as contract_published_registry,
         get_phase_for_round as contract_get_phase,
@@ -58,7 +57,6 @@ def _get_contract_modules():
         "env_builder":          ContractAuditEnvBuilder,
         "attacker_action":      ContractAttackerAction,
         "parse_finding":        parse_contract_finding_from_text,
-        "parse_semantic":       parse_semantic_finding_from_text,
         "parse_gap":            parse_contract_gap_declarations,
         "gap_context":          contract_gap_context,
         "published_registry":   contract_published_registry,
@@ -1103,17 +1101,8 @@ class CyberSessionOrchestrator:
         known_functions=None,
         is_attacker_surfaced: bool = False,
     ):
-        """Parse SEMANTIC_FINDING block from agent post → appended to semantic_findings."""
-        cm = _get_contract_modules()
-        sf = cm["parse_semantic"](text, profile, round_num, known_functions=known_functions)
-        if not sf:
-            return
-        sf["is_attacker_surfaced"] = is_attacker_surfaced
-        session_state.semantic_findings.append(sf)
-        logger.debug(
-            f"SemanticFinding [{sf['finding_id']}] from {profile.agent_id}: "
-            f"{sf['title']} ({sf['category']}, {sf['severity']})"
-        )
+        """DEPRECATED: S-track removed in NL migration. No-op."""
+        pass
 
     def _process_expert_response(
         self,
@@ -1895,7 +1884,7 @@ class CyberSessionOrchestrator:
     # thinkingConfig/thinkingBudget is silently ignored by this model's endpoint.
     _V2_R1_MAX_TOKENS  = int(os.environ.get("V2_R1_MAX_TOKENS",  "65536"))
     _V2_R2_MAX_TOKENS  = int(os.environ.get("V2_R2_MAX_TOKENS",  "32768"))
-    _V2_R3_MAX_TOKENS  = int(os.environ.get("V2_R3_MAX_TOKENS",  "32768"))
+    _V2_R3_MAX_TOKENS  = int(os.environ.get("V2_R3_MAX_TOKENS",  "1500"))
 
     def _call_agent_v2(
         self,
@@ -2011,36 +2000,24 @@ class CyberSessionOrchestrator:
     @classmethod
     def _v2_findings_to_consensus_compat(
         cls, confirmed: list
-    ) -> tuple:
+    ) -> list:
         """
-        Expand each v2 confirmed finding into per-domain sub-findings so the
-        consensus engine's cross_score and intra_score calculations are meaningful.
+        Convert v2 confirmed findings (from candidate pool) into unified findings list.
 
-        Semantic findings → session_state.semantic_findings (S-track).
-        SWC findings      → session_state.expert_findings   (L-track).
-
-        Why per-domain expansion: _score_semantic_cluster uses author_domain to
-        compute cross_score = len(unique_domains) / total_domains. A single finding
-        dict with no author_domain gives cross_score=0 → confidence=0 → filtered.
-        Expanding into one entry per submitter domain makes all submitting domains
-        visible to the cluster scorer.
+        Each finding gets per-domain entries so consensus engine cross_score is meaningful.
+        Returns a flat list of finding dicts (unified NL format, no L/S split).
         """
-        expert_out:   list = []
-        semantic_out: list = []
+        findings_out: list = []
 
         for f in confirmed:
             pair_id       = f.get("pair_id", "")
-            kind          = f.get("kind", "swc")
-            category      = f.get("category", "")
+            contract_name = f.get("contract_name", "")
+            title         = f.get("title", "")
             fn_name       = f.get("function_name", "") or f.get("_fallback_fn", "")
             submitters    = f.get("submitters", [])
             evidence      = " | ".join(f.get("evidence_snippets", [])[:2])
             attacker_rate = f.get("attacker_rate", 0.0)
-            swc_id        = f.get("swc_id", "")
 
-            # Extract best attacker scenario (CONFIRMED > PLAUSIBLE) for recommendations.
-            # _is_tier1() requires non-empty recommendations to put findings in
-            # consensus_vulns (vs unvalidated_swc_gaps).
             _verdict_rank = {"CONFIRMED": 2, "PLAUSIBLE": 1}
             _best_verdict = max(
                 (v for v in f.get("attacker_verdicts", {}).values()
@@ -2049,16 +2026,12 @@ class CyberSessionOrchestrator:
                 default=None,
             )
             if _best_verdict:
-                _steps = _best_verdict.get("attack_steps", "")
-                _outcome = _best_verdict.get("expected_outcome", "")
-                _entry = _best_verdict.get("entry_point", fn_name)
-                patch_suggestion = (
-                    f"Entry: {_entry}. Steps: {_steps}. Outcome: {_outcome}"
-                ).strip(" .")
+                attack_path = _best_verdict.get("attack_steps", "")
+                patch_suggestion = _best_verdict.get("expected_outcome", "")
             else:
+                attack_path = ""
                 patch_suggestion = f"Validate and restrict access to {fn_name}" if fn_name else ""
 
-            # Unique domains from submitters, preserving first-seen order
             domains_seen: dict = {}
             for agent_id in submitters:
                 prefix = agent_id.split("_")[0]
@@ -2068,47 +2041,27 @@ class CyberSessionOrchestrator:
             if not domains_seen:
                 domains_seen = {"blockchain": "v2_fallback"}
 
-            title = f"{category} vulnerability in {fn_name}" if fn_name else f"{category} vulnerability"
+            for domain in domains_seen:
+                findings_out.append({
+                    "finding_id":    f"{pair_id}_{domain}",
+                    "title":         title or f"Vulnerability in {fn_name}",
+                    "description":   title,
+                    "attack_path":   attack_path,
+                    "contract_name": contract_name,
+                    "function_name": fn_name,
+                    "affected_functions": [fn_name] if fn_name else [],
+                    "author_domain": domain,
+                    "evidence":      evidence,
+                    "severity":      "high",
+                    "confidence":    attacker_rate,
+                    "patch_suggestion": patch_suggestion,
+                    "challenged_by": [],
+                    "validated_by":  [],
+                    "v2_pair_id":    pair_id,
+                    "v2_attacker_rate": attacker_rate,
+                })
 
-            if kind == "semantic":
-                for domain in domains_seen:
-                    semantic_out.append({
-                        "finding_id":           f"{pair_id}_{domain}",
-                        "title":                title,
-                        "category":             category,
-                        "affected_functions":   [fn_name] if fn_name else [],
-                        "is_attacker_surfaced": True,
-                        "author_domain":        domain,
-                        "evidence":             evidence,
-                        "attack_path":          [],
-                        "patch_suggestion":     patch_suggestion,
-                        "challenged_by":        [],
-                        "validated_by":         [],
-                        "swc_id":               swc_id,
-                        "v2_pair_id":           pair_id,
-                        "v2_attacker_rate":     attacker_rate,
-                    })
-            else:
-                # SWC finding — one entry per domain so cluster scorer sees diversity
-                for domain in domains_seen:
-                    expert_out.append({
-                        "finding_id":            f"{pair_id}_{domain}",
-                        "swc_id":                swc_id,
-                        "function_name":         fn_name,
-                        "affected_functions":    [fn_name] if fn_name else [],
-                        "author_domain":         domain,
-                        "evidence":              evidence,
-                        "severity":              "high",
-                        "confidence":            attacker_rate,
-                        "is_attacker_confirmed": True,
-                        "patch_suggestion":      patch_suggestion,
-                        "challenged_by":         [],
-                        "validated_by":          [],
-                        "v2_pair_id":            pair_id,
-                        "v2_attacker_rate":      attacker_rate,
-                    })
-
-        return expert_out, semantic_out
+        return findings_out
 
     def _v2_complete_task(
         self,
@@ -2154,7 +2107,7 @@ class CyberSessionOrchestrator:
         Returns candidate_pool: Dict[pair_id → meta_dict]
 
         meta_dict keys:
-          pair_id, kind, swc_id/category, function_name,
+          pair_id, contract_name, title, function_name,
           submitters (list[str]), evidence_snippets (list[str])
 
         Round 1 parsing uses known_functions=None (no function-list filter) because:
@@ -2171,7 +2124,7 @@ class CyberSessionOrchestrator:
         # Dump dir for raw agent responses (debug)
         _debug_dir = os.environ.get("V2_DEBUG_DIR", "")
 
-        # raw_pool: (kind, swc_or_cat, fn_lower) → meta
+        # raw_pool: each finding gets its own entry (no clustering by location)
         raw_pool: dict = {}
 
         def _discover_one(profile) -> list:
@@ -2185,7 +2138,6 @@ class CyberSessionOrchestrator:
             elapsed = time.time() - t0
             logger.info(f"[TIMING] Phase=v2 R1 agent={profile.agent_id} latency={elapsed:.1f}s")
 
-            # Dump raw response for post-mortem analysis
             if _debug_dir:
                 try:
                     import pathlib
@@ -2196,45 +2148,30 @@ class CyberSessionOrchestrator:
                 except Exception:
                     pass
 
-            # Pass known_functions=None — do NOT apply known-function filter in Round 1.
-            # The filter cuts findings referencing valid contract functions that the KG
-            # failed to index (KG only captures a small fraction of all functions).
             parsed = cm["parse_all_findings"](response, profile, 1, known_functions=None)
-
-            n_swc = len(parsed.get("swc_findings", []))
-            n_sem = len(parsed.get("semantic_findings", []))
+            n_findings = len(parsed)
             logger.info(
                 f"[v2 R1] agent={profile.agent_id}: "
                 f"raw_response={len(response)}chars "
-                f"parsed={n_swc}swc+{n_sem}sem"
+                f"parsed={n_findings}findings"
             )
 
             results = []
-            for f in parsed.get("swc_findings", []):
+            for f in parsed:
                 fns = f.get("affected_functions") or []
-                # If parser couldn't extract a function name, use the SWC ID itself
-                # as a placeholder so the finding still enters the candidate pool.
                 if not fns:
                     logger.debug(
-                        f"[v2 R1] {profile.agent_id}: SWC finding '{f.get('title','')[:50]}' "
+                        f"[v2 R1] {profile.agent_id}: finding '{f.get('title','')[:50]}' "
                         f"has no affected_functions — using placeholder"
                     )
-                    fns = [f"_nofunc_{f.get('swc_id','UNK')}"]
+                    fns = ["_nofunc"]
+                contract    = f.get("contract_name", "")
+                title       = f.get("title", "")
+                description = f.get("description", "") or ""
+                attack_path = f.get("attack_path", [])
                 ev = (f.get("evidence") or [""])[0]
                 for fn in fns:
-                    results.append(("swc", f.get("swc_id",""), fn, ev))
-
-            for f in parsed.get("semantic_findings", []):
-                fns = f.get("affected_functions") or []
-                if not fns:
-                    logger.debug(
-                        f"[v2 R1] {profile.agent_id}: semantic finding '{f.get('title','')[:50]}' "
-                        f"has no affected_functions — using placeholder"
-                    )
-                    fns = [f"_nofunc_{f.get('category','other')}"]
-                ev = f.get("evidence", "")
-                for fn in fns:
-                    results.append(("semantic", f.get("category","other"), fn, ev))
+                    results.append((contract, fn, title, description, attack_path, ev))
 
             return results
 
@@ -2248,27 +2185,24 @@ class CyberSessionOrchestrator:
             for future, profile in futures.items():
                 try:
                     findings = future.result()
-                    for kind, swc_or_cat, fn, ev in findings:
-                        fn_norm = fn.rstrip("()").lower()
-                        key = (kind, swc_or_cat, fn_norm)
-                        if key not in raw_pool:
-                            raw_pool[key] = {
-                                "pair_id":        f"p_{uuid.uuid4().hex[:8]}",
-                                "kind":           kind,
-                                "swc_id":         swc_or_cat if kind == "swc" else "",
-                                "category":       swc_or_cat if kind == "semantic" else "",
-                                "function_name":  fn,
-                                "submitters":     [],
-                                "evidence_snippets": [],
-                            }
-                        raw_pool[key]["submitters"].append(profile.agent_id)
-                        if ev and ev not in raw_pool[key]["evidence_snippets"]:
-                            raw_pool[key]["evidence_snippets"].append(ev[:300])
+                    for contract, fn, title, description, attack_path, ev in findings:
+                        # No clustering — each finding gets its own entry in the pool
+                        pair_id = f"p_{uuid.uuid4().hex[:8]}"
+                        raw_pool[pair_id] = {
+                            "pair_id":           pair_id,
+                            "contract_name":     contract,
+                            "title":             title,
+                            "description":       description,
+                            "attack_path":       attack_path,
+                            "function_name":     fn,
+                            "submitters":        [profile.agent_id],
+                            "evidence_snippets": [ev[:300]] if ev else [],
+                        }
                 except Exception as e:
                     logger.warning(f"[v2 R1] result error {profile.agent_id}: {e}")
 
-        # Index by pair_id for downstream use
-        return {v["pair_id"]: v for v in raw_pool.values()}
+        # Already indexed by pair_id
+        return raw_pool
 
     # ── Round 2 helper ────────────────────────────────────────────────────────
 
@@ -2341,13 +2275,12 @@ class CyberSessionOrchestrator:
             for pid in agent_voted_pairs:
                 meta = candidate_pool[pid]
                 revealed.append({
-                    "pair_id":      pid,
-                    "kind":         meta["kind"],
-                    "swc_id":       meta.get("swc_id",""),
-                    "category":     meta.get("category",""),
+                    "pair_id":       pid,
+                    "contract_name": meta.get("contract_name", ""),
+                    "title":         meta.get("title", ""),
                     "function_name": meta["function_name"],
-                    "all_evidence": evidence_by_pair.get(pid, []),
-                    "agent_vote":   votes[pid].get(profile.agent_id, "?"),
+                    "all_evidence":  evidence_by_pair.get(pid, []),
+                    "agent_vote":    votes[pid].get(profile.agent_id, "?"),
                 })
             return revealed
 
@@ -2399,7 +2332,7 @@ class CyberSessionOrchestrator:
             if score >= self._R2_THRESHOLD:
                 accepted.append(meta)
                 logger.debug(f"[v2 R2] ACCEPTED pair_id={pair_id} score={score:.2f} "
-                             f"({meta['kind']} {meta.get('swc_id') or meta.get('category')} {meta['function_name']})")
+                             f"({meta.get('contract_name','?')}.{meta['function_name']} '{meta.get('title','')[:40]}')")
             else:
                 logger.debug(f"[v2 R2] REJECTED pair_id={pair_id} score={score:.2f}")
 

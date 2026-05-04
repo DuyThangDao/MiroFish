@@ -1095,21 +1095,16 @@ class ConsensusEngine:
         discarded: List[Dict[str, Any]],
     ) -> Dict[str, List[Dict[str, Any]]]:
         """
-        Map v2 R3 results to the canonical schema expected by evaluate_web3bugs.py.
+        Map v2 R3 results to the canonical NL-format schema.
 
-        Each confirmed finding is ONE instance-level entry (1 function = 1 entry).
-        Per architecture: Đơn vị finding = (swc_id, function_name) pair, not SWC class.
+        Each confirmed finding is ONE instance-level entry (1 function per entry).
+        Unified findings list — no L/S split, no SWC IDs, no category field.
 
-        consensus_vulns schema (L-track):
-          vuln_id, swc_ids (list), affected_assets (list), affected_functions (list),
-          confidence_score, severity, recommendations, title, description
-
-        semantic_results schema (S-track):
-          semantic_vuln_id, category, affected_functions (list),
-          confidence_score, severity, title, evidence, patch_suggestions (list)
-
-        unvalidated_swc_gaps: SWC findings from discarded (attacker_rate=0) +
-                              borderline that couldn't be PoC-verified.
+        findings schema:
+          finding_id, title, description, attack_path,
+          contract_name, function_name, severity, confidence_score,
+          evidence, patch, supporting_domains, needs_review,
+          v2_pair_id, v2_round2_score, v2_attacker_rate
         """
         import hashlib as _hashlib
 
@@ -1118,100 +1113,75 @@ class ConsensusEngine:
             if conf >= 0.4:  return "medium"
             return "low"
 
-        def _extract_patch(f: Dict[str, Any]) -> List[str]:
-            recs = []
+        def _extract_attack_path(f: Dict[str, Any]) -> str:
+            # Prefer R3 attacker verdict (most concrete exploit path)
             for v in f.get("attacker_verdicts", {}).values():
                 if v.get("verdict") in ("CONFIRMED", "PLAUSIBLE"):
                     entry   = v.get("entry_point", "")
-                    steps   = v.get("attack_steps", "")
+                    steps   = v.get("attack_steps", [])
+                    steps_str = " → ".join(steps) if isinstance(steps, list) else str(steps)
                     outcome = v.get("expected_outcome", "")
-                    recs.append(f"Entry: {entry}. Steps: {steps}. Outcome: {outcome}".strip(" ."))
-            return recs or [f"Validate and restrict access to {f.get('function_name', '')}"]
+                    return f"Entry: {entry}. Steps: {steps_str}. Outcome: {outcome}".strip(" .")
+            # Fall back to R1 agent's attack_path if no R3 verdict
+            r1_path = f.get("attack_path", [])
+            if isinstance(r1_path, list):
+                return " → ".join(r1_path) if r1_path else ""
+            return str(r1_path) if r1_path else ""
 
-        consensus_vulns: List[Dict[str, Any]] = []
-        semantic_results: List[Dict[str, Any]] = []
-        unvalidated_swc_gaps: List[Dict[str, Any]] = []
+        def _extract_patch(f: Dict[str, Any]) -> str:
+            fn = f.get("function_name", "")
+            for v in f.get("attacker_verdicts", {}).values():
+                if v.get("verdict") in ("CONFIRMED", "PLAUSIBLE"):
+                    return v.get("expected_outcome", f"Validate and restrict access to {fn}")
+            return f"Validate and restrict access to {fn}" if fn else ""
+
+        findings: List[Dict[str, Any]] = []
+        unvalidated_gaps: List[Dict[str, Any]] = []
 
         for f in confirmed:
-            fn_name  = f.get("function_name", "") or ""
-            fn_list  = [fn_name] if fn_name else []
-            r2_score = f.get("round2_score", 0.0)
-            att_rate = f.get("attacker_rate", 0.0)
-            att_factor = f.get("attacker_factor", 0.5)
-            # Use pre-computed confidence from orchestrator (new formula: r2 × attacker_factor)
-            conf     = round(f.get("confidence", f.get("final_score", r2_score * att_rate)), 4)
-            uid      = _hashlib.md5(f.get("pair_id", "").encode()).hexdigest()[:8]
+            fn_name       = f.get("function_name", "") or ""
+            contract_name = f.get("contract_name", "") or ""
+            title         = f.get("title", "") or f"Vulnerability in {fn_name}"
+            r2_score      = f.get("round2_score", 0.0)
+            att_rate      = f.get("attacker_rate", 0.0)
+            att_factor    = f.get("attacker_factor", 0.5)
+            conf          = round(f.get("confidence", f.get("final_score", r2_score * att_rate)), 4)
+            uid           = _hashlib.md5(f.get("pair_id", "").encode()).hexdigest()[:8]
+            evidence      = " | ".join(f.get("evidence_snippets", [])[:2])
+            # Prefer the R1 agent's full description; fall back to evidence snippet, then title
+            description   = f.get("description", "") or evidence or title
 
-            if f.get("kind") == "semantic":
-                cat = f.get("category", "")
-                semantic_results.append({
-                    "semantic_vuln_id":  f"sv_{uid}",
-                    "title":             f"{cat} vulnerability in {fn_name}" if fn_name else f"{cat} vulnerability",
-                    "category":          cat,
-                    "display_label":     None,
-                    "exclude_from_eval": False,
-                    "severity":          _severity(conf),
-                    "affected_functions": fn_list,
-                    "evidence":          " | ".join(f.get("evidence_snippets", [])[:2]),
-                    "attack_path":       [],
-                    "patch_suggestions": _extract_patch(f),
-                    "confidence_score":  conf,
-                    "intra_score":       r2_score,
-                    "cross_score":       att_rate,
-                    "attacker_score":    att_rate,
-                    "supporting_domains": list({
-                        ag.split("_")[0] for ag in f.get("submitters", [])
-                    }),
-                    "is_attacker_surfaced": att_rate > 0,
-                    "source_finding_ids": [f.get("pair_id", uid)],
-                    "poc_verified":       False,
-                    "poc_results":        [],
-                    "v2_pair_id":         f.get("pair_id"),
-                    "v2_round2_score":    r2_score,
-                    "v2_attacker_rate":   att_rate,
-                    "v2_attacker_factor": att_factor,
-                })
-            else:
-                swc_id = f.get("swc_id", "")
-                recs   = _extract_patch(f)
-                consensus_vulns.append({
-                    "vuln_id":            f"vuln_{uid}",
-                    "title":              f"{swc_id} in {fn_name}" if fn_name else swc_id,
-                    "description":        " | ".join(f.get("evidence_snippets", [])[:2]),
-                    "affected_assets":    fn_list,
-                    "affected_functions": fn_list,
-                    "severity":           _severity(conf),
-                    "intra_group_score":  r2_score,
-                    "cross_group_score":  att_rate,
-                    "attacker_score":     att_rate,
-                    "confidence_score":   conf,
-                    "supporting_groups":  list({
-                        ag.split("_")[0] for ag in f.get("submitters", [])
-                    }),
-                    "supporting_attackers":  [],
-                    "dismissing_attackers":  [],
-                    "recommendations":    recs,
-                    "swc_ids":            [swc_id] if swc_id else [],
-                    "source_finding_ids": [f.get("pair_id", uid)],
-                    "attacker_finding_ids": [],
-                    "is_attacker_only":   False,
-                    "needs_review":       conf < 0.5,
-                    "poc_verified":       False,
-                    "poc_results":        [],
-                    "v2_pair_id":         f.get("pair_id"),
-                    "v2_round2_score":    r2_score,
-                    "v2_attacker_rate":   att_rate,
-                    "v2_attacker_factor": att_factor,
-                })
+            findings.append({
+                "finding_id":       f"finding_{uid}",
+                "title":            title,
+                "description":      description,
+                "attack_path":      _extract_attack_path(f),
+                "contract_name":    contract_name,
+                "function_name":    fn_name,
+                "severity":         _severity(conf),
+                "confidence_score": conf,
+                "evidence":         evidence,
+                "patch":            _extract_patch(f),
+                "supporting_domains": list({
+                    ag.split("_")[0] for ag in f.get("submitters", [])
+                }),
+                "needs_review":     conf < 0.5,
+                "poc_verified":     False,
+                "source_finding_ids": [f.get("pair_id", uid)],
+                "v2_pair_id":       f.get("pair_id"),
+                "v2_round2_score":  r2_score,
+                "v2_attacker_rate": att_rate,
+                "v2_attacker_factor": att_factor,
+            })
 
         for f in discarded:
-            if f.get("kind") == "semantic":
-                continue
-            fn_name = f.get("function_name", "") or ""
-            swc_id  = f.get("swc_id", "")
-            unvalidated_swc_gaps.append({
-                "swc_id":            swc_id,
-                "swc_category":      swc_id,
+            fn_name       = f.get("function_name", "") or ""
+            contract_name = f.get("contract_name", "") or ""
+            title         = f.get("title", "") or f"Unconfirmed: {fn_name}"
+            unvalidated_gaps.append({
+                "title":             title,
+                "contract_name":     contract_name,
+                "function_name":     fn_name,
                 "affected_functions": [fn_name] if fn_name else [],
                 "description":       " | ".join(f.get("evidence_snippets", [])[:2]),
                 "source_count":      len(f.get("submitters", [])),
@@ -1221,7 +1191,10 @@ class ConsensusEngine:
             })
 
         return {
-            "consensus_vulns":      consensus_vulns,
-            "semantic_results":     semantic_results,
-            "unvalidated_swc_gaps": unvalidated_swc_gaps,
+            "findings":           findings,
+            "unvalidated_gaps":   unvalidated_gaps,
+            # Legacy keys kept for backwards compat with any downstream consumers
+            "consensus_vulns":    findings,
+            "semantic_results":   [],
+            "unvalidated_swc_gaps": unvalidated_gaps,
         }

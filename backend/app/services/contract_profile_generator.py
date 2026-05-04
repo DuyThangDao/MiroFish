@@ -572,13 +572,6 @@ CONTRACT_ATTACKER_PROFILES: Dict[str, Dict[str, Any]] = {
             "→ DoS via griefing (e.g., front-run to reset a time-dependent calculation).\n"
             "6. UNEXPECTED ETHER: Can force-sending ETH (via selfdestruct) break assumptions "
             "that rely on address(this).balance == tracked_balance?\n\n"
-            "When you find a business-logic vulnerability with NO matching SWC ID, use SEMANTIC_FINDING:\n"
-            "SEMANTIC_FINDING: <title>\n"
-            f"CATEGORY: <{SEMANTIC_CATEGORY_PIPE_STRING}>\n"
-            "SEVERITY: <critical|high|medium|low>\n"
-            "FUNCTION: <affected_function()>\n"
-            "EVIDENCE: <specific code pattern or economic invariant violated>\n"
-            "ATTACK_PATH: <step-by-step scenario>\n\n"
             "Evaluate the contract for these logic-level vulnerabilities."
         ),
     },

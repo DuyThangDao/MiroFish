@@ -186,6 +186,35 @@ class ContractKGBuilder:
     # ─── Context completeness helpers (Tầng 1 + Tầng 3) ─────────────────────────
 
     @staticmethod
+    @staticmethod
+    def _group_functions_by_contract(source_code: str) -> dict:
+        """
+        Parse all contract/library/interface blocks in a flattened Solidity source.
+        Returns {contract_name: [func_name, ...]} ordered by declaration.
+        Only keeps names that look like real Solidity identifiers (start with uppercase).
+        """
+        # Strip line comments to avoid false matches in comment text
+        stripped = re.sub(r'//[^\n]*', '', source_code)
+        stripped = re.sub(r'/\*.*?\*/', ' ', stripped, flags=re.DOTALL)
+
+        decl_re = re.compile(r'\b(?:contract|library|interface)\s+([A-Z]\w*)')
+        decls = [(m.group(1), m.start()) for m in decl_re.finditer(stripped)]
+        if not decls:
+            return {}
+
+        result: dict = {}
+        func_re = re.compile(r'\bfunction\s+([a-zA-Z_]\w*)\s*\(')
+
+        for i, (c_name, c_start) in enumerate(decls):
+            end = decls[i + 1][1] if i + 1 < len(decls) else len(stripped)
+            block = stripped[c_start:end]
+            funcs = list(dict.fromkeys(func_re.findall(block)))  # preserve order, dedupe
+            if funcs:
+                result[c_name] = funcs
+
+        return result
+
+    @staticmethod
     def _extract_function_snippets(
         source_code: str, func_names: list, max_body_lines: int = 3, max_line_chars: int = 90
     ) -> dict:
@@ -436,47 +465,13 @@ class ContractKGBuilder:
         lines.append(f"Type: {entity.contract_type} | Compiler: {entity.compiler_version}")
         lines.append("")
 
-        # Functions summary
-        public_funcs = [f for f in entity.functions if f.visibility in ("public", "external")]
-        if public_funcs:
-            lines.append("PUBLIC/EXTERNAL FUNCTIONS:")
-            for f in public_funcs:
-                mods = f", mods=[{', '.join(f.modifiers)}]" if f.modifiers else ""
-                eth_flag = " [SENDS ETH]" if f.sends_ether else ""
-                lines.append(f"  - {f.name}(){mods}{eth_flag}")
-                if f.swc_candidates:
-                    lines.append(f"    Static SWC candidates: {', '.join(f.swc_candidates)}")
+        # Inject full flattened source — no truncation, no snippets.
+        # DeFi contracts are small (typically 10-50k tokens); modern models support 128k-1M+ tokens.
+        # Agents must see complete function bodies to detect CEI violations, tail-of-function bugs, etc.
+        if entity.source_code:
+            lines.append("=== CONTRACT SOURCE ===")
+            lines.append(entity.source_code)
             lines.append("")
-            # Tầng 1: inject function body snippets for public/external functions
-            if entity.source_code:
-                snippets = ContractKGBuilder._extract_function_snippets(
-                    entity.source_code, [f.name for f in public_funcs[:20]]
-                )
-                if snippets:
-                    lines.append("FUNCTION IMPLEMENTATIONS:")
-                    for fname, snippet in snippets.items():
-                        lines.append(f"  {fname}(): {snippet}")
-                    lines.append("")
-        elif entity.source_code:
-            # RC-1 (2nd layer): static regex fallback when LLM extraction missed functions.
-            # Gives agents a ground-truth function list so they don't hallucinate.
-            static_funcs = sorted(set(re.findall(
-                r'\bfunction\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(',
-                entity.source_code
-            )))
-            if static_funcs:
-                # Tầng 1: show snippets instead of bare names for richer context
-                snippets = ContractKGBuilder._extract_function_snippets(
-                    entity.source_code, static_funcs[:20]
-                )
-                if snippets:
-                    lines.append("FUNCTION IMPLEMENTATIONS:")
-                    for fname, snippet in snippets.items():
-                        lines.append(f"  {fname}(): {snippet}")
-                else:
-                    lines.append("DEFINED FUNCTIONS:")
-                    lines.append(f"  {', '.join(static_funcs)}")
-                lines.append("")
 
         # Critical state variables
         critical_vars = [v for v in entity.state_vars if v.is_critical]
@@ -510,8 +505,6 @@ class ContractKGBuilder:
             lines.append("  ⚠ FLASH LOAN interface — cross-contract reentrancy risk")
         if risk["upgrade_risk"]:
             lines.append("  ⚠ UPGRADEABLE proxy — verify upgrade admin is multi-sig + timelock")
-        if risk["swc_candidates"]:
-            lines.append(f"  Static SWC candidates: {', '.join(risk['swc_candidates'])}")
 
         if not any([
             risk["reentrancy_risk_functions"],
@@ -521,7 +514,6 @@ class ContractKGBuilder:
             risk["oracle_manipulation_risk"],
             risk["flash_loan_risk"],
             risk["upgrade_risk"],
-            risk["swc_candidates"],
         ]):
             lines.append("  No static risk signals detected — deep semantic analysis required")
 

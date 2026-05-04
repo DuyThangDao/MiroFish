@@ -242,31 +242,29 @@ class ContractAuditReportAgent:
                 borderline=v2_borderline or [],
                 discarded=v2_discarded or [],
             )
-            consensus_vulns_raw  = v2_out["consensus_vulns"]
-            semantic_results     = v2_out["semantic_results"]
-            unvalidated_swc_gaps = v2_out["unvalidated_swc_gaps"]
+            findings_raw         = v2_out["findings"]
+            unvalidated_gaps     = v2_out["unvalidated_gaps"]
 
             logger.info(
-                f"Consensus (v2): {len(consensus_vulns_raw)} SWC findings, "
-                f"{len(semantic_results)} semantic findings, "
-                f"{len(unvalidated_swc_gaps)} gap findings"
+                f"Consensus (v2): {len(findings_raw)} findings, "
+                f"{len(unvalidated_gaps)} gap findings"
             )
 
             tool_context = _ContractToolContext(
-                consensus_vulns=[],          # v2 uses raw dicts, not dataclasses
+                consensus_vulns=findings_raw,
                 expert_findings=expert_findings,
                 attacker_findings=attacker_findings,
-                unvalidated_swc_gaps=unvalidated_swc_gaps,
-                semantic_results=semantic_results,
+                unvalidated_swc_gaps=unvalidated_gaps,
+                semantic_results=[],
             )
             report_text = self._run_react_loop(
                 contract_summary=contract_summary,
                 tool_context=tool_context,
             )
 
-            n_high   = sum(1 for v in consensus_vulns_raw if v.get("severity") == "high")
-            n_medium = sum(1 for v in consensus_vulns_raw if v.get("severity") == "medium")
-            n_crit   = sum(1 for v in consensus_vulns_raw if v.get("severity") == "critical")
+            n_high   = sum(1 for v in findings_raw if v.get("severity") == "high")
+            n_medium = sum(1 for v in findings_raw if v.get("severity") == "medium")
+            n_crit   = sum(1 for v in findings_raw if v.get("severity") == "critical")
 
             return {
                 "session_id":           session_id,
@@ -274,20 +272,19 @@ class ContractAuditReportAgent:
                 "generated_at":         datetime.now().isoformat(),
                 "pipeline_version":     "v2",
                 "report":               report_text,
-                "consensus_vulns":      consensus_vulns_raw,
-                "semantic_results":     semantic_results,
-                "unvalidated_swc_gaps": unvalidated_swc_gaps,
+                "findings":             findings_raw,
+                "unvalidated_gaps":     unvalidated_gaps,
+                # Legacy keys for backwards compat
+                "consensus_vulns":      findings_raw,
+                "semantic_results":     [],
+                "unvalidated_swc_gaps": unvalidated_gaps,
                 "coverage_gaps":        [],
                 "invariant_coverage":   invariant_coverage,
                 "stats": {
                     "total_expert_findings":   len(v2_confirmed),
                     "total_attacker_findings": len(attacker_findings),
-                    "total_semantic_findings": sum(
-                        1 for f in v2_confirmed if f.get("kind") == "semantic"
-                    ),
-                    "consensus_vulns":         len(consensus_vulns_raw),
-                    "semantic_consensus":      len(semantic_results),
-                    "unvalidated_swc_gaps":    len(unvalidated_swc_gaps),
+                    "findings":                len(findings_raw),
+                    "unvalidated_gaps":        len(unvalidated_gaps),
                     "invariants_extracted":    len(invariants or []),
                     "invariants_violated":     sum(
                         1 for ic in invariant_coverage if ic["status"] == "VIOLATED"
@@ -296,7 +293,7 @@ class ContractAuditReportAgent:
                     "high":      n_high,
                     "medium":    n_medium,
                     "exploitable_count": sum(
-                        1 for v in consensus_vulns_raw if v.get("poc_verified")
+                        1 for v in findings_raw if v.get("poc_verified")
                     ),
                 },
             }

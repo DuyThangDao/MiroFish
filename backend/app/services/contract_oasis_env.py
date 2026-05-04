@@ -784,16 +784,16 @@ def parse_contract_finding_from_text(
 
     Expected format:
       FINDING: <title>
-      SWC: <SWC-107 or DEFI-FLASH_LOAN_PRICE_MANIPULATION>
-      SEVERITY: <critical|high|medium|low>
+      CONTRACT: <contract name>
       FUNCTION: <function_name()>
+      SEVERITY: <critical|high|medium|low>
       EVIDENCE: <specific code pattern or KG fact>
+      ATTACK_PATH: <step-by-step exploit scenario>
       DESCRIPTION: <detailed explanation>
       PATCH: <remediation recommendation>
 
     Returns raw dict or None if no finding detected.
     """
-    # Support both "FINDING:" (new format) and "[FINDING]" (legacy compatibility)
     has_finding = (
         re.search(r'(?i)^FINDING\s*:', text, re.MULTILINE)
         or "[FINDING]" in text
@@ -803,23 +803,24 @@ def parse_contract_finding_from_text(
 
     lines = text.split("\n")
     title = ""
-    swc_id = ""
-    swc_name = ""
+    contract_name = ""
     severity = "medium"
     affected_functions = []
     evidence = []
     description = ""
+    attack_path = ""
     patch_suggestion = None
     phase = get_phase_for_round(round_num)
 
-    # Track multi-line field accumulation
     current_field = None
     current_value = []
 
     def _flush_field():
-        nonlocal description, patch_suggestion
+        nonlocal description, attack_path, patch_suggestion
         if current_field == "description" and current_value:
             description = " ".join(current_value)
+        elif current_field == "attack_path" and current_value:
+            attack_path = " ".join(current_value)
         elif current_field == "patch" and current_value:
             patch_suggestion = " ".join(current_value)
 
@@ -827,36 +828,28 @@ def parse_contract_finding_from_text(
         stripped = line.strip()
         lower = stripped.lower()
 
-        # New field detected → flush previous
-        if re.match(r'(?i)^(FINDING|SWC|SEVERITY|FUNCTION|EVIDENCE|DESCRIPTION|PATCH)\s*:', stripped):
+        if re.match(r'(?i)^(FINDING|CONTRACT|SEVERITY|FUNCTION|EVIDENCE|ATTACK_PATH|DESCRIPTION|PATCH)\s*:', stripped):
             _flush_field()
             current_field = None
             current_value = []
 
         if re.match(r'(?i)^FINDING\s*:', stripped) or stripped.startswith("[FINDING]"):
             title = re.sub(r'(?i)^FINDING\s*:', '', stripped).replace("[FINDING]", "").strip()
-        elif lower.startswith("swc:"):
-            raw = stripped.split(":", 1)[1].strip()
-            # Extract first SWC-XXX or known tag
-            m = re.search(r'(SWC-\d+|[A-Z][A-Z_]{4,})', raw)
-            swc_id = m.group(1) if m else raw.split()[0] if raw else ""
-            # RC-5: remap known aliases to canonical IDs
-            swc_id = _SWC_REMAP.get(swc_id, swc_id)
-            # Try to get SWC name from the rest
-            if m and raw != m.group(1):
-                after = raw[m.end():].strip(" -—:")
-                swc_name = after.split(".")[0].strip() if after else ""
+        elif lower.startswith("contract:"):
+            contract_name = stripped.split(":", 1)[1].strip()
         elif lower.startswith("severity:"):
             sev_raw = stripped.split(":", 1)[1].strip().lower()
             if sev_raw in {"critical", "high", "medium", "low", "info"}:
                 severity = sev_raw
         elif lower.startswith("function:"):
             func_raw = stripped.split(":", 1)[1].strip()
-            # RC-1: extract only valid Solidity identifiers (not prose words)
             affected_functions = _parse_function_field(func_raw)
         elif lower.startswith("evidence:"):
             evidence_raw = stripped.split(":", 1)[1].strip()
             evidence = [evidence_raw] if evidence_raw else []
+        elif lower.startswith("attack_path:"):
+            current_field = "attack_path"
+            current_value = [stripped.split(":", 1)[1].strip()]
         elif lower.startswith("description:"):
             current_field = "description"
             current_value = [stripped.split(":", 1)[1].strip()]
@@ -871,14 +864,6 @@ def parse_contract_finding_from_text(
     if not title:
         return None
 
-    # RC-5 — SWC validation: reject findings with unmappable non-standard SWC tags
-    if swc_id and not _VALID_SWC_RE.match(swc_id):
-        logger.debug(
-            f"RC-5: invalid SWC tag '{swc_id}' → dropped '{title[:60]}' "
-            f"from {agent_profile.agent_id}"
-        )
-        return None
-
     # RC-1 (2nd layer) — if contract function list is known, keep only existing functions
     if known_functions and affected_functions:
         validated_funcs = [
@@ -887,12 +872,10 @@ def parse_contract_finding_from_text(
         ]
         if validated_funcs:
             affected_functions = validated_funcs
-        # If none match the known list, discard all (don't fall back to garbage)
-        # but only if known_functions is substantial (>= 3 entries)
         elif len(known_functions) >= 3:
             affected_functions = []
 
-    # Layer 2 — Evidence gate: drop findings with no concrete code reference
+    # Evidence gate: drop findings with no concrete code reference
     if not _has_specific_evidence(evidence, affected_functions):
         logger.debug(
             f"Evidence gate: dropped '{title[:60]}' from {agent_profile.agent_id} "
@@ -905,12 +888,12 @@ def parse_contract_finding_from_text(
         "author_domain":       agent_profile.domain_group,
         "author_persona":      agent_profile.persona,
         "title":               title,
-        "swc_id":              swc_id,
-        "swc_name":            swc_name,
+        "contract_name":       contract_name,
         "severity":            severity,
         "affected_functions":  affected_functions,
         "evidence":            evidence,
         "description":         description or title,
+        "attack_path":         attack_path,
         "patch_suggestion":    patch_suggestion,
         "phase":               phase,
         "round_number":        round_num,
@@ -946,7 +929,7 @@ def _initial_confidence(severity: str, phase: str) -> float:
     return min(base, 0.85)
 
 
-# ─── Semantic Finding Parser (Web3Bugs S-category) ───────────────────────────
+# ─── Semantic Finding Parser (DEPRECATED — S-track removed in NL migration) ──
 
 SEMANTIC_FINDING_FORMAT = f"""\
 SEMANTIC_FINDING: <title>
@@ -1094,26 +1077,19 @@ def parse_all_contract_findings_from_text(
     agent_profile: "ContractAgentProfile",
     round_num: int,
     known_functions: Optional[set] = None,
-) -> Dict[str, List[Dict[str, Any]]]:
+) -> List[Dict[str, Any]]:
     """
-    Parse ALL FINDING and SEMANTIC_FINDING blocks from a single agent response.
+    Parse ALL FINDING blocks from a single agent response.
 
     Unlike parse_contract_finding_from_text() which stops at the first block,
-    this function extracts every block in the response.
+    this function extracts every FINDING block in the response.
 
-    Returns:
-        {
-            "swc_findings":      [dict, ...],   # from FINDING: blocks
-            "semantic_findings": [dict, ...],   # from SEMANTIC_FINDING: blocks
-        }
+    Returns list of finding dicts (unified NL format with contract_name, attack_path).
     """
-    swc_findings: List[Dict[str, Any]] = []
-    semantic_findings: List[Dict[str, Any]] = []
+    findings: List[Dict[str, Any]] = []
 
-    # Split text into segments at each top-level FINDING/SEMANTIC_FINDING marker.
-    # We use a zero-width split so the marker stays at the start of each segment.
     segment_pattern = re.compile(
-        r'(?=(?:^|\n)(?:FINDING|SEMANTIC_FINDING)\s*:)',
+        r'(?=(?:^|\n)FINDING\s*:)',
         re.IGNORECASE,
     )
     segments = segment_pattern.split(text)
@@ -1122,17 +1098,12 @@ def parse_all_contract_findings_from_text(
         seg = seg.strip()
         if not seg:
             continue
-
-        if re.match(r'(?i)^SEMANTIC_FINDING\s*:', seg):
-            result = parse_semantic_finding_from_text(seg, agent_profile, round_num, known_functions)
-            if result:
-                semantic_findings.append(result)
-        elif re.match(r'(?i)^FINDING\s*:', seg):
+        if re.match(r'(?i)^FINDING\s*:', seg):
             result = parse_contract_finding_from_text(seg, agent_profile, round_num, known_functions)
             if result:
-                swc_findings.append(result)
+                findings.append(result)
 
-    return {"swc_findings": swc_findings, "semantic_findings": semantic_findings}
+    return findings
 
 
 # ─── OASIS Config Builder ─────────────────────────────────────────────────────
@@ -1205,8 +1176,9 @@ class ContractAuditEnvBuilder:
             ]
 
         lines += [
-            f"  ≥60% findings PHẢI về {primary} hoặc direct dependencies của nó.",
-            f"  Infrastructure/utility bugs chỉ report khi exploitable từ {primary}.",
+            f"  Analyze ALL in-scope contracts thoroughly — PRIMARY and SECONDARY contracts",
+            f"  are equally important. Report findings in any in-scope contract.",
+            f"  Infrastructure/utility bugs chỉ bỏ qua nếu KHÔNG thể exploit từ bất kỳ in-scope contract nào.",
         ]
 
         return "\n".join(lines) + "\n"
@@ -1369,17 +1341,9 @@ def build_round1_prompt(
 
     Rules:
     - No prior findings injected (blind discovery)
-    - Agent must enumerate ALL functions touched by each SWC it finds
-    - Only FINDING / SEMANTIC_FINDING format allowed — no CLAIM/VALIDATE/CHALLENGE/CONFIRM/DISMISS
+    - Unified FINDING format — no SWC: or CATEGORY: fields
+    - Only FINDING format allowed — no CLAIM/VALIDATE/CHALLENGE/CONFIRM/DISMISS
     """
-    swc_focus_block = ""
-    if agent_profile.swc_focus:
-        swc_focus_block = (
-            "\nYour domain is particularly sensitive to these SWC IDs: "
-            + ", ".join(agent_profile.swc_focus)
-            + ". Prioritize these patterns but do not limit your search.\n"
-        )
-
     dep_block = f"\n=== STATIC DATA-FLOW SUMMARY ===\n{dep_graph_text}\n" if dep_graph_text else ""
     intent_block = f"\n=== CONTRACT INTENT ===\n{intent_summary}\n" if intent_summary else ""
     focus_block = f"\n{focus_directive}\n" if focus_directive else ""
@@ -1388,10 +1352,9 @@ def build_round1_prompt(
 === ROUND 1 — INDEPENDENT DISCOVERY ===
 You are {agent_profile.agent_id} ({agent_profile.domain_group}/{agent_profile.persona}).
 {agent_profile.system_prompt}
-{swc_focus_block}
-⚠ ROUND 1 FORMAT OVERRIDE — Use ONLY FINDING / SEMANTIC_FINDING blocks.
+
+⚠ ROUND 1 FORMAT OVERRIDE — Use ONLY FINDING blocks.
   Do NOT write CLAIM, VALIDATE, CHALLENGE, CONFIRM, or DISMISS in this round.
-  Any such blocks will be discarded. Output format is strictly FINDING or SEMANTIC_FINDING.
 
 {focus_block}{intent_block}{dep_block}
 === CONTRACT UNDER REVIEW ===
@@ -1400,37 +1363,28 @@ You are {agent_profile.agent_id} ({agent_profile.domain_group}/{agent_profile.pe
 === INSTRUCTIONS ===
 Perform an independent security analysis. No other expert's findings are shared at this stage.
 
-MANDATORY COVERAGE — before writing any FINDING, explicitly check each of these:
-  1. Reentrancy (SWC-107): external calls before state updates, callbacks, hooks
-  2. Integer issues (SWC-101): explicit casts uint128(x), int24(y), unchecked{{}} blocks
-     ⚠ Solidity 0.8 only protects arithmetic operators (+,-,*) — NOT explicit casts
-  3. Access control (SWC-105): unprotected state-modifying functions, missing onlyOwner
-  4. DoS / unbounded loops (SWC-113/128): loops over user-controlled arrays
-  5. Oracle / price manipulation (DEFI-FLASH_LOAN, DEFI-ORACLE_MANIP)
-  6. Business-logic invariants: accounting errors, wrong ordering, economic edge cases
+The contract source above includes ALL functions — public, external, internal, and private.
+Analyze every function. Do not limit your analysis to only public/external functions.
 
 COVERAGE RULE — if a vulnerability pattern appears in MULTIPLE functions, write one FINDING per function.
 Do NOT collapse "function A and B" into a single FINDING. A missed function = a missed bug.
 
-OUTPUT FORMAT — use ONLY these two formats. No CLAIM, VALIDATE, CHALLENGE, CONFIRM, or DISMISS.
+OUTPUT FORMAT — use ONLY the FINDING format below. No CLAIM, VALIDATE, CHALLENGE, CONFIRM, or DISMISS.
 
-For SWC-tagged findings:
-  FINDING: <concise title>
-  SWC: <SWC-NNN or DEFI-PATTERN>
-  SEVERITY: <critical|high|medium|low>
+  FINDING: <concise title describing the vulnerability>
+  CONTRACT: <exact contract name where the vulnerable function is defined>
   FUNCTION: <exact function name from contract>
+  SEVERITY: <critical|high|medium|low>
   EVIDENCE: <code snippet or specific pattern>
+  ATTACK_PATH: <step-by-step exploit scenario>
   DESCRIPTION: <why this is exploitable>
   PATCH: <concrete fix>
 
-For business-logic / semantic bugs (no SWC applies):
-  SEMANTIC_FINDING: <concise title>
-  CATEGORY: <{SEMANTIC_CATEGORY_PIPE_STRING}>
-  SEVERITY: <critical|high|medium|low>
-  FUNCTION: <exact function name from contract>
-  EVIDENCE: <code snippet or economic invariant violated>
-  ATTACK_PATH: <step-by-step exploit scenario>
-  PATCH: <concrete fix>
+CONTRACT field is MANDATORY:
+  - Write the exact contract name where the vulnerable function is defined.
+  - Example: if burn() is in ConcentratedLiquidityPool.sol → CONTRACT: ConcentratedLiquidityPool
+  - Do NOT write the file path or .sol extension — contract name only.
+  - If the same vulnerability exists in multiple contracts, write a separate FINDING for each.
 
 ⚠ EVIDENCE GATE: every FINDING must include at least one of:
   - A real function name that exists in the contract source
@@ -1450,9 +1404,8 @@ def build_round2_prompt(
 
     candidate_pairs: list of dicts, each has:
       - pair_id: str
-      - kind:    "swc" | "semantic"
-      - swc_id:  str (for swc kind)
-      - category: str (for semantic kind)
+      - contract_name: str
+      - title: str
       - function_name: str
       - evidence_snippets: list[str]  (aggregated from Round 1 — shown for initial vote)
 
@@ -1468,15 +1421,14 @@ def build_round2_prompt(
 
     pair_lines: List[str] = []
     for idx, p in enumerate(candidate_pairs, start=1):
-        if p.get("kind") == "semantic":
-            label = f"SEMANTIC [{p.get('category', '?')}]"
-        else:
-            label = f"SWC [{p.get('swc_id', '?')}]"
+        contract = p.get("contract_name", "?")
+        title_excerpt = p.get("title", "")[:60]
         fn = p.get("function_name", "?")
+        label = f"FINDING [{contract}.{fn}] {title_excerpt}"
         snippets = p.get("evidence_snippets", [])
         snip_text = " | ".join(snippets[:2]) if snippets else "(no evidence provided)"
         pair_lines.append(
-            f"  [{idx}] pair_id={p['pair_id']}  {label}  function={fn}\n"
+            f"  [{idx}] pair_id={p['pair_id']}  {label}\n"
             f"       evidence: {snip_text[:200]}"
         )
 
@@ -1508,7 +1460,7 @@ Vote format (one block per pair, in any order):
 Rules:
   - You MUST cast exactly one vote per pair listed above.
   - EVIDENCE must reference actual code in THIS contract. "I agree" is not evidence.
-  - Do NOT write FINDING/SEMANTIC_FINDING in this round — only VOTE blocks.
+  - Do NOT write FINDING in this round — only VOTE blocks.
   - Do NOT change your vote based on other agents' reasoning (votes are blind).
 
 Write all vote blocks now.
@@ -1524,8 +1476,8 @@ def build_round2_update_prompt(
 
     revealed_evidence: list of dicts, each has:
       - pair_id: str
-      - kind: "swc" | "semantic"
-      - swc_id / category: str
+      - contract_name: str
+      - title: str
       - function_name: str
       - all_evidence: list[str]  (aggregated from ALL voters, anonymized)
       - agent_vote: "ACCEPT" | "REJECT"  (this agent's initial vote)
@@ -1537,11 +1489,10 @@ def build_round2_update_prompt(
 
     reveal_lines: List[str] = []
     for p in revealed_evidence:
-        if p.get("kind") == "semantic":
-            label = f"SEMANTIC [{p.get('category', '?')}]"
-        else:
-            label = f"SWC [{p.get('swc_id', '?')}]"
+        contract = p.get("contract_name", "?")
+        title_excerpt = p.get("title", "")[:60]
         fn = p.get("function_name", "?")
+        label = f"FINDING [{contract}.{fn}] {title_excerpt}"
         your_vote = p.get("agent_vote", "?")
         all_ev = p.get("all_evidence", [])
         ev_text = "\n       ".join(f"• {e[:180]}" for e in all_ev[:4])
@@ -1593,8 +1544,8 @@ def build_round3_prompt(
 
     finding: dict with keys:
       - pair_id: str
-      - kind: "swc" | "semantic"
-      - swc_id / category: str
+      - contract_name: str
+      - title: str
       - function_name: str
       - round2_score: float
 
@@ -1602,10 +1553,9 @@ def build_round3_prompt(
 
     No other attacker's scenario is injected. No Round 2 evidence shown.
     """
-    if finding.get("kind") == "semantic":
-        vuln_label = f"SEMANTIC CATEGORY: {finding.get('category', '?')}"
-    else:
-        vuln_label = f"SWC ID: {finding.get('swc_id', '?')}"
+    contract = finding.get("contract_name", "?")
+    title_excerpt = finding.get("title", "")[:80]
+    vuln_label = f"FINDING [{contract}] {title_excerpt}"
 
     fn = finding.get("function_name", "?")
     pair_id = finding.get("pair_id", "?")
@@ -1634,6 +1584,8 @@ VERDICT OPTIONS:
   PLAUSIBLE     — the vulnerability exists but full exploit requires assumptions you cannot verify
   INVALID       — the vulnerability is NOT present or is protected by mitigations in the code
   NOT_APPLICABLE — this finding type is outside your attacker domain (use sparingly)
+
+Be concise. Each ATTACK_STEPS item must be 1 sentence.
 
 Response format:
 

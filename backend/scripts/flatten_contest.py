@@ -36,7 +36,7 @@ from typing import Dict, List, Optional, Set, Tuple
 # Directories to skip — tests, mocks, deployment scripts
 _SKIP_DIRS = {
     "test", "tests", "mock", "mocks", "mocking",
-    "migrations", "migration", "scripts", "deploy",
+    "migrations", "migration", "scripts", "deploy", "deployer",
     "node_modules", "__pycache__", ".git",
 }
 
@@ -323,6 +323,32 @@ def _compress_to_stub(src: str) -> str:
     return '\n'.join(result)
 
 
+def _build_reverse_graph(graph: Dict[str, List[str]]) -> Dict[str, List[str]]:
+    """Build reverse import graph: for each file, list files that import it."""
+    reverse: Dict[str, List[str]] = {k: [] for k in graph}
+    for node, deps in graph.items():
+        for dep in deps:
+            if dep in reverse:
+                reverse[dep].append(node)
+    return reverse
+
+
+def _is_infra_file(key: str) -> bool:
+    """
+    True if a file is likely infrastructure/boilerplate rather than auditable business logic.
+    Only uses directory-level and well-established suffix patterns — no contest-specific keywords.
+    """
+    infra_dirs = {"test", "tests", "mock", "mocks", "deploy", "migration",
+                  "migrations", "scripts", "examples", "flat", "deployer"}
+    for part in Path(key).parts:
+        if part.lower() in infra_dirs:
+            return True
+    stem = Path(key).stem.lower()
+    infra_suffixes = ("mock", "test", "helper", "flat", "factory", "router",
+                      "proxy", "base", "abstract", "deployer")
+    return any(stem.endswith(s) for s in infra_suffixes)
+
+
 def _classify_files(
     order: List[str],
     graph: Dict[str, List[str]],
@@ -331,7 +357,7 @@ def _classify_files(
 ) -> Dict[str, object]:
     """
     Classify files as in-scope or out-of-scope using 3-tier fallback:
-      Tier 1 — Import graph reachability from manifest.primary_key
+      Tier 1 — Forward import graph (BFS from primary contract)
       Tier 2 — README scope hints (folder/keyword matching)
       Tier 3 — Conservative: all files in-scope
 
@@ -342,10 +368,10 @@ def _classify_files(
     """
     base = Path(contest_dir)
 
-    # Tier 1: import graph from primary
+    # Tier 1: forward import graph — files transitively imported by primary
     primary_key = manifest.get("primary_key")
     if primary_key and primary_key in graph:
-        reachable = _get_reachable_set(primary_key, graph)
+        reachable: Set[str] = _get_reachable_set(primary_key, graph)
         out_scope = [k for k in order if k not in reachable]
         if out_scope:
             return {
@@ -439,13 +465,14 @@ def _compute_manifest(
     secondary_keys = sorted_keys[1:4]
 
     return {
-        "primary":         contract_names.get(primary_key),
-        "primary_file":    str(Path(primary_key).relative_to(base)),
-        "primary_key":     primary_key,           # absolute path — used by _classify_files
-        "secondary":       [contract_names.get(k) for k in secondary_keys],
-        "secondary_keys":  secondary_keys,
-        "total_contracts": len(scores),
-        "total_chars":     sum(len(sources.get(k, "")) for k in order),
+        "primary":            contract_names.get(primary_key),
+        "primary_file":       str(Path(primary_key).relative_to(base)),
+        "primary_key":        primary_key,           # absolute path — used by _classify_files
+        "secondary":          [contract_names.get(k) for k in secondary_keys],
+        "secondary_keys":     secondary_keys,
+        "contract_names_map": contract_names,        # key → contract_name, used by _classify_files
+        "total_contracts":    len(scores),
+        "total_chars":        sum(len(sources.get(k, "")) for k in order),
     }
 
 
@@ -479,20 +506,53 @@ def flatten_contest_dir(
     # Read all sources
     sources: Dict[str, str] = {k: _read_safe(p) for k, p in key_to_path.items()}
 
-    # If total chars > max_chars, drop interface-only files
+    # Step 1: Compute manifest and classify scope BEFORE any size trimming.
+    # This ensures in-scope files (Manager, Position) are identified first and
+    # protected from being dropped by the size budget.
+    manifest = _compute_manifest(order, sources, graph, contest_dir)
+    classification = _classify_files(order, graph, manifest, contest_dir)
+    in_scope_set  = set(classification["in_scope"])
+    out_scope_set = set(classification["out_scope"])
+    cls_method    = classification["method"]
+
+    # Step 2: Size trimming — protect in-scope files, trim out-of-scope first.
     total = sum(len(s) for s in sources.values())
     if total > max_chars:
-        interface_keys = [k for k, s in sources.items() if _is_interface_only(s)]
-        if verbose:
+        # 2a: Drop interface-only OUT-OF-SCOPE files first (safest drops)
+        interface_oos = [k for k in out_scope_set if _is_interface_only(sources.get(k, ""))]
+        if verbose and interface_oos:
             print(f"  Total {total//1000}K > {max_chars//1000}K limit — "
-                  f"dropping {len(interface_keys)} interface-only files")
-        for k in interface_keys:
+                  f"dropping {len(interface_oos)} interface-only out-of-scope files")
+        for k in interface_oos:
             sources.pop(k, None)
             order = [x for x in order if x != k]
+            out_scope_set.discard(k)
 
-    # Second pass: still too large → trim largest files from back
     total = sum(len(sources.get(k, "")) for k in order)
     if total > max_chars:
+        # 2b: Drop remaining out-of-scope files from the back to fit budget
+        in_scope_total = sum(len(sources.get(k, "")) for k in order if k in in_scope_set)
+        remaining_budget = max_chars - in_scope_total
+        kept_oos, running = [], 0
+        for k in order:
+            if k not in out_scope_set:
+                continue
+            s = sources.get(k, "")
+            if running + len(s) <= remaining_budget:
+                kept_oos.append(k)
+                running += len(s)
+        dropped_oos = out_scope_set - set(kept_oos)
+        if verbose and dropped_oos:
+            print(f"  Still too large — dropping {len(dropped_oos)} out-of-scope files "
+                  f"to fit {max_chars//1000}K limit")
+        for k in dropped_oos:
+            sources.pop(k, None)
+        order = [k for k in order if k in sources]
+        out_scope_set = set(kept_oos)
+
+    total = sum(len(sources.get(k, "")) for k in order)
+    if total > max_chars:
+        # 2c: Last resort — trim in-scope files from back (should rarely happen)
         trimmed_order = []
         running = 0
         for k in order:
@@ -502,17 +562,13 @@ def flatten_contest_dir(
                 running += len(s)
         if verbose:
             dropped = len(order) - len(trimmed_order)
-            print(f"  Still too large — dropping {dropped} more files to fit {max_chars//1000}K limit")
+            print(f"  Still too large — dropping {dropped} in-scope files (last resort)")
+        dropped_keys = set(order) - set(trimmed_order)
+        for k in dropped_keys:
+            sources.pop(k, None)
+            in_scope_set.discard(k)
+            out_scope_set.discard(k)
         order = trimmed_order
-
-    # Always compute manifest (needed for scope classification)
-    manifest = _compute_manifest(order, sources, graph, contest_dir)
-
-    # Classify files: in-scope (full) vs out-of-scope (stubs)
-    classification = _classify_files(order, graph, manifest, contest_dir)
-    in_scope_set  = set(classification["in_scope"])
-    out_scope_set = set(classification["out_scope"])
-    cls_method    = classification["method"]
 
     # Collect out-of-scope contract names for manifest + prompt
     base = Path(contest_dir)
@@ -525,6 +581,16 @@ def flatten_contest_dir(
             out_scope_names.append(m.group(0).split()[-1])
     manifest["out_scope_contracts"] = out_scope_names
     manifest["scope_method"]        = cls_method
+
+    # Update secondary to reflect actual in-scope implementation contracts.
+    cnames_map = manifest.get("contract_names_map", {})
+    primary_key = manifest.get("primary_key")
+    in_scope_impls = [
+        cnames_map.get(k, Path(k).stem)
+        for k in classification["in_scope"]
+        if k != primary_key and not _is_interface_only(sources.get(k, ""))
+    ]
+    manifest["secondary"] = in_scope_impls[:6]
 
     if verbose and out_scope_set:
         print(f"  Scope ({cls_method}): {len(in_scope_set)} in-scope, "
