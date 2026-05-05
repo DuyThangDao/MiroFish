@@ -354,10 +354,14 @@ def _classify_files(
     graph: Dict[str, List[str]],
     manifest: dict,
     contest_dir: str,
+    extra_scope_contracts: Optional[Set[str]] = None,
 ) -> Dict[str, object]:
     """
     Classify files as in-scope or out-of-scope using 3-tier fallback:
-      Tier 1 — Forward import graph (BFS from primary contract)
+      Tier 1 — Forward import graph (BFS from primary) + optional Slither callers
+               extra_scope_contracts: contract names identified by Slither as
+               callers of primary (e.g. Manager, Position). These are added to
+               the reachable set even if not reachable via forward BFS.
       Tier 2 — README scope hints (folder/keyword matching)
       Tier 3 — Conservative: all files in-scope
 
@@ -372,12 +376,22 @@ def _classify_files(
     primary_key = manifest.get("primary_key")
     if primary_key and primary_key in graph:
         reachable: Set[str] = _get_reachable_set(primary_key, graph)
+
+        # Extend with Slither-identified callers (contracts that call primary at runtime)
+        if extra_scope_contracts:
+            cnames: Dict[str, str] = manifest.get("contract_names_map", {})
+            for key in order:
+                cname = cnames.get(key, Path(key).stem)
+                if cname in extra_scope_contracts:
+                    reachable.add(key)
+
         out_scope = [k for k in order if k not in reachable]
         if out_scope:
+            method = "import_graph_slither" if extra_scope_contracts else "import_graph"
             return {
                 "in_scope":  [k for k in order if k in reachable],
                 "out_scope": out_scope,
-                "method":    "import_graph",
+                "method":    method,
             }
 
     # Tier 2: README scope hints
@@ -481,14 +495,17 @@ def flatten_contest_dir(
     max_chars: int = 260_000,
     verbose: bool = False,
     emit_manifest: bool = False,
+    extra_scope_contracts: Optional[Set[str]] = None,
 ) -> "str | tuple[str, dict]":
     """
     Flatten all .sol files in contest_dir into a single source string.
 
     Args:
-        contest_dir: path to Web3Bugs contracts/<id>/ directory
-        max_chars:   soft limit; if exceeded, interface-only files are dropped
-        verbose:     print progress info
+        contest_dir:           path to Web3Bugs contracts/<id>/ directory
+        max_chars:             soft limit; if exceeded, interface-only files are dropped
+        verbose:               print progress info
+        extra_scope_contracts: contract names (e.g. from Slither caller analysis) to
+                               force into in-scope even if not reachable via import BFS.
 
     Returns:
         Flattened Solidity source as a single string.
@@ -510,7 +527,7 @@ def flatten_contest_dir(
     # This ensures in-scope files (Manager, Position) are identified first and
     # protected from being dropped by the size budget.
     manifest = _compute_manifest(order, sources, graph, contest_dir)
-    classification = _classify_files(order, graph, manifest, contest_dir)
+    classification = _classify_files(order, graph, manifest, contest_dir, extra_scope_contracts)
     in_scope_set  = set(classification["in_scope"])
     out_scope_set = set(classification["out_scope"])
     cls_method    = classification["method"]

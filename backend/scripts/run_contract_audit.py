@@ -781,6 +781,7 @@ def main():
             logger.error(f"Contest dir không tồn tại: {contest_dir}")
             sys.exit(1)
         logger.info(f"Flattening contest dir: {contest_dir}")
+        # Pass 1: flatten to discover primary contract name from manifest
         source_code, manifest = flatten_contest_dir(contest_dir, verbose=True, emit_manifest=True)
         contract_name = Path(contest_dir).name
         sol_path      = contest_dir  # pass dir as Slither target
@@ -788,6 +789,30 @@ def main():
             logger.error("Flatten produced empty source — check contest directory")
             sys.exit(1)
         logger.info(f"  Manifest: primary={manifest.get('primary')}, secondary={manifest.get('secondary')}")
+
+        # Slither caller analysis: find contracts that call primary at runtime
+        # (e.g. Manager, Position — not reachable via forward import BFS).
+        # Falls back silently when node_modules missing or Slither unavailable.
+        _primary_name = manifest.get("primary")
+        if _primary_name:
+            logger.info(f"\n[STEP 0/4] Slither caller analysis for {_primary_name}...")
+            from app.services.contract_dep_graph import ContractDepGraph as _CDG
+            _caller_contracts = _CDG().get_callers_of_primary(
+                source_path=contest_dir,
+                contract_name=_primary_name,
+            )
+            if _caller_contracts:
+                logger.info(f"  Callers: {sorted(_caller_contracts)} — re-flattening with Slither scope")
+                source_code, manifest = flatten_contest_dir(
+                    contest_dir,
+                    verbose=False,
+                    emit_manifest=True,
+                    extra_scope_contracts=_caller_contracts,
+                )
+                logger.info(f"  Reflatten scope: {manifest.get('scope_method')}, "
+                            f"secondary={manifest.get('secondary')}")
+            else:
+                logger.info("  No callers found or Slither unavailable — using forward BFS scope")
     elif args.sol:
         sol_path = os.path.abspath(args.sol)
         if not os.path.exists(sol_path):

@@ -30,7 +30,7 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from ..utils.logger import get_logger
 
@@ -78,6 +78,45 @@ class ContractDepGraph:
             return m.group(1) if m else None
         except Exception:
             return None
+
+    @staticmethod
+    def _setup_slither_env() -> None:
+        """
+        Ensure the current process's PATH includes:
+          - the venv bin dir (so slither/solc-select are found)
+          - the active nvm node bin dir (so npx/hardhat are found when Slither
+            spawns subprocesses for compilation)
+
+        Mutates os.environ in-place; safe to call multiple times.
+        """
+        import os as _os, sys as _sys
+        _venv_bin = _os.path.dirname(_sys.executable)
+        _venv     = _os.path.dirname(_venv_bin)
+
+        if not _os.environ.get("VIRTUAL_ENV", "").startswith(_venv):
+            _os.environ["VIRTUAL_ENV"] = _venv
+
+        additions = [_venv_bin]
+
+        # nvm node bin: check NVM_BIN env first, then scan ~/.nvm/versions/node/
+        _nvm_bin = _os.environ.get("NVM_BIN", "")
+        if _nvm_bin and Path(_nvm_bin).is_dir():
+            additions.append(_nvm_bin)
+        else:
+            _nvm_base = Path.home() / ".nvm" / "versions" / "node"
+            if _nvm_base.is_dir():
+                # Pick the newest installed version that has npx
+                for _ver_dir in sorted(_nvm_base.iterdir(), reverse=True):
+                    _npx = _ver_dir / "bin" / "npx"
+                    if _npx.exists():
+                        additions.append(str(_ver_dir / "bin"))
+                        break
+
+        current_path = _os.environ.get("PATH", "")
+        for entry in additions:
+            if entry and entry not in current_path:
+                _os.environ["PATH"] = entry + _os.pathsep + current_path
+                current_path = _os.environ["PATH"]
 
     @staticmethod
     def _set_solc_version(version: str) -> bool:
@@ -137,12 +176,15 @@ class ContractDepGraph:
         if not path.is_dir():
             return None, None
 
-        # Directory: check if it has a compilation framework config
-        has_foundry  = (path / "foundry.toml").exists() or any(path.rglob("foundry.toml"))
-        has_hardhat  = any(path.rglob("hardhat.config.*"))
+        # Directory: check if it has a compilation framework config.
+        # Use the ACTUAL project directory (where config lives), not just the root —
+        # contests often nest the project in a subdirectory (e.g. root/trident/).
+        _foundry_cfg = next(path.rglob("foundry.toml"), None)
+        _hardhat_cfg = next(path.rglob("hardhat.config.*"), None)
+        _project_dir = (_foundry_cfg or _hardhat_cfg)
+        _project_dir = _project_dir.parent if _project_dir else path
 
-        if has_foundry:
-            # Check forge in PATH and common install locations
+        if _foundry_cfg:
             _forge_candidates = [
                 "forge",
                 str(Path.home() / ".foundry" / "bin" / "forge"),
@@ -158,18 +200,21 @@ class ContractDepGraph:
                 except Exception:
                     continue
             if forge_ok:
-                return str(path), None  # Slither will use forge
+                return str(_project_dir), None  # Slither will use forge
             logger.debug("foundry.toml found but forge unavailable — trying flat file fallback")
 
-        if has_hardhat:
-            try:
-                npx_ok = subprocess.run(
-                    ["npx", "--version"], capture_output=True, timeout=5
-                ).returncode == 0
-            except Exception:
-                npx_ok = False
-            if npx_ok:
-                return str(path), None  # Slither will use hardhat
+        if _hardhat_cfg:
+            _npx_cmd = None
+            for _nc in ["npx"]:
+                try:
+                    if subprocess.run([_nc, "--version"], capture_output=True, timeout=5).returncode == 0:
+                        _npx_cmd = _nc
+                        logger.debug(f"Dep graph: npx found at {_nc}")
+                        break
+                except Exception:
+                    continue
+            if _npx_cmd:
+                return str(_project_dir), None  # Slither will use hardhat
             logger.debug("hardhat config found but npx unavailable — trying flat file fallback")
 
         # Fallback: pre-flattened .sol file
@@ -204,18 +249,7 @@ class ContractDepGraph:
             top_n: number of top functions/vars to include in the summary text.
         """
         try:
-            import os as _os, sys as _sys
-            _venv_bin = _os.path.dirname(_sys.executable)
-            _venv = _os.path.dirname(_venv_bin)
-            # Fix 1: solc_select uses VIRTUAL_ENV to locate its artifacts dir;
-            # a stale/system VIRTUAL_ENV causes PermissionError on module import.
-            if not _os.environ.get("VIRTUAL_ENV", "").startswith(_venv):
-                _os.environ["VIRTUAL_ENV"] = _venv
-            # Fix 2: Slither spawns `solc` as a subprocess; if the venv bin dir
-            # is not in PATH the binary is invisible even though it's installed.
-            _path = _os.environ.get("PATH", "")
-            if _venv_bin not in _path:
-                _os.environ["PATH"] = _venv_bin + _os.pathsep + _path
+            self._setup_slither_env()
             from slither import Slither  # type: ignore
         except Exception:
             logger.warning("slither-analyzer not available — skipping dep graph")
@@ -288,6 +322,76 @@ class ContractDepGraph:
             critical_vars=critical_vars,
             text="\n".join(lines),
         )
+
+    def get_callers_of_primary(
+        self,
+        source_path: str,
+        contract_name: str,
+    ) -> Optional[Set[str]]:
+        """
+        Find all contracts whose functions make high-level (external) calls into
+        contract_name. Used by flatten_contest to identify consumer contracts
+        (e.g. Manager, Position) that are not reachable via forward import BFS.
+
+        Returns set of contract names, or None if Slither fails.
+        None means "unknown" — caller should fall back to forward BFS only.
+        """
+        try:
+            self._setup_slither_env()
+            from slither import Slither  # type: ignore
+        except Exception:
+            logger.warning("slither-analyzer not available — skipping caller analysis")
+            return None
+
+        target, pragma_ver = self._resolve_slither_target(source_path, contract_name)
+        if not target:
+            return None
+
+        if pragma_ver:
+            self._set_solc_version(pragma_ver)
+
+        try:
+            sl = Slither(target)
+        except Exception as e:
+            short = str(e).split("\n")[0][:120]
+            logger.warning(f"Slither compile error (caller analysis) for {contract_name}: {short}")
+            return None
+
+        primary_matches = sl.get_contract_from_name(contract_name)
+        if not primary_matches:
+            logger.warning(f"Slither: contract '{contract_name}' not found in compiled output")
+            return None
+        primary = primary_matches[0]
+
+        # Build the set of types that represent "calling primary":
+        #   1. The concrete contract itself
+        #   2. Base classes / interfaces it explicitly inherits (via primary.inheritance)
+        #   3. The companion interface following the Solidity IFoo convention (e.g.
+        #      IConcentratedLiquidityPool for ConcentratedLiquidityPool) — Solidity
+        #      allows contracts to satisfy an interface without explicit `is IFoo`
+        #      declaration, so the interface won't appear in primary.inheritance.
+        primary_and_bases: Set[object] = {primary} | set(getattr(primary, "inheritance", []))
+        _companion_iface_name = "I" + primary.name
+        for _c in sl.contracts:
+            if _c.name == _companion_iface_name:
+                primary_and_bases.add(_c)
+                break
+
+        callers: Set[str] = set()
+        for contract in sl.contracts:
+            if contract == primary:
+                continue
+            for func in contract.functions_and_modifiers:
+                for target_c, _ in func.high_level_calls:
+                    if target_c in primary_and_bases:
+                        callers.add(contract.name)
+                        break
+
+        logger.info(
+            f"Slither caller analysis: {len(callers)} contracts call {contract_name}"
+            + (f": {', '.join(sorted(callers))}" if callers else "")
+        )
+        return callers
 
     def _persist_to_memgraph(
         self,
