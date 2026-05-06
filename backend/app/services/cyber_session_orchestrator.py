@@ -1885,6 +1885,7 @@ class CyberSessionOrchestrator:
     _V2_R1_MAX_TOKENS  = int(os.environ.get("V2_R1_MAX_TOKENS",  "65536"))
     _V2_R2_MAX_TOKENS  = int(os.environ.get("V2_R2_MAX_TOKENS",  "32768"))
     _V2_R3_MAX_TOKENS  = int(os.environ.get("V2_R3_MAX_TOKENS",  "1500"))
+    _EV_PRIORITY: dict = {"CODE:": 0, "MISSING:": 1, "SEQ:": 2, "INV:": 3, "DESIGN:": 4}
 
     def _call_agent_v2(
         self,
@@ -1934,6 +1935,33 @@ class CyberSessionOrchestrator:
         session_state.current_round = 1
         self._save_session_state(session_state)
 
+        # ── Sequential Anchor Dedup ───────────────────────────────────────────
+        logger.info(f"[v2] Anchor dedup: {n_r1} raw → Bước 1 (static) + Bước 2 (LLM)...")
+        candidate_pool = self._run_anchor_dedup(candidate_pool, network_summary)
+        n_r1 = len(candidate_pool)
+        logger.info(f"[v2] After anchor dedup: {n_r1} canonical findings")
+
+        # ── Pre-R2 FP Check ───────────────────────────────────────────────────
+        logger.info(f"[v2] Pre-R2 FP check: {n_r1} candidates → filtering...")
+        candidate_pool = self._dedup_pre_r2(candidate_pool, network_summary)
+        n_r1 = len(candidate_pool)
+        logger.info(f"[v2] After FP check: {n_r1} candidates enter R2")
+
+        # ── Early exit after R1 (STOP_AFTER_R1=true) ─────────────────────────
+        if os.environ.get("STOP_AFTER_R1", "").lower() == "true":
+            import json as _json
+            out_path = os.environ.get("STOP_AFTER_R1_OUT", "/tmp/r1_findings.json")
+            with open(out_path, "w") as _f:
+                _json.dump(list(candidate_pool.values()), _f, indent=2, default=str)
+            logger.info(
+                f"[v2] STOP_AFTER_R1=true — {n_r1} R1 findings saved to {out_path}, "
+                f"skipping R2 and R3"
+            )
+            self._v2_complete_task(
+                task_id, session_id, graph_id, session_state, {}, [], [], [],
+            )
+            return
+
         if not candidate_pool:
             logger.warning("[v2] Round 1 produced 0 candidates — nothing to vote on")
             self._v2_complete_task(task_id, session_id, graph_id, session_state, {}, [])
@@ -1957,6 +1985,28 @@ class CyberSessionOrchestrator:
         )
         session_state.current_round = 2
         self._save_session_state(session_state)
+
+        # ── Pre-R3 Dedup ──────────────────────────────────────────────────────
+        logger.info(f"[v2] Pre-R3 dedup: {n_r2} accepted findings → filtering...")
+        accepted_findings = self._dedup_pre_r3(accepted_findings)
+        n_r2 = len(accepted_findings)
+        logger.info(f"[v2] After pre-R3 dedup: {n_r2} findings enter R3")
+
+        # ── Early exit for inspection (STOP_AFTER_PRE_R3=true) ────────────────
+        if os.environ.get("STOP_AFTER_PRE_R3", "").lower() == "true":
+            import json as _json
+            out_path = os.environ.get("STOP_AFTER_PRE_R3_OUT", "/tmp/pre_r3_findings.json")
+            with open(out_path, "w") as _f:
+                _json.dump(accepted_findings, _f, indent=2, default=str)
+            logger.info(
+                f"[v2] STOP_AFTER_PRE_R3=true — {n_r2} findings saved to {out_path}, "
+                f"skipping R3"
+            )
+            self._v2_complete_task(
+                task_id, session_id, graph_id, session_state, all_votes,
+                accepted_findings, [], [],
+            )
+            return
 
         if not accepted_findings:
             logger.warning("[v2] Round 2 produced 0 accepted findings")
@@ -2092,6 +2142,346 @@ class CyberSessionOrchestrator:
             "pipeline_version":    "v2",
         })
 
+    # ── Dedup helpers ─────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _normalize_evidence(text: str) -> str:
+        """Normalize a short evidence snippet for dedup key / embedding."""
+        import re as _re
+        text = _re.sub(r'//.*', '', text)
+        text = _re.sub(r'/\*.*?\*/', '', text, flags=_re.DOTALL)
+        text = _re.sub(r'\s+', ' ', text).strip()
+        text = text.rstrip(';').strip()
+        return text[:100].lower()
+
+    @staticmethod
+    def _normalize_source(text: str) -> str:
+        """Normalize full source code for substring FP check — no length limit."""
+        import re as _re
+        text = _re.sub(r'//.*', '', text)
+        text = _re.sub(r'/\*.*?\*/', '', text, flags=_re.DOTALL)
+        text = _re.sub(r'\s+', ' ', text).strip()
+        return text.lower()
+
+    @classmethod
+    def _dedup_pre_r2(cls, candidate_pool: dict, source_code: str) -> dict:
+        """
+        Layer 1A: Drop findings whose CODE: snippet or CODE_ANCHOR is not found in source.
+        Layer 1B removed — replaced by Merger Agent (CODE_ANCHOR dedup).
+        """
+        fp_check = os.environ.get("R3_CODE_FP_CHECK", "true").lower() != "false"
+        norm_source = cls._normalize_source(source_code)
+
+        survivors: dict = {}
+        for pid, item in candidate_pool.items():
+            ev = (item.get("evidence_snippets") or [""])[0]
+
+            # Check 1: CODE: snippet must exist in source
+            if ev.startswith("CODE:") and fp_check:
+                snippet = ev[5:].strip()
+                norm_snip = cls._normalize_evidence(snippet)
+                if norm_snip and norm_snip not in norm_source:
+                    logger.debug(f"[dedup pre-R2] drop hallucinated CODE: '{snippet[:60]}'")
+                    continue
+
+            # Check 2: CODE_ANCHOR must exist in source (applies to all evidence types)
+            anchor = item.get("code_anchor", "")
+            if anchor and fp_check:
+                norm_anchor = cls._normalize_evidence(anchor)
+                if norm_anchor and norm_anchor not in norm_source:
+                    logger.debug(f"[dedup pre-R2] drop invalid CODE_ANCHOR: '{anchor[:60]}'")
+                    continue
+
+            survivors[pid] = item
+
+        logger.info(f"[dedup pre-R2] Layer 1A (FP check): {len(candidate_pool)} → {len(survivors)}")
+        return survivors
+
+    @classmethod
+    def _dedup_pre_r3(cls, accepted_findings: list) -> list:
+        """
+        Layer 2 (embedding) removed — replaced by Merger Agent.
+        Layer 3: Global cap (top R3_MAX_FINDINGS by round2_score).
+        """
+        max_total = int(os.environ.get("R3_MAX_FINDINGS", "40"))
+
+        sorted_findings = sorted(
+            accepted_findings,
+            key=lambda x: x.get("round2_score", 0),
+            reverse=True,
+        )
+        final   = sorted_findings[:max_total]
+        dropped = sorted_findings[max_total:]
+        logger.info(
+            f"[dedup pre-R3] global cap={max_total}: "
+            f"{len(accepted_findings)} → {len(final)} kept, {len(dropped)} dropped"
+        )
+
+        if os.environ.get("STOP_AFTER_PRE_R3", "").lower() == "true" and dropped:
+            import json as _json
+            dropped_path = os.environ.get("STOP_AFTER_PRE_R3_OUT", "/tmp/pre_r3_findings.json")
+            dropped_path = dropped_path.replace(".json", "_dropped.json")
+            with open(dropped_path, "w") as _f:
+                _json.dump(dropped, _f, indent=2, default=str)
+            logger.info(f"[dedup pre-R3] Dropped findings → {dropped_path}")
+
+        return final
+
+    # ── Sequential Anchor Dedup (Bước 1 static + Bước 2 LLM) ─────────────────
+
+    @classmethod
+    def _pick_primary(cls, group: list) -> tuple:
+        """Given list of (pid, item), return (pid, item) with best evidence priority."""
+        def priority(pid_item):
+            _, item = pid_item
+            ev = (item.get("evidence_snippets") or [""])[0]
+            for prefix, rank in cls._EV_PRIORITY.items():
+                if ev.upper().startswith(prefix):
+                    return rank
+            return 99
+        return min(group, key=priority)
+
+    @classmethod
+    def _static_anchor_dedup(cls, candidate_pool: dict) -> dict:
+        """
+        Bước 1: group by (contract, function, normalize(code_anchor)).
+        Same anchor → same bug → merge. No LLM needed.
+        """
+        from collections import defaultdict as _dd
+        anchor_groups: dict = _dd(list)
+        no_anchor: list = []
+
+        for pid, item in candidate_pool.items():
+            anchor = cls._normalize_evidence(item.get("code_anchor", ""))
+            if anchor:
+                key = (
+                    item.get("contract_name", "").lower().strip(),
+                    item.get("function_name", "").lower().strip(),
+                    anchor,
+                )
+                anchor_groups[key].append((pid, item))
+            else:
+                no_anchor.append((pid, item))
+
+        merged_pool: dict = {}
+        n_merged = 0
+
+        for _key, group in anchor_groups.items():
+            if len(group) == 1:
+                pid, item = group[0]
+                merged_pool[pid] = item
+            else:
+                primary_pid, primary = cls._pick_primary(group)
+                merged = dict(primary)
+                all_evidence = list(primary.get("evidence_snippets", []))
+                all_submitters = list(primary.get("submitters", []))
+                for pid, item in group:
+                    if pid == primary_pid:
+                        continue
+                    for ev in (item.get("evidence_snippets") or []):
+                        if ev not in all_evidence:
+                            all_evidence.append(ev)
+                    for s in (item.get("submitters") or []):
+                        if s not in all_submitters:
+                            all_submitters.append(s)
+                    n_merged += 1
+                merged["evidence_snippets"] = all_evidence
+                merged["submitters"] = all_submitters
+                merged_pool[primary_pid] = merged
+                logger.debug(
+                    f"[static_dedup] merged {len(group)} findings at "
+                    f"({_key[0]}.{_key[1]}) anchor: {_key[2][:60]}"
+                )
+
+        for pid, item in no_anchor:
+            merged_pool[pid] = item
+
+        logger.info(
+            f"[static_dedup] {len(candidate_pool)} → {len(merged_pool)} "
+            f"({n_merged} findings merged by exact anchor)"
+        )
+        return merged_pool
+
+    @staticmethod
+    def _extract_function_body(source_code: str, fn_name: str) -> str:
+        """Extract Solidity function body by brace counting. Returns up to 3000 chars."""
+        import re as _re
+        lines = source_code.split('\n')
+        pattern = _re.compile(r'\bfunction\s+' + _re.escape(fn_name) + r'\s*\(')
+        start_idx = None
+        for i, line in enumerate(lines):
+            if pattern.search(line):
+                start_idx = i
+                break
+        if start_idx is None:
+            return ""
+        body_lines = []
+        depth = 0
+        for i in range(start_idx, min(start_idx + 300, len(lines))):
+            line = lines[i]
+            body_lines.append(line)
+            depth += line.count('{') - line.count('}')
+            if depth <= 0 and i > start_idx:
+                break
+        return '\n'.join(body_lines)[:3000]
+
+    @classmethod
+    def _apply_llm_merges(cls, group: list, merge_pairs: list) -> list:
+        """Apply MERGE decisions via union-find. Returns list of (pid, item) after merging."""
+        from collections import defaultdict as _dd
+        n = len(group)
+        parent = list(range(n))
+
+        def find(x):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def union(x, y):
+            px, py = find(x), find(y)
+            if px != py:
+                parent[py] = px
+
+        for i, j in merge_pairs:
+            union(i, j)
+
+        clusters: dict = _dd(list)
+        for idx in range(n):
+            clusters[find(idx)].append(idx)
+
+        result = []
+        for _root, indices in clusters.items():
+            if len(indices) == 1:
+                result.append(group[indices[0]])
+            else:
+                cluster_items = [group[i] for i in indices]
+                primary_pid, primary = cls._pick_primary(cluster_items)
+                merged = dict(primary)
+                all_evidence = list(primary.get("evidence_snippets", []))
+                all_submitters = list(primary.get("submitters", []))
+                for pid, item in cluster_items:
+                    if pid == primary_pid:
+                        continue
+                    for ev in (item.get("evidence_snippets") or []):
+                        if ev not in all_evidence:
+                            all_evidence.append(ev)
+                    for s in (item.get("submitters") or []):
+                        if s not in all_submitters:
+                            all_submitters.append(s)
+                merged["evidence_snippets"] = all_evidence
+                merged["submitters"] = all_submitters
+                result.append((primary_pid, merged))
+        return result
+
+    def _llm_anchor_dedup(self, candidate_pool: dict, source_code: str) -> dict:
+        """
+        Bước 2: LLM dedup for functions with ≥2 findings after static dedup.
+        CODE groups by (contract, function) statically; LLM only receives pre-assembled
+        groups and outputs MERGE/KEEP_SEPARATE — does not search or filter itself.
+        ~11 LLM calls for contest 35, runs in parallel with LLM_DEDUP_WORKERS workers.
+        """
+        import re as _re, time as _time
+        from collections import defaultdict as _dd
+        from concurrent.futures import ThreadPoolExecutor
+
+        func_groups: dict = _dd(list)
+        for pid, item in candidate_pool.items():
+            key = (
+                item.get("contract_name", "").lower().strip(),
+                item.get("function_name", "").lower().strip(),
+            )
+            func_groups[key].append((pid, item))
+
+        single_groups = {k: v for k, v in func_groups.items() if len(v) <= 1}
+        multi_groups  = {k: v for k, v in func_groups.items() if len(v) > 1}
+
+        result_pool: dict = {}
+        n_llm_calls = 0
+        n_llm_merged = 0
+        max_workers = int(os.environ.get("LLM_DEDUP_WORKERS", "2"))
+
+        def _process_one_group(contract: str, fn: str, group: list) -> list:
+            fn_body = self._extract_function_body(source_code, fn)
+            parts = [
+                f"  [{i+1}] anchor: {item.get('code_anchor', 'N/A')[:120]}\n"
+                f"       evidence: {(item.get('evidence_snippets') or ['N/A'])[0][:120]}\n"
+                f"       title: {item.get('title', '')[:80]}"
+                for i, (pid, item) in enumerate(group)
+            ]
+            prompt = (
+                "You are a deduplication agent for smart contract audit findings.\n\n"
+                f"CONTRACT: {contract}  FUNCTION: {fn}\n"
+            )
+            if fn_body:
+                prompt += f"\nFUNCTION SOURCE:\n{fn_body}\n"
+            prompt += (
+                f"\nFINDINGS (same function, different code anchors):\n"
+                + "\n\n".join(parts)
+                + "\n\n"
+                "TASK: Identify pairs that describe the SAME underlying vulnerability.\n\n"
+                "Rules:\n"
+                "  - Only merge when CERTAIN they share the same root cause\n"
+                "  - Different anchors usually mean different bugs — when in doubt: KEEP_SEPARATE\n"
+                "  - KEEP_SEPARATE is always safer (duplicate > missed TP)\n\n"
+                "Output one decision per line:\n"
+                "  MERGE: [i] == [j]  | REASON: <one sentence>\n"
+                "  KEEP_SEPARATE: [i] | REASON: <one sentence>"
+            )
+            merge_pairs: list = []
+            try:
+                t0 = _time.time()
+                response = self._call_agent_v2(prompt, max_tokens=512)
+                elapsed = _time.time() - t0
+                logger.info(f"[llm_dedup] {contract}.{fn}: {elapsed:.1f}s, {len(group)} findings")
+                for line in response.split('\n'):
+                    m = _re.search(r'MERGE:\s*\[(\d+)\]\s*==\s*\[(\d+)\]', line)
+                    if m:
+                        i, j = int(m.group(1)) - 1, int(m.group(2)) - 1
+                        if 0 <= i < len(group) and 0 <= j < len(group) and i != j:
+                            merge_pairs.append((min(i, j), max(i, j)))
+                merge_pairs = list(set(merge_pairs))
+            except Exception as e:
+                logger.warning(f"[llm_dedup] error for {contract}.{fn}: {e} — keeping separate")
+            return self._apply_llm_merges(group, merge_pairs)
+
+        # Single-item groups: no LLM needed, add directly
+        for (_contract, _fn), group in single_groups.items():
+            for pid, item in group:
+                result_pool[pid] = item
+
+        # Multi-item groups: parallel LLM calls via ThreadPoolExecutor
+        # Each future handles exactly one (contract, function) group — no duplication possible
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures = {
+                ex.submit(_process_one_group, contract, fn, group): (contract, fn, group)
+                for (contract, fn), group in multi_groups.items()
+            }
+            for future, (contract, fn, group) in futures.items():
+                try:
+                    merged_group = future.result()
+                    n_llm_merged += len(group) - len(merged_group)
+                    for pid, item in merged_group:
+                        result_pool[pid] = item
+                except Exception as e:
+                    logger.warning(f"[llm_dedup] collect error {contract}.{fn}: {e} — keeping all")
+                    for pid, item in group:
+                        result_pool[pid] = item
+                n_llm_calls += 1
+
+        logger.info(
+            f"[llm_dedup] {n_llm_calls} LLM calls ({max_workers} workers), "
+            f"{len(candidate_pool)} → {len(result_pool)} "
+            f"({n_llm_merged} findings merged by LLM)"
+        )
+        return result_pool
+
+    def _run_anchor_dedup(self, candidate_pool: dict, source_code: str) -> dict:
+        """Sequential dedup entry point: Bước 1 (static) → Bước 2 (LLM)."""
+        after_static = self._static_anchor_dedup(candidate_pool)
+        after_llm = self._llm_anchor_dedup(after_static, source_code)
+        return after_llm
+
     # ── Round 1 helper ────────────────────────────────────────────────────────
 
     def _run_discovery_round(
@@ -2148,7 +2538,7 @@ class CyberSessionOrchestrator:
                 except Exception:
                     pass
 
-            parsed = cm["parse_all_findings"](response, profile, 1, known_functions=None)
+            parsed = cm["parse_all_findings"](response, profile, 1, known_functions=known_functions)
             n_findings = len(parsed)
             logger.info(
                 f"[v2 R1] agent={profile.agent_id}: "
@@ -2169,9 +2559,10 @@ class CyberSessionOrchestrator:
                 title       = f.get("title", "")
                 description = f.get("description", "") or ""
                 attack_path = f.get("attack_path", [])
-                ev = (f.get("evidence") or [""])[0]
+                ev          = (f.get("evidence") or [""])[0]
+                code_anchor = f.get("code_anchor", "")
                 for fn in fns:
-                    results.append((contract, fn, title, description, attack_path, ev))
+                    results.append((contract, fn, title, description, attack_path, ev, code_anchor))
 
             return results
 
@@ -2185,7 +2576,7 @@ class CyberSessionOrchestrator:
             for future, profile in futures.items():
                 try:
                     findings = future.result()
-                    for contract, fn, title, description, attack_path, ev in findings:
+                    for contract, fn, title, description, attack_path, ev, code_anchor in findings:
                         # No clustering — each finding gets its own entry in the pool
                         pair_id = f"p_{uuid.uuid4().hex[:8]}"
                         raw_pool[pair_id] = {
@@ -2197,6 +2588,7 @@ class CyberSessionOrchestrator:
                             "function_name":     fn,
                             "submitters":        [profile.agent_id],
                             "evidence_snippets": [ev[:300]] if ev else [],
+                            "code_anchor":       code_anchor,
                         }
                 except Exception as e:
                     logger.warning(f"[v2 R1] result error {profile.agent_id}: {e}")

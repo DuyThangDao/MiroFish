@@ -701,21 +701,49 @@ _FUNC_PROSE_BLACKLIST = frozenset({
 
 def _parse_function_field(raw: str) -> List[str]:
     """
-    RC-1 fix: extract only valid Solidity function names from the FUNCTION field.
+    Extract Solidity function names from a FUNCTION field that may contain full signatures.
 
-    Filters:
-    - Tokens starting with underscore (parameter names: _spender, _value)
-    - Tokens ending in a digit (type names: uint256, bytes32, int128)
-    - Prose words and Solidity keywords (via blacklist)
+    Handles: bare names, name(), name(params), "function name(params)", comma-separated lists.
+    Splits on commas only at paren depth 0 so "fn(a, b)" is kept as one unit.
     """
-    tokens = _SOLIDITY_FUNC_RE.findall(raw)
+    # Split on commas at paren depth 0 — keeps "claimReward(uint256, address)" as one segment
+    segments: list = []
+    depth, start = 0, 0
+    for i, ch in enumerate(raw):
+        if ch == '(':
+            depth += 1
+        elif ch == ')':
+            depth -= 1
+        elif ch == ',' and depth == 0:
+            segments.append(raw[start:i])
+            start = i + 1
+    segments.append(raw[start:])
+
     result = []
-    for t in tokens:
-        if (t[-1].isdigit()                # type name: uint256, bytes32, int128
-                or t.lower() in _FUNC_PROSE_BLACKLIST):
-            continue
-        result.append(t + "()")
-    return result
+    for segment in segments:
+        # Drop parameter list entirely — "claimReward(uint256 pos, address rec)" → "claimReward"
+        name = segment.split("(")[0].strip()
+        # Drop leading keywords — "function mint" → "mint"
+        tokens = name.split()
+        name = tokens[-1] if tokens else ""
+        # Accept only valid Solidity identifiers (includes underscore-prefixed internal fns)
+        if re.fullmatch(r'[a-zA-Z_]\w*', name):
+            result.append(name + "()")
+    return list(dict.fromkeys(result))  # dedup, preserve order
+
+
+def _validate_code_anchor(anchor: str) -> bool:
+    """Return True if anchor looks like real code (not prose or N/A)."""
+    anchor = anchor.strip()
+    if not anchor or len(anchor) < 4:
+        return False
+    if anchor.lower().startswith(("the ", "this ", "n/a", "none", "not ", "no ")):
+        return False
+    if anchor.startswith(("//", "/*")):
+        return False
+    if anchor in ("{", "}", "else", "return", "else {", "} else {"):
+        return False
+    return bool(re.search(r'[a-zA-Z_]\w{2,}', anchor))
 
 
 def extract_known_functions(context_summary: str) -> set:
@@ -737,6 +765,9 @@ def extract_known_functions(context_summary: str) -> set:
             t = token.strip()
             if re.match(r'^[a-zA-Z_][a-zA-Z0-9_]+$', t):
                 funcs.add(t.lower())
+    # Format 3: raw Solidity source — "function funcName("
+    for m in re.finditer(r'\bfunction\s+([a-zA-Z_]\w*)\s*\(', context_summary):
+        funcs.add(m.group(1).lower())
     return funcs
 
 
@@ -753,6 +784,8 @@ _EVIDENCE_MARKERS = (
     "solidity ", # pragma solidity
 )
 
+_EVIDENCE_TYPE_PREFIXES = ("CODE:", "MISSING:", "SEQ:", "INV:", "DESIGN:")
+
 def _has_specific_evidence(evidence: List[str], functions: List[str]) -> bool:
     """
     RC-2: Return True if finding has concrete code evidence.
@@ -763,12 +796,16 @@ def _has_specific_evidence(evidence: List[str], functions: List[str]) -> bool:
         return True
     if not evidence:
         return False
-    combined = " ".join(evidence).lower()
+    combined = " ".join(evidence)
+    # Structured evidence prefix = always valid
+    if any(combined.strip().startswith(p) for p in _EVIDENCE_TYPE_PREFIXES):
+        return True
+    combined_lower = combined.lower()
     # RC-2: reject trivially short evidence like "The", "N/A", "a function"
-    if len(combined.strip()) < 15:
+    if len(combined_lower.strip()) < 15:
         return False
     # Must contain at least one Solidity-specific syntax marker
-    return any(marker.lower() in combined for marker in _EVIDENCE_MARKERS)
+    return any(marker.lower() in combined_lower for marker in _EVIDENCE_MARKERS)
 
 
 # ─── Contract Finding Parser ──────────────────────────────────────────────────
@@ -806,6 +843,7 @@ def parse_contract_finding_from_text(
     contract_name = ""
     severity = "medium"
     affected_functions = []
+    code_anchor = ""
     evidence = []
     description = ""
     attack_path = ""
@@ -828,7 +866,7 @@ def parse_contract_finding_from_text(
         stripped = line.strip()
         lower = stripped.lower()
 
-        if re.match(r'(?i)^(FINDING|CONTRACT|SEVERITY|FUNCTION|EVIDENCE|ATTACK_PATH|DESCRIPTION|PATCH)\s*:', stripped):
+        if re.match(r'(?i)^(FINDING|CONTRACT|SEVERITY|FUNCTION|CODE_ANCHOR|EVIDENCE|ATTACK_PATH|DESCRIPTION|PATCH)\s*:', stripped):
             _flush_field()
             current_field = None
             current_value = []
@@ -844,6 +882,9 @@ def parse_contract_finding_from_text(
         elif lower.startswith("function:"):
             func_raw = stripped.split(":", 1)[1].strip()
             affected_functions = _parse_function_field(func_raw)
+        elif lower.startswith("code_anchor:"):
+            raw_anchor = stripped.split(":", 1)[1].strip()[:150]
+            code_anchor = raw_anchor if _validate_code_anchor(raw_anchor) else ""
         elif lower.startswith("evidence:"):
             evidence_raw = stripped.split(":", 1)[1].strip()
             evidence = [evidence_raw] if evidence_raw else []
@@ -891,6 +932,7 @@ def parse_contract_finding_from_text(
         "contract_name":       contract_name,
         "severity":            severity,
         "affected_functions":  affected_functions,
+        "code_anchor":         code_anchor,
         "evidence":            evidence,
         "description":         description or title,
         "attack_path":         attack_path,
@@ -1375,7 +1417,8 @@ OUTPUT FORMAT — use ONLY the FINDING format below. No CLAIM, VALIDATE, CHALLEN
   CONTRACT: <exact contract name where the vulnerable function is defined>
   FUNCTION: <exact function name from contract>
   SEVERITY: <critical|high|medium|low>
-  EVIDENCE: <code snippet or specific pattern>
+  CODE_ANCHOR: <exact line from source — see rules below>
+  EVIDENCE: <one-line structured evidence — choose ONE prefix below>
   ATTACK_PATH: <step-by-step exploit scenario>
   DESCRIPTION: <why this is exploitable>
   PATCH: <concrete fix>
@@ -1386,10 +1429,41 @@ CONTRACT field is MANDATORY:
   - Do NOT write the file path or .sol extension — contract name only.
   - If the same vulnerability exists in multiple contracts, write a separate FINDING for each.
 
+EVIDENCE field — MANDATORY. Choose ONE format:
+  CODE: <exact snippet copied verbatim from source, max 120 chars>
+  MISSING: <what should exist> AT: <Contract.function()>
+  SEQ: <fn_a()> → <fn_b()> via <state_var> | ISSUE: <why this order is wrong>
+  INV: <invariant statement> | VIOLATED_AT: <fn()> | COUNTEREXAMPLE: <condition>
+  DESIGN: <mechanism abused> | EXPLOIT: <step-by-step attack> | NO_MITIGATION: <missing safeguard>
+
 ⚠ EVIDENCE GATE: every FINDING must include at least one of:
   - A real function name that exists in the contract source
-  - A specific code snippet (assignment, require(), call pattern)
-  Hypothetical findings without code evidence will be dropped.
+  - A CODE:, MISSING:, SEQ:, INV:, or DESIGN: evidence line
+  Findings without valid EVIDENCE will be dropped automatically.
+
+CODE_ANCHOR field — MANDATORY. Copy verbatim from source. Do NOT paraphrase or write N/A.
+This is the line that appears in the git diff when the bug is fixed:
+
+  If EVIDENCE is CODE:    → the wrong line that will be changed/fixed
+    e.g. totalShares += uint128(depositAmount);
+
+  If EVIDENCE is MISSING: → the last existing line BEFORE where new code must be inserted
+    e.g. uint256 shares = _convertToShares(assets);
+
+  If EVIDENCE is SEQ:     → the line executing out of order that will be moved when fixed
+    e.g. cumulativeIndex += elapsed * rewardRate;
+
+  If EVIDENCE is INV:     → the computation line that produces the invariant-violating value
+    e.g. price = reserve1 * PRECISION / reserve0;
+
+  If EVIDENCE is DESIGN:  → the function declaration line of the exploit entry point
+    e.g. function withdraw(uint256 shares, address recipient) external returns (uint256 assets) {{
+
+Rules:
+  1. Must be findable verbatim by grep in the flattened source (parser will verify)
+  2. No comment lines (// or /* */), no standalone braces or keywords
+  3. If bug spans multiple lines: take the FIRST line of the expression
+  4. Max 150 characters
 
 Write ALL findings you can identify. Do not stop at the first one.
 """
