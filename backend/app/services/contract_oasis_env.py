@@ -1411,6 +1411,37 @@ Analyze every function. Do not limit your analysis to only public/external funct
 COVERAGE RULE — if a vulnerability pattern appears in MULTIPLE functions, write one FINDING per function.
 Do NOT collapse "function A and B" into a single FINDING. A missed function = a missed bug.
 
+CAST & COMPARISON PRECISION — before writing any arithmetic finding, answer these questions:
+
+For every explicit narrowing cast (uint256→uint128, uint128→int128, uint256→int24, etc.):
+  Q1: What is the realistic MAX value of the input at this code point?
+      (Trace: is it a return value of getDx/getDy? A user-supplied amount? An uncapped product?)
+  Q2: Can that MAX exceed the target type's max? (uint128 max = 2^128-1, int128 max = 2^127-1)
+  Q3: For signed cast: what is -T(input) when input = type_max?
+      (Two's complement: -int128(2^128-1) = +1 — SIGN FLIP, not underflow)
+  If YES to Q2 or Q3 → write FINDING. CODE_ANCHOR = the cast line itself.
+
+For every strict inequality (a < b) or (a > b) at a range/tick/price boundary:
+  Q1: What does b represent — price range endpoint, tick boundary, fee threshold?
+  Q2: Is a == b INCLUDED or EXCLUDED by the current strict comparison?
+  Q3: Is that exclusion correct? (Check protocol intent / NatSpec / invariants)
+  If exclusion is wrong → write FINDING. CODE_ANCHOR = the comparison line.
+
+STATE UPDATE ORDERING — check EVERY function that modifies 2+ state variables:
+
+INTRA-FUNCTION (wrong update order within one function):
+  Signal: accumulator += delta / stateVar  then  stateVar = newValue  (accumulator used NEW value — wrong)
+  Or:     stateVar = newValue  then  accumulator += delta / stateVar  (same problem)
+  Correct: finish ALL computations that READ stateVar BEFORE overwriting it.
+  Common pattern: secondsPerLiquidity / rewardPerShare must snapshot liquidity BEFORE it changes.
+  EVIDENCE: SEQ: computeAccumulator() → updateLiquidity() via liquidityGlobal | ISSUE: accumulator uses post-change liquidity
+
+CROSS-CALL SEQUENCING (user controls call order):
+  Identify pairs: WRITER (updates position.feeGrowthInside / rewardDebt / sharePrice) and
+                  READER (reads that field to compute user's payout: collect / claimReward / withdraw).
+  Ask: if user calls READER before WRITER has run → does READER use stale data → user overpaid?
+  EVIDENCE: SEQ: collect() → burn() via position.feeGrowthInside | ISSUE: collect reads stale value if called before burn
+
 OUTPUT FORMAT — use ONLY the FINDING format below. No CLAIM, VALIDATE, CHALLENGE, CONFIRM, or DISMISS.
 
   FINDING: <concise title describing the vulnerability>
@@ -1479,6 +1510,15 @@ ATTACK_PATH rules — MANDATORY. All four subfields must be present:
 
 ✗ Bad (will be dropped by parser):
   ATTACK_PATH: An attacker can exploit this vulnerability to drain funds from the contract.
+
+MULTI-ANGLE EXHAUSTION — for every function where you found a finding, force 2 more checks:
+  (A) DIFFERENT CLASS: found arithmetic error → also check: can any caller invoke this?
+      Is there an update-ordering issue? A cross-call staleness path? A parameter abuse?
+      (e.g., burn(recipient) passes recipient externally → does pool.burn use it to send ALL tick fees?)
+  (B) INTERACTIONS: this function modifies State Variable X →
+      which other functions also read X? Can this function put X in a state that breaks
+      those functions' invariants for OTHER users?
+  Each distinct vulnerability class in the same function = separate FINDING.
 
 Write ALL findings you can identify. Do not stop at the first one.
 """

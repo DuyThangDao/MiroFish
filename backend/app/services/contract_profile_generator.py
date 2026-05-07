@@ -104,7 +104,13 @@ CONTRACT_AGENT_MATRIX: Dict[str, Dict[str, Any]] = {
                 "without knowing it is readable by child contracts.\n"
                 "  SWC-136 Unencrypted Private Data On-Chain: any variable declared `private` is still "
                 "readable from blockchain state via eth_getStorageAt. Never store seeds, private keys, "
-                "passwords, or any secret that must remain confidential in contract storage — even as `private`."
+                "passwords, or any secret that must remain confidential in contract storage — even as `private`.\n"
+                "Also check STATE UPDATE ORDERING: for every function that modifies 2+ storage variables, "
+                "verify that any computation depending on Variable A completes BEFORE A is overwritten. "
+                "Key signal: `accumulator += delta / stateVar` followed by `stateVar = newValue` in the same function. "
+                "Also check CROSS-CALL STALENESS: identify WRITER functions (update feeGrowthInside, rewardDebt, "
+                "cumulativeIndex) and READER functions (collect, claimReward, withdraw) sharing the same storage field. "
+                "If user can call READER before WRITER → stale data → inflated payout. Use SEQ: evidence type."
             ),
             "auditor": (
                 "You are a smart contract security auditor. "
@@ -278,7 +284,12 @@ CONTRACT_AGENT_MATRIX: Dict[str, Dict[str, Any]] = {
                 "any state that is visible in the mempool before a transaction confirms and can be exploited by an attacker who submits a higher-gas transaction, "
                 "DEX orders or auctions where the outcome depends on transaction ordering (sandwich: frontrun + backrun around victim swap), "
                 "contracts that reveal a secret or commit-reveal scheme without a commit phase (secret visible in pending tx). "
-                "Ask: 'What combination of DeFi primitives can I chain to drain this protocol? Can I see any pending transaction and profit by reordering?'"
+                "Ask: 'What combination of DeFi primitives can I chain to drain this protocol? Can I see any pending transaction and profit by reordering?'\n"
+                "- JIT LIQUIDITY / REWARD HARVESTING: Before any reward distribution proportional to current "
+                "position size: can attacker mint large position same block, earn outsized reward share, then burn? "
+                "Signals: claimReward() / collectFees() / distribute() callable in same tx or block as large mint(). "
+                "Check whether reward accrual uses position.liquidity AT CLAIM TIME vs time-weighted average. "
+                "Ask: 'Can I mint(max_liquidity) → claimReward() → burn() in 1-3 blocks to extract rewards I did not earn?'"
             ),
             "defensive": (
                 "You are a DeFi security defender. "
@@ -326,7 +337,16 @@ CONTRACT_AGENT_MATRIX: Dict[str, Dict[str, Any]] = {
                 "(circular dependency — small price drop triggers liquidations → more price drop → death spiral)\n"
                 "- EMISSION INFLATION: Does token reward emission dilute existing holders faster than yield compensates?\n"
                 "- PRISONER'S DILEMMA: Is there a Nash equilibrium where rational individual behavior destroys collective value? "
-                "Ask: 'Is there any rational strategy that extracts value at the expense of the protocol or other users?'"
+                "Ask: 'Is there any rational strategy that extracts value at the expense of the protocol or other users?'\n"
+                "- JIT (JUST-IN-TIME) ATTACK: Any reward mechanism using time-weighted accumulators "
+                "(secondsPerLiquidity, secondsPerShare, rewardDebt, block.timestamp deltas) is vulnerable:\n"
+                "  Step 1: Attacker enters large position 1 block before reward snapshot/accrual.\n"
+                "  Step 2: Reward distributed proportional to position at that moment.\n"
+                "  Step 3: Attacker exits position same block or next block.\n"
+                "  Result: Earns majority of rewards for near-zero duration holding.\n"
+                "  Check: Is there a minimum holding period? Does accumulator snapshot BEFORE or AFTER entry?\n"
+                "  If `secondsPerLiquidity += elapsed / liquidityGlobal` uses CURRENT liquidity (post-entry) → JIT drainable.\n"
+                "  EVIDENCE format: DESIGN: secondsPerLiquidity accrual | EXPLOIT: mint large → wait 1 block → claimReward → burn | NO_MITIGATION: no minimum hold period"
             ),
             "protocol_designer": (
                 "You are a smart contract protocol designer reviewing economic architecture. "
