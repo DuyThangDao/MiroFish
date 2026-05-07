@@ -1419,7 +1419,7 @@ OUTPUT FORMAT — use ONLY the FINDING format below. No CLAIM, VALIDATE, CHALLEN
   SEVERITY: <critical|high|medium|low>
   CODE_ANCHOR: <exact line from source — see rules below>
   EVIDENCE: <one-line structured evidence — choose ONE prefix below>
-  ATTACK_PATH: <step-by-step exploit scenario>
+  ATTACK_PATH: <structured — ACTOR / CALL / STATE_CHANGE / OUTCOME, see rules below>
   DESCRIPTION: <why this is exploitable>
   PATCH: <concrete fix>
 
@@ -1464,6 +1464,21 @@ Rules:
   2. No comment lines (// or /* */), no standalone braces or keywords
   3. If bug spans multiple lines: take the FIRST line of the expression
   4. Max 150 characters
+
+ATTACK_PATH rules — MANDATORY. All four subfields must be present:
+  ACTOR: <who initiates — attacker / any caller / LP holder / contract owner>
+  CALL: <exact function(s) from THIS contract, in sequence, e.g. burn() → transfer()>
+  STATE_CHANGE: <which state variable becomes incorrect and how>
+  OUTCOME: <measurable impact — X tokens drained / invariant Y broken / price wrong>
+
+✓ Good:
+  ACTOR: Any LP holder
+  CALL: burn(liquidity) → internally credits amount0 + amount0fees to user
+  STATE_CHANGE: reserve0 -= amount0fees only (amount0 subtraction missing)
+  OUTCOME: reserve0 inflated → next mint() caller receives excess tokens
+
+✗ Bad (will be dropped by parser):
+  ATTACK_PATH: An attacker can exploit this vulnerability to drain funds from the contract.
 
 Write ALL findings you can identify. Do not stop at the first one.
 """
@@ -1512,30 +1527,53 @@ def build_round2_prompt(
 === ROUND 2 — BLIND VOTING ===
 Agent: {agent_profile.agent_id} ({agent_profile.domain_group}/{agent_profile.persona})
 
-You are reviewing candidate vulnerability pairs discovered in Round 1 by OTHER experts.
-You do NOT know who submitted each pair. Current vote counts are hidden.
+You are a SECURITY ADVERSARY reviewing candidate findings from Round 1.
+Your task: find a SPECIFIC reason to REJECT each finding.
+If you CANNOT find a concrete counter-argument → you MUST ACCEPT.
 
-=== CANDIDATE PAIRS TO VOTE ON ===
+The burden of proof is on REJECTION, not acceptance. When uncertain → ACCEPT.
+
+=== CANDIDATE FINDINGS TO REVIEW ===
 {pairs_block}
 
 === VOTING INSTRUCTIONS ===
-For each pair above, write one vote block. Do NOT skip any pair.
+For each finding above, write one vote block. Do NOT skip any finding.
 
-ACCEPT if: you can independently verify from the contract source that the vulnerability pattern
-           is present in the named function AND it is exploitable.
-REJECT  if: the pattern is absent, the function does not exist, or it is a false positive.
+Four valid REJECT types (COUNTER_TYPE):
+  PHANTOM        — snippet or function does not exist at the claimed location in source
+  ACCESS_BLOCKED — the call path requires a role/modifier the attacker cannot bypass (onlyOwner, etc.)
+  NO_STATE_CHANGE — the operation is read-only / view; no state variable is mutated
+  NO_IMPACT      — the described outcome is not reachable in the actual execution path
 
-Vote format (one block per pair, in any order):
-  VOTE: ACCEPT | REJECT
+Vote format (one block per finding, in any order):
+  VERDICT: ACCEPT | REJECT
   PAIR: <pair_id>
-  EVIDENCE: <code snippet from contract that confirms or refutes>
-  REASON: <one-sentence justification>
+  COUNTER_TYPE: PHANTOM | ACCESS_BLOCKED | NO_STATE_CHANGE | NO_IMPACT  (REJECT only — omit if ACCEPT)
+  COUNTER: <one specific code element — function name, modifier, state variable — minimum 20 chars>
+           (if ACCEPT: write "No specific counter-argument found — <one sentence why>")
+
+⚠ A vague REJECT without a valid COUNTER_TYPE ("I don't think it's valid", "Uncertain")
+  will be treated as NEUTRAL and will NOT count toward rejection — it will actually
+  help the finding PASS. Write a specific code reference or ACCEPT.
+
+Example REJECT (valid):
+  VERDICT: REJECT
+  PAIR: pair_abc123
+  COUNTER_TYPE: NO_STATE_CHANGE
+  COUNTER: incentives[position.pool] is a read-only mapping access — no write to any
+           storage variable exists in the call path, so funds cannot be drained.
+
+Example ACCEPT:
+  VERDICT: ACCEPT
+  PAIR: pair_def456
+  COUNTER: No specific counter-argument found — reserve0 subtraction in burn() does
+           not account for amount0fees, confirming the inflated reserve path.
 
 Rules:
-  - You MUST cast exactly one vote per pair listed above.
-  - EVIDENCE must reference actual code in THIS contract. "I agree" is not evidence.
-  - Do NOT write FINDING in this round — only VOTE blocks.
-  - Do NOT change your vote based on other agents' reasoning (votes are blind).
+  - You MUST write exactly one vote block per finding listed above.
+  - COUNTER must reference actual code in THIS contract (modifier name, function name, variable).
+  - Do NOT write FINDING blocks in this round — only VERDICT blocks.
+  - Do NOT change votes based on other agents (votes are blind).
 
 Write all vote blocks now.
 """
@@ -1735,45 +1773,44 @@ def parse_round2_votes_from_text(
     agent_id: str,
 ) -> List[Dict[str, Any]]:
     """
-    Parse all VOTE blocks from a Round 2 response.
+    Parse all VERDICT blocks from a Round 2 adversarial response.
 
-    Expected format (one block per pair):
-      VOTE: ACCEPT | REJECT
+    Expected format (one block per finding):
+      VERDICT: ACCEPT | REJECT
       PAIR: <pair_id>
-      EVIDENCE: <text>
-      REASON: <text>
+      COUNTER_TYPE: PHANTOM | ACCESS_BLOCKED | NO_STATE_CHANGE | NO_IMPACT  (REJECT only)
+      COUNTER: <text>
 
     Returns list of vote dicts.
     """
     results: List[Dict[str, Any]] = []
-    # Split on each VOTE: line
-    blocks = re.split(r'(?im)^VOTE\s*:', text)
+    blocks = re.split(r'(?im)^VERDICT\s*:', text)
     for block in blocks[1:]:
         lines = block.strip().splitlines()
         vote_val = lines[0].strip().upper() if lines else ""
         if vote_val not in ("ACCEPT", "REJECT"):
             continue
 
-        pair_id = evidence = reason = ""
+        pair_id = counter_type = counter = ""
         for ln in lines[1:]:
             stripped = ln.strip()
             lower = stripped.lower()
             if lower.startswith("pair:"):
                 pair_id = stripped.split(":", 1)[1].strip()
-            elif lower.startswith("evidence:"):
-                evidence = stripped.split(":", 1)[1].strip()
-            elif lower.startswith("reason:"):
-                reason = stripped.split(":", 1)[1].strip()
+            elif lower.startswith("counter_type:"):
+                counter_type = stripped.split(":", 1)[1].strip().upper()
+            elif lower.startswith("counter:"):
+                counter = stripped.split(":", 1)[1].strip()
 
         if not pair_id:
             continue
 
         results.append({
-            "agent_id":  agent_id,
-            "pair_id":   pair_id,
-            "vote":      vote_val,
-            "evidence":  evidence,
-            "reason":    reason,
+            "agent_id":     agent_id,
+            "pair_id":      pair_id,
+            "vote":         vote_val,
+            "counter_type": counter_type,
+            "counter":      counter,
         })
 
     return results

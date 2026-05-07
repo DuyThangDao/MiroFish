@@ -129,18 +129,39 @@ CODE: incentives[position.pool]
 ```
 Snippet thật trong source → 22 agents thấy snippet real + description nghe hợp lý → ≥7 ACCEPT → score 0.79 → vào top 40. Nhưng đây chỉ là cách truy cập mapping, không phải bug.
 
-### Đề xuất fix
+### Root cause thực sự
 
-**Hướng 1 — Tăng threshold R2:**
-Nâng `R2_SCORE_THRESHOLD` từ 0.35 → 0.55. Với n_agents=22, cần k+r ≥ 13 → cần đa số agents đồng ý.
+R2 không phân biệt được FP và TP vì R1 đang submit findings với ATTACK_PATH vague,
+không có evidence về exploitability. FP findings cũng vượt qua vì snippet tồn tại thật
+trong source nhưng không có attack path cụ thể.
 
-**Hướng 2 — Stricter evidence validation trong R2 prompt:**
-Yêu cầu agent giải thích cụ thể TẠI SAO evidence này là bug, không chỉ ACCEPT/REJECT.
-Parse explanation → nếu quá chung chung → downgrade vote.
+**Các hướng fix R2 đều có vấn đề cơ bản:**
+- Raise threshold → kill specialized TP (k=1, chỉ 1 domain agent discover)
+- Default REJECT → non-domain agents REJECT mọi thứ ngoài chuyên môn
+- ABSTAIN vote → agents ABSTAIN mọi case khó, không có cost để ngăn
+- Domain routing → mất cross-domain perspective (AMM math bug có thể có access control implication)
+- System-weighted → không có ground truth để calibrate weight matrix
 
-**Hướng 3 — CODE: evidence cần thêm vulnerability pattern check:**
-FP check hiện tại chỉ verify snippet tồn tại. Thêm check: snippet phải chứa ít nhất 1
-vulnerability marker (unsafe cast, missing check, wrong operator, etc.) mới pass.
+### Giải pháp đã chọn — Structured ATTACK_PATH tại R1
+
+**Root fix nằm ở upstream:** R1 phải require ATTACK_PATH có cấu trúc cụ thể.
+FP findings không thể điền được — TP findings luôn có thể.
+
+```
+ATTACK_PATH:
+  ACTOR: <who initiates>
+  CALL: <exact function(s) in sequence>
+  STATE_CHANGE: <what state variable becomes incorrect>
+  OUTCOME: <measurable result — tokens drained / invariant broken>
+```
+
+Parser validation deterministic (không cần LLM thêm) sẽ drop findings không đủ cụ thể
+trước khi vào R2. Sau khi R1 filter tốt hơn, R2 nhận ít findings hơn với quality cao hơn
+— threshold có thể raise nhẹ từ **0.35 → 0.40**.
+
+**Không thay đổi R2 scoring hay voting mechanism.**
+
+> Phân tích đầy đủ tại [`docs/three-rounds/issue3-stricter-r2-prompt.md`](issue3-stricter-r2-prompt.md)
 
 ---
 
@@ -184,48 +205,42 @@ out-of-scope trong flatten. Cần verify scope sau Slither fix.
 
 ---
 
-## Issue 5: R3 Overload
+## Issue 5: R3 Overload — Đề Xuất Bỏ R3
 
 ### Mô tả
 
-Mỗi finding chạy tối đa **2 lượt attacker**:
-- Lượt 1 (initial): 5 attackers × N findings = 5N calls
-- Lượt 2 (update): chỉ INVALID attackers reconsider → thêm tối đa 5N calls
-
-Worst case: 40 × 5 × 2 = **400 calls**. Với rate limiting → mất 3-6 giờ.
-
-### Ví dụ từ run thực tế (contest 35)
+5 specialized attackers × N findings = 5N calls. Với N=45 (contest 35) → 225 calls;
+contest lớn hơn có thể lên 500+ calls → rate limit, wall time 3–6 giờ.
 
 ```
 Run 1 (trước dedup): 123 findings × 5 attackers = 615 initial calls
-                   + update pass                 = ~500 thêm
                    → 5,083 rate limit errors, >6 giờ, bị kill
 ```
 
-### Đề xuất fix (theo thứ tự triển khai)
+### Giải Pháp Đã Chọn — Bỏ Hoàn Toàn R3
 
-**Hướng A — Giảm số attackers (3 thay vì 5):**
-Điều chỉnh threshold tương ứng. Giảm 40% calls ngay lập tức.
-Rủi ro thấp, implement trong 30 phút.
+**Lý do:**
+- R2 với 19 agents đa domain đã toàn diện hơn bất kỳ thiết kế R3 nào với 1–5 agents
+- R2 đã là adversarial: `defi_math/offensive` challenge `appsec/auditor`, v.v.
+- Mọi thiết kế R3 đều có trade-off không giải quyết được (aggressive → kill TP; conservative → giữ FP)
+- R3 không có thông tin mới hơn R1/R2 → risk echo chamber
 
-**Hướng B — Score-stratified R3:**
+**Pipeline mới:**
 ```
-R2 score > 0.80 → 1 attacker (fast confirm)
-R2 score 0.50–0.80 → 3 attackers
-R2 score 0.35–0.50 → 5 attackers hoặc drop
+R1 (19 agents) → dedup → FP check → R2 (19 agents) → Output
 ```
-Với phân phối score thực tế (nhiều 0.79), hướng này giảm ~60% calls.
 
-**Hướng C — Function-only context:**
-Thay vì gửi toàn bộ source (~150KB), chỉ gửi function body + callees từ dep_graph.
-Mỗi call nhẹ hơn 10-20x → wall time giảm dù số calls không đổi.
+**Điều kiện tiên quyết:** Fix Issue 3 (structured ATTACK_PATH + R2 threshold ≥ 0.40) trước
+khi bỏ R3 — nếu R2 vẫn accept 100% mà bỏ R3 thì không có gì lọc noise.
 
-**Hướng D — Evidence fast lane (dài hạn):**
-- CODE: evidence đã verified tồn tại → dùng Slither pattern check thay LLM
-- Chỉ MISSING/SEQ/INV/DESIGN → cần attacker LLM
-- ~55% findings bypass R3 hoàn toàn
+**Scoring sau khi bỏ R3:** `final_score = r2_score` trực tiếp, phân tier theo ngưỡng:
+```
+r2_score ≥ 0.70 → Critical/High
+r2_score 0.55–0.70 → Medium
+r2_score 0.40–0.55 → Low / Informational
+```
 
-**Khuyến nghị kết hợp ngắn hạn:** A + B + C → giảm ~70% wall time mà không thay đổi logic.
+> Phân tích đầy đủ tại [`docs/three-rounds/issue5-remove-r3.md`](issue5-remove-r3.md)
 
 ---
 
@@ -276,16 +291,68 @@ MISSING: <tên check/code cụ thể cần có> AT: <Contract.function()>
 
 ---
 
+---
+
+## Issue 7: SWC Context Injection Gây Anchoring Bias
+
+### Mô tả
+
+Mỗi Tier-1 agent nhận `=== YOUR SWC KNOWLEDGE BASE ===` trong system prompt — được build từ
+`swc_focus` list của domain và inject qua `swc.get_swc_context_for_agent()`.
+
+Với AMM/DeFi contracts (Web3Bugs contest 35, 36...), hầu hết H-bugs là business logic / math
+bugs không có SWC ID tương ứng. Việc inject SWC context gây 2 vấn đề:
+
+### Hệ quả
+
+**Anchoring bias:** Agent cố map bug vào SWC → viết `SWC: SWC-101` cho một AMM math bug
+thực ra là precision/rounding logic → misleads dedup key và R2 voting.
+
+**Prompt token lãng phí:** SWC context chiếm token nhưng ít liên quan với AMM contracts.
+Đặc biệt `smart_contract_economics` và `defi_math` gần như không có SWC mapping.
+
+### Phân tích
+
+`swc_focus` field trên `ContractAgentProfile` chỉ là metadata — không có code nào đọc
+`profile.swc_focus` trong v2 pipeline để thay đổi hành vi. Giữ hay bỏ field này không ảnh hưởng.
+
+Thứ thực sự ảnh hưởng là SWC context injection trong `_build_tier1_system_prompt()`:
+```python
+swc_context = self.swc.get_swc_context_for_agent(domain_key, persona)
+# inject vào system prompt: "=== YOUR SWC KNOWLEDGE BASE ===\n{swc_context}"
+```
+
+### Đề xuất fix
+
+Làm SWC context injection **optional** theo domain — bỏ cho các domain thiên về business logic:
+
+```python
+# contract_profile_generator.py — _build_tier1_system_prompt()
+_NO_SWC_DOMAINS = {"smart_contract_economics", "defi_math"}
+
+swc_context = (
+    self.swc.get_swc_context_for_agent(domain_key, persona)
+    if domain_key not in _NO_SWC_DOMAINS
+    else ""
+)
+```
+
+`appsec`, `blockchain`, `cryptography`, `governance` vẫn giữ SWC context vì findings của
+họ thực sự map tới SWC IDs. `smart_contract_economics` và `defi_math` bỏ để giảm noise.
+
+---
+
 ## Tóm Tắt Ưu Tiên
 
 | # | Issue | Impact on Recall | Impact on Precision | Độ khó | Ưu tiên |
 |---|-------|-----------------|--------------------|----|---------|
 | 1 | Parser bug function name | Trung bình | Cao (12/40 garbage) | Thấp | **P0** |
 | 3 | R2 accept 100% | Thấp | Cao (27/40 FP) | Trung bình | **P0** |
-| 5 | R3 overload | — | — | Trung bình | **P0** |
+| 5 | R3 overload → Universal Attacker | — | — | Trung bình | **P0** |
 | 2 | Dedup same-bug | Trung bình | Trung bình | Trung bình | **P1** |
 | 4 | 8 H-bugs miss | Cao | — | Cao | **P1** |
 | 6 | MISSING evidence thiếu | Thấp | Thấp | Thấp | **P2** |
+| 7 | SWC anchoring bias | Thấp | Thấp | Thấp | **P2** |
 
 **P0 (fix trước):** Trực tiếp gây pipeline chạy sai hoặc chậm nghiêm trọng.
 **P1 (fix sau P0):** Cải thiện recall/precision đáng kể.

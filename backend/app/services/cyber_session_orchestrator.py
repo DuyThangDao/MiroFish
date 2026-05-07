@@ -1875,7 +1875,7 @@ class CyberSessionOrchestrator:
     # ─── v2 — 3-Round Contract Audit Flow ────────────────────────────────────
 
     # Thresholds (can be overridden via env vars)
-    _R2_THRESHOLD        = float(os.environ.get("R2_SCORE_THRESHOLD",      "0.35"))
+    _R2_THRESHOLD        = float(os.environ.get("R2_SCORE_THRESHOLD",      "0.42"))
     _R3_ATTACKER_BASE    = float(os.environ.get("R3_ATTACKER_FACTOR_BASE", "0.5"))
     _R3_CONFIRMED        = float(os.environ.get("R3_CONFIRMED_THRESHOLD",  "0.35"))
 
@@ -1941,6 +1941,20 @@ class CyberSessionOrchestrator:
         n_r1 = len(candidate_pool)
         logger.info(f"[v2] After anchor dedup: {n_r1} canonical findings")
 
+        # ── Early exit after anchor dedup (STOP_AFTER_DEDUP=true) ───────────
+        if os.environ.get("STOP_AFTER_DEDUP", "").lower() == "true":
+            import json as _json
+            out_path = os.environ.get("STOP_AFTER_DEDUP_OUT", "/tmp/dedup_findings.json")
+            with open(out_path, "w") as _f:
+                _json.dump(list(candidate_pool.values()), _f, indent=2, default=str)
+            logger.info(
+                f"[v2] STOP_AFTER_DEDUP=true — {n_r1} findings saved to {out_path}"
+            )
+            self._v2_complete_task(
+                task_id, session_id, graph_id, session_state, {}, [], [], [],
+            )
+            return
+
         # ── Pre-R2 FP Check ───────────────────────────────────────────────────
         logger.info(f"[v2] Pre-R2 FP check: {n_r1} candidates → filtering...")
         candidate_pool = self._dedup_pre_r2(candidate_pool, network_summary)
@@ -1964,7 +1978,7 @@ class CyberSessionOrchestrator:
 
         if not candidate_pool:
             logger.warning("[v2] Round 1 produced 0 candidates — nothing to vote on")
-            self._v2_complete_task(task_id, session_id, graph_id, session_state, {}, [])
+            self._v2_complete_task(task_id, session_id, graph_id, session_state, {}, [], [], [])
             return
 
         # ── Round 2: Blind Voting ─────────────────────────────────────────────
@@ -1986,54 +2000,19 @@ class CyberSessionOrchestrator:
         session_state.current_round = 2
         self._save_session_state(session_state)
 
-        # ── Pre-R3 Dedup ──────────────────────────────────────────────────────
-        logger.info(f"[v2] Pre-R3 dedup: {n_r2} accepted findings → filtering...")
+        # ── Post-R2 Score Cap (R3 disabled) ──────────────────────────────────
         accepted_findings = self._dedup_pre_r3(accepted_findings)
         n_r2 = len(accepted_findings)
-        logger.info(f"[v2] After pre-R3 dedup: {n_r2} findings enter R3")
+        logger.info(f"[v2] Post-R2 cap: {n_r2} findings (R3 disabled)")
 
-        # ── Early exit for inspection (STOP_AFTER_PRE_R3=true) ────────────────
-        if os.environ.get("STOP_AFTER_PRE_R3", "").lower() == "true":
-            import json as _json
-            out_path = os.environ.get("STOP_AFTER_PRE_R3_OUT", "/tmp/pre_r3_findings.json")
-            with open(out_path, "w") as _f:
-                _json.dump(accepted_findings, _f, indent=2, default=str)
-            logger.info(
-                f"[v2] STOP_AFTER_PRE_R3=true — {n_r2} findings saved to {out_path}, "
-                f"skipping R3"
-            )
-            self._v2_complete_task(
-                task_id, session_id, graph_id, session_state, all_votes,
-                accepted_findings, [], [],
-            )
-            return
-
-        if not accepted_findings:
-            logger.warning("[v2] Round 2 produced 0 accepted findings")
-            self._v2_complete_task(task_id, session_id, graph_id, session_state, all_votes, [])
-            return
-
-        # ── Round 3: Attacker Validation ──────────────────────────────────────
-        self.task_manager.update_task(
-            task_id, progress=65,
-            message=f"Round 3/3 — Attacker Validation ({n_r2} findings, {len(t2)} attackers)"
-        )
-        confirmed, borderline, discarded = self._run_attacker_round(
-            cm=cm,
-            t2_profiles=t2,
-            accepted_findings=accepted_findings,
-            contract_source=network_summary,
-        )
-        logger.info(
-            f"[v2] Round 3 complete: {len(confirmed)} confirmed, "
-            f"{len(borderline)} borderline (PoC), {len(discarded)} discarded"
-        )
-        session_state.current_round = 3
+        session_state.current_round = 2
         session_state.current_phase = "done"
         self._save_session_state(session_state)
 
-        self._v2_complete_task(task_id, session_id, graph_id, session_state, all_votes,
-                               confirmed, borderline, discarded)
+        self._v2_complete_task(
+            task_id, session_id, graph_id, session_state, all_votes,
+            accepted_findings, [], [],
+        )
 
     # Agent-id prefix → domain group (must match _get_author_group in consensus_engine)
     _AGENT_PREFIX_TO_DOMAIN: dict = {
@@ -2163,28 +2142,39 @@ class CyberSessionOrchestrator:
         text = _re.sub(r'\s+', ' ', text).strip()
         return text.lower()
 
+    @staticmethod
+    def _validate_attack_path(attack_path: str) -> bool:
+        """Return False if ATTACK_PATH lacks structured ACTOR/CALL/STATE_CHANGE/OUTCOME fields."""
+        if not attack_path or len(attack_path.strip()) < 50:
+            return False
+        return sum([
+            "ACTOR:" in attack_path,
+            "CALL:" in attack_path,
+            "STATE_CHANGE:" in attack_path,
+            "OUTCOME:" in attack_path,
+        ]) >= 3
+
+    @staticmethod
+    def _is_valid_reject(vote: dict) -> bool:
+        """REJECT valid chỉ khi COUNTER_TYPE thuộc 4 loại hợp lệ và COUNTER ≥ 20 chars."""
+        valid_types = {"PHANTOM", "ACCESS_BLOCKED", "NO_STATE_CHANGE", "NO_IMPACT"}
+        counter_type = vote.get("counter_type", "").strip().upper()
+        counter      = vote.get("counter", "").strip()
+        return counter_type in valid_types and len(counter) >= 20
+
     @classmethod
     def _dedup_pre_r2(cls, candidate_pool: dict, source_code: str) -> dict:
         """
-        Layer 1A: Drop findings whose CODE: snippet or CODE_ANCHOR is not found in source.
-        Layer 1B removed — replaced by Merger Agent (CODE_ANCHOR dedup).
+        Layer 1A: Drop findings whose CODE_ANCHOR is not found in source.
+        Layer 1B: Drop findings with unstructured ATTACK_PATH (missing ACTOR/CALL/STATE_CHANGE/OUTCOME).
         """
         fp_check = os.environ.get("R3_CODE_FP_CHECK", "true").lower() != "false"
+        ap_check = os.environ.get("ATTACK_PATH_VALIDATION", "true").lower() != "false"
         norm_source = cls._normalize_source(source_code)
 
         survivors: dict = {}
         for pid, item in candidate_pool.items():
-            ev = (item.get("evidence_snippets") or [""])[0]
-
-            # Check 1: CODE: snippet must exist in source
-            if ev.startswith("CODE:") and fp_check:
-                snippet = ev[5:].strip()
-                norm_snip = cls._normalize_evidence(snippet)
-                if norm_snip and norm_snip not in norm_source:
-                    logger.debug(f"[dedup pre-R2] drop hallucinated CODE: '{snippet[:60]}'")
-                    continue
-
-            # Check 2: CODE_ANCHOR must exist in source (applies to all evidence types)
+            # Check 1: CODE_ANCHOR must exist in source (applies to all evidence types)
             anchor = item.get("code_anchor", "")
             if anchor and fp_check:
                 norm_anchor = cls._normalize_evidence(anchor)
@@ -2192,9 +2182,19 @@ class CyberSessionOrchestrator:
                     logger.debug(f"[dedup pre-R2] drop invalid CODE_ANCHOR: '{anchor[:60]}'")
                     continue
 
+            # Check 2: ATTACK_PATH must be structured (ACTOR/CALL/STATE_CHANGE/OUTCOME)
+            if ap_check and not cls._validate_attack_path(item.get("attack_path", "")):
+                logger.debug(
+                    f"[dedup pre-R2] drop unstructured ATTACK_PATH: '{item.get('title', '')[:60]}'"
+                )
+                continue
+
             survivors[pid] = item
 
-        logger.info(f"[dedup pre-R2] Layer 1A (FP check): {len(candidate_pool)} → {len(survivors)}")
+        logger.info(
+            f"[dedup pre-R2] FP check + ATTACK_PATH validation: "
+            f"{len(candidate_pool)} → {len(survivors)}"
+        )
         return survivors
 
     @classmethod
@@ -2651,9 +2651,9 @@ class CyberSessionOrchestrator:
                     for vote in future.result():
                         pid = vote["pair_id"]
                         if pid in votes:
-                            votes[pid][profile.agent_id] = vote["vote"]
-                            if vote.get("evidence"):
-                                evidence_by_pair[pid].append(vote["evidence"][:250])
+                            votes[pid][profile.agent_id] = vote
+                            if vote.get("counter"):
+                                evidence_by_pair[pid].append(vote["counter"][:250])
                 except Exception as e:
                     logger.warning(f"[v2 R2 collect] {profile.agent_id}: {e}")
 
@@ -2666,13 +2666,14 @@ class CyberSessionOrchestrator:
             ]
             for pid in agent_voted_pairs:
                 meta = candidate_pool[pid]
+                agent_v = votes[pid].get(profile.agent_id, "?")
                 revealed.append({
                     "pair_id":       pid,
                     "contract_name": meta.get("contract_name", ""),
                     "title":         meta.get("title", ""),
                     "function_name": meta["function_name"],
                     "all_evidence":  evidence_by_pair.get(pid, []),
-                    "agent_vote":    votes[pid].get(profile.agent_id, "?"),
+                    "agent_vote":    agent_v.get("vote", "?") if isinstance(agent_v, dict) else agent_v,
                 })
             return revealed
 
@@ -2706,27 +2707,44 @@ class CyberSessionOrchestrator:
                     for upd in future.result():
                         pid = upd["pair_id"]
                         if pid in votes:
-                            votes[pid][profile.agent_id] = upd["updated_vote"]
+                            votes[pid][profile.agent_id] = upd
                             if upd.get("new_evidence"):
                                 evidence_by_pair[pid].append(upd["new_evidence"][:250])
                 except Exception as e:
                     logger.warning(f"[v2 R2u collect] {profile.agent_id}: {e}")
 
         # Score and filter
+        def _get_vote_val(v):
+            if isinstance(v, dict):
+                return v.get("vote") or v.get("updated_vote", "")
+            return v
+
+        r_min = int(os.environ.get("R2_R_MIN", "4"))
         accepted = []
         for pair_id, meta in candidate_pool.items():
             k = len(meta["submitters"])
-            r = sum(1 for v in votes.get(pair_id, {}).values() if v == "ACCEPT")
-            score = (k + r) / n_agents
-            meta["round2_score"] = score
-            meta["accept_votes"] = r
-            meta["reject_votes"] = sum(1 for v in votes.get(pair_id, {}).values() if v == "REJECT")
-            if score >= self._R2_THRESHOLD:
+            pair_votes   = votes.get(pair_id, {})
+            accept       = sum(1 for v in pair_votes.values() if _get_vote_val(v) == "ACCEPT")
+            valid_reject = sum(
+                1 for v in pair_votes.values()
+                if _get_vote_val(v) == "REJECT" and isinstance(v, dict) and self._is_valid_reject(v)
+            )
+            eligible = accept + valid_reject
+            score    = (k + accept) / (k + eligible) if (k + eligible) > 0 else 0.0
+
+            meta["round2_score"]    = score
+            meta["accept_votes"]    = accept
+            meta["valid_reject"]    = valid_reject
+            meta["reject_votes"]    = sum(1 for v in pair_votes.values() if _get_vote_val(v) == "REJECT")
+
+            if score >= self._R2_THRESHOLD and accept >= r_min:
                 accepted.append(meta)
                 logger.debug(f"[v2 R2] ACCEPTED pair_id={pair_id} score={score:.2f} "
+                             f"accept={accept} valid_reject={valid_reject} "
                              f"({meta.get('contract_name','?')}.{meta['function_name']} '{meta.get('title','')[:40]}')")
             else:
-                logger.debug(f"[v2 R2] REJECTED pair_id={pair_id} score={score:.2f}")
+                logger.debug(f"[v2 R2] REJECTED pair_id={pair_id} score={score:.2f} "
+                             f"accept={accept} valid_reject={valid_reject} (r_min={r_min})")
 
         return accepted, votes
 
