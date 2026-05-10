@@ -7,6 +7,7 @@ Thumbs.db
 # Google Cloud service account keys
 *-service-account*.json
 vertex-ai.json
+vertex-ai-1.json
 vertex-ai-2.json
 .env.local
 .env.*.local
