@@ -1427,6 +1427,13 @@ For every strict inequality (a < b) or (a > b) at a range/tick/price boundary:
   Q3: Is that exclusion correct? (Check protocol intent / NatSpec / invariants)
   If exclusion is wrong → write FINDING. CODE_ANCHOR = the comparison line.
 
+CAST CROSS-FUNCTION SCAN — after finding any cast-related vulnerability:
+  For each cast operator that produced a finding (e.g., int128(), uint128(), int24(), uint96()):
+  1. Scan ALL functions in the contract for the same cast operator — regardless of variable name
+  2. Apply Q1→Q3 to each instance found
+  3. If YES → write a separate FINDING per function (COVERAGE RULE)
+  Do NOT stop after the first function. Scan ALL functions equally — no exceptions.
+
 STATE UPDATE ORDERING — check EVERY function that modifies 2+ state variables:
 
 INTRA-FUNCTION (wrong update order within one function):
@@ -1436,11 +1443,58 @@ INTRA-FUNCTION (wrong update order within one function):
   Common pattern: secondsPerLiquidity / rewardPerShare must snapshot liquidity BEFORE it changes.
   EVIDENCE: SEQ: computeAccumulator() → updateLiquidity() via liquidityGlobal | ISSUE: accumulator uses post-change liquidity
 
+FUNCTION ATTRIBUTION FOR ORDERING BUGS:
+  APPLIES ONLY when the bug is wrong CALL ORDER (SEQ: evidence type) — NOT when the bug
+  is wrong code (wrong variable, wrong operator, wrong logic) inside a called function.
+
+  For ordering bugs (SEQ: evidence):
+    FUNCTION = the outer function that CONTROLS the execution sequence.
+    CONTRACT = the contract containing that outer function.
+    Test: "If I fix this bug, which function's source code changes?" → that is the correct FUNCTION.
+    Example: if outer() calls updateAcc(stateVar) AFTER changing stateVar,
+    write FUNCTION: outer, CONTRACT: OuterContract.
+
+  For wrong-code bugs (CODE: or INV: evidence) inside a library/helper:
+    FUNCTION = the library/helper function containing the wrong line.
+    CONTRACT = the contract/library that DEFINES that function (not the caller's contract).
+    Example: if Library.helper() contains a wrong variable assignment,
+    write FUNCTION: helper, CONTRACT: Library — even if the caller is a different contract.
+
 CROSS-CALL SEQUENCING (user controls call order):
   Identify pairs: WRITER (updates position.feeGrowthInside / rewardDebt / sharePrice) and
                   READER (reads that field to compute user's payout: collect / claimReward / withdraw).
   Ask: if user calls READER before WRITER has run → does READER use stale data → user overpaid?
   EVIDENCE: SEQ: collect() → burn() via position.feeGrowthInside | ISSUE: collect reads stale value if called before burn
+
+STALENESS DIRECTION ANALYSIS — mandatory before writing OUTCOME for any cross-call finding:
+  Trace arithmetic direction BEFORE writing OUTCOME:
+  Case A: reward = global_accumulator - position.accumulator
+    → stale position.accumulator is LOWER → delta LARGER → user gets MORE than owed
+    → OUTCOME: excess claimed (overpayment) — do NOT write "fee loss"
+  Case B: reward = position.accumulator - baseline
+    → stale position.accumulator is HIGHER → delta SMALLER → user gets LESS
+    → OUTCOME: reward diluted (underpayment)
+  Always specify direction explicitly in OUTCOME.
+
+CONDITIONAL SYNC SKIP — additional staleness pattern:
+  Signal: function has branch `if (condition) {{ sync_state(); update_position_snapshot(); }}`
+  When branch is NOT taken → position snapshot is NOT updated → later reads return stale data.
+  Check: what state remains unsynced when the skip-sync branch executes?
+  EVIDENCE: MISSING: sync call AT: FunctionName() — for the branch that skips the sync.
+
+PARAMETER PROPAGATION IN WRAPPER CONTRACTS — proactive check, independent of other findings:
+  If any contract in scope acts as a WRAPPER/MANAGER delegating to an inner contract:
+  Step 1: In each external/public function, identify all address-type parameters.
+  Step 2: Trace each address parameter into every inner contract call that receives it.
+  Step 3: Read the inner function source — does it distribute assets for:
+    (A) only the caller's own position/account → safe
+    (B) ALL accumulated assets in a shared range / bucket / tranche → potential bug
+  Step 4 (only if B): Can any caller supply an arbitrary address?
+    If yes → attacker redirects other users' assets → HIGH severity access control bug.
+  EVIDENCE: CODE: <inner call line passing the address parameter>
+  ATTACK_PATH ACTOR: any caller / CALL: wrapper.fn(addr) → inner.fn(addr) /
+    STATE_CHANGE: inner distributes shared assets to attacker-controlled addr /
+    OUTCOME: attacker claims assets belonging to other users
 
 OUTPUT FORMAT — use ONLY the FINDING format below. No CLAIM, VALIDATE, CHALLENGE, CONFIRM, or DISMISS.
 
@@ -1519,6 +1573,24 @@ MULTI-ANGLE EXHAUSTION — for every function where you found a finding, force 2
       which other functions also read X? Can this function put X in a state that breaks
       those functions' invariants for OTHER users?
   Each distinct vulnerability class in the same function = separate FINDING.
+
+FINDING SPLITTING RULE — passive bug vs active exploit:
+  If a state variable X has BOTH:
+    (A) PASSIVE: X computed incorrectly by code logic regardless of any attacker
+        (ordering error, missing update, wrong formula)
+    (B) ACTIVE: attacker profits by timing transactions to exploit the incorrect X
+        (JIT attack, sandwich, front-run reward distribution)
+  → Write TWO separate FINDINGS:
+    Finding A — Implementation Bug:
+      FUNCTION: function where ordering/calculation error occurs (where fix changes code)
+      EVIDENCE: SEQ: or CODE: proving the logic error
+      ATTACK_PATH ACTOR: any user (no adversarial timing required)
+    Finding B — Economic Exploit:
+      FUNCTION: function attacker calls to extract profit
+      EVIDENCE: DESIGN: describing the mechanism abused
+      ATTACK_PATH ACTOR: attacker (requires deliberate timing)
+  Reason: different fix locations, different audit categories, different impact scope.
+  Pattern: any time-weighted accumulator with both an update-ordering bug and a JIT attack surface.
 
 Write ALL findings you can identify. Do not stop at the first one.
 """

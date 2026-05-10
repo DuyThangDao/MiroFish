@@ -255,9 +255,10 @@ R1 tìm bug trong đúng function nhưng **sai root cause**.
 - R1 tìm: "Reentrancy in burn()". **Hoàn toàn sai hướng.**
 
 **H-17 — rangeFeeGrowth() nearestTick:**
-- GT: `nearestTick` không phải reference point đúng — có thể point đến uninitialized tick
-- R1 tìm: arithmetic revert do thiếu `unchecked` (đây là bug khác, đã match H-09/H-14)
-- **Bỏ sót:** logic error về tick reference selection.
+- GT: `nearestTick` (nearest initialized tick below current price) được dùng làm reference để phân biệt Case 1 (`tick <= nearestTick` → feeGrowthOutside toward MIN_TICK) vs Case 2 (`tick > nearestTick` → feeGrowthOutside toward MAX_TICK). Vấn đề: `nearestTick` khác với `pool.tick` (current price tick) — khi tick được check nằm giữa `nearestTick` và `pool.tick`, cả hai conditions đều evaluate wrong → feeGrowthOutside direction sai → subtraction underflow.
+- R1 tìm (run RC fixes 2026-05-08): arithmetic revert DoS (match H-09/H-14). MULTI-ANGLE không trigger finding mới vì agent đã có DoS finding trong cùng function — khi check "DIFFERENT CLASS", agent không có template nào cho "wrong tick reference in fee growth direction logic."
+- **Tại sao RC fixes không giúp được:** H-17 yêu cầu hiểu sâu Uniswap V3 fee growth protocol semantics — cụ thể là quy ước `feeGrowthOutside` được initialize dựa trên tick position relative to pool tick TẠI THỜI ĐIỂM KHỞI TẠO, và cách tính `feeGrowthBelow/feeGrowthAbove` phụ thuộc vào điều đó. Không có instruction chung nào có thể substitute cho domain knowledge này.
+- **Classification: System limitation** — Đây là giới hạn của current LLM knowledge về Uniswap V3 tick model chi tiết. Fix: cần inject protocol-specific knowledge vào context (e.g., `dep_block` từ STEP 1.3 chứa fee growth invariant documentation), hoặc cần thêm expert persona có Uniswap V3 specialization. Không thể fix chỉ bằng thay đổi prompt instructions.
 
 ---
 

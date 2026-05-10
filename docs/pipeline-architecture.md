@@ -1,7 +1,7 @@
 # Smart Contract Audit Pipeline — Architecture (v2)
 
 > Tài liệu mô tả kiến trúc pipeline hiện tại (v2).
-> Cập nhật lần cuối: 2026-05-07
+> Cập nhật lần cuối: 2026-05-08
 
 ---
 
@@ -71,13 +71,65 @@ trúc. KG cũng lưu invariants và protocol intent để làm reference khi aud
 
 ---
 
-### STEP 1.1–1.5: Intent + Invariant Extraction
-**Files:** `contract_intent_extractor.py`, `contract_invariant_extractor.py`
+### STEP 1.1: Protocol Intent Extraction
+**File:** `scripts/run_contract_audit.py` (~line 332), `app/services/contract_intent_extractor.py`
+**Model:** BOOST LLM (`BOOST_MODEL_NAME`) — model nặng hơn primary để reasoning chính xác hơn.
 
-- **Intent:** Parse NatSpec comments → danh sách protocol intent statements
-- **Invariants:** Trích xuất mathematical/state invariants mà protocol phải duy trì
+Hai-layer approach:
+- **Layer 1 (deterministic):** Regex scan NatSpec `@notice` / `@dev` comments — không cần LLM.
+- **Layer 2 (LLM):** Infer intent từ function signatures + `require()` messages + contest README.
+  Prompt chỉ gửi metadata (NatSpec + signatures), không gửi raw source (~55K chars) để tránh truncation.
 
-**Output:** Bổ sung vào `contract_summary` được inject vào R1 prompt.
+Output là danh sách **protocol MUST statements** theo 5 loại: `ORDERING`, `BOUNDARY`, `ACCOUNTING`, `STATE`, `EFFECT`.
+
+**Output file:** `intent.json` trong output dir.
+**Fallback:** Nếu BOOST lỗi → bước này bị skip, `contract_summary` không có intent section. R1 agents vẫn chạy được nhưng thiếu context về design intent.
+
+---
+
+### STEP 1.3: Data-flow Dependency Graph
+**File:** `scripts/run_contract_audit.py` (~line 345), `app/services/contract_dep_graph.py`
+**Model:** Không dùng LLM — Slither static analysis.
+
+Chạy Slither lần 2 (chi tiết hơn STEP 0) để xây dựng **data-flow dependency graph**: state variable nào được đọc/ghi bởi function nào, caller/callee relationships.
+
+**Output:** `dep_graph.json` + `dep_graph_text` (text summary inject vào R1 prompt).
+**Fallback:** Nếu Slither fail → dep graph bị skip, R1 agents thiếu data-flow context.
+
+---
+
+### STEP 1.5: Protocol Invariant Extraction
+**File:** `scripts/run_contract_audit.py` (~line 376), `app/services/contract_invariant_extractor.py`
+**Model:** BOOST LLM (`BOOST_MODEL_NAME`).
+
+Hai-layer approach:
+- **Layer 1 (structural):** Deterministic regex scan — ví dụ: tìm function ghi vào `mapping[addrParam]` mà không có `require(msg.sender == addrParam)`.
+- **Layer 2 (LLM):** "Missing enforcement framing" — thay vì hỏi "contract đang enforce gì", hỏi "protocol MUỐN maintain invariant nào nhưng code KHÔNG enforce". Approach này hiệu quả hơn vì trực tiếp target lỗ hổng.
+
+**Output file:** `invariants.json`. Inject vào `contract_summary` cùng với intent → R1 prompt.
+**Fallback:** Nếu BOOST lỗi → chỉ có structural invariants (Layer 1), không có LLM-inferred invariants.
+
+---
+
+**Tóm tắt STEP 1.1 → 1.5 → R1:**
+
+```
+NatSpec + signatures + README
+    │
+    ├─[STEP 1.1 — BOOST]──→ intent_statements (ORDERING/BOUNDARY/ACCOUNTING/STATE/EFFECT)
+    ├─[STEP 1.3 — Slither]─→ dep_graph_text (data-flow, caller/callee)
+    └─[STEP 1.5 — BOOST]──→ invariants (structural + LLM-inferred missing enforcement)
+                                    │
+                          ┌─────────▼──────────────┐
+                          │  contract_summary        │
+                          │  = KG summary            │
+                          │  + intent_statements     │
+                          │  + dep_graph_text        │
+                          │  + invariants            │
+                          └─────────┬──────────────┘
+                                    │
+                          inject vào R1 prompt của 19 agents
+```
 
 ---
 
@@ -357,7 +409,12 @@ Match findings với Ground Truth (H-bug list) theo:
 | `LLM_MAX_WORKERS` | `1` | Concurrency cho R1 + R2 agent calls |
 | `LLM_DEDUP_WORKERS` | `2` | Concurrency cho LLM anchor dedup |
 | `STOP_AFTER_R1` | `false` | Dừng sau R1+dedup, dump findings ra file |
-| `BOOST_MODEL_NAME` | — | Model nặng hơn cho KG build / invariant extraction |
+| `BOOST_MODEL_NAME` | — | Model nặng hơn cho STEP 1.1 intent + STEP 1.5 invariant extraction |
+| `BOOST_BASE_URL` | — | Vertex AI endpoint cho BOOST model (có thể khác project với LLM primary) |
+| `LLM_VERTEX_AI_KEY_FILE` | — | Service account JSON cho LLM primary pool (cũng dùng cho BOOST nếu không set BOOST_API_KEY) |
+| `LLM2_VERTEX_AI_KEY_FILE` | — | Service account JSON cho LLM secondary pool (load-balance với primary) |
+| `LLM2_BASE_URL` | — | Vertex AI endpoint cho account thứ 2 |
+| `LLM2_GLOBAL_RPM_LIMIT` | — | RPM limit cho account thứ 2 |
 
 ---
 
