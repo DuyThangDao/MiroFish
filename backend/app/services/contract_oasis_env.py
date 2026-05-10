@@ -2120,3 +2120,31 @@ def parse_round3_update_verdict_from_text(
         "updated_verdict":  verdict_raw,
         "new_finding":      new_finding,
     }
+
+
+def build_accounting_verifier_prompt(fn_contexts: str) -> str:
+    return (
+        "=== ACCOUNTING INVARIANT VERIFICATION ===\n"
+        "You are a specialized accounting invariant checker.\n\n"
+        "Your ONLY task: for each function below, answer:\n"
+        "  1. Does this function transfer tokens or ETH OUTWARD (to an external address)?\n"
+        "  2. If YES: is there a storage variable that tracks how much the contract owes\n"
+        "     (balance, unclaimed, rewardsUnclaimed, shares, debt, etc.)?\n"
+        "  3. If YES to both: is that variable DECREMENTED after the transfer?\n\n"
+        "If a function transfers tokens outward WITHOUT decrementing a corresponding\n"
+        "internal accounting variable → write a FINDING.\n\n"
+        "FINDING format:\n"
+        "  TITLE: Missing accounting update in <function_name>\n"
+        "  FUNCTION: <function_name>\n"
+        "  CONTRACT: <contract_name>\n"
+        "  SEVERITY: HIGH\n"
+        "  EVIDENCE: MISSING: <variable> -= amount; AT: <function_name>()\n"
+        "  ATTACK_PATH:\n"
+        "    ACTOR: any authorized caller\n"
+        "    CALL: <function_name>() repeatedly\n"
+        "    STATE_CHANGE: <variable> never decremented\n"
+        "    OUTCOME: caller drains contract by calling repeatedly\n\n"
+        "Only write FINDING if you are certain. If uncertain, write NO_FINDING with reason.\n\n"
+        "=== FUNCTIONS TO CHECK ===\n"
+        f"{fn_contexts}"
+    )

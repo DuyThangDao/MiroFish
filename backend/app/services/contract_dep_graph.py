@@ -528,3 +528,101 @@ def pick_critical_functions_from_summary(contract_summary: str, top_n: int = 6) 
     # Sort by callee count descending, take top_n
     ranked = sorted(callee_count, key=lambda f: callee_count[f], reverse=True)
     return ranked[:top_n]
+
+
+# ── Accounting Invariant Micro-Pass helpers ───────────────────────────────────
+
+_OUTGOING_TRANSFER_PATTERNS = [
+    re.compile(r'\b_transfer\s*\('),
+    re.compile(r'\.transfer\s*\('),
+    re.compile(r'\.safeTransfer\s*\('),
+    re.compile(r'\.safeTransferFrom\s*\('),
+    re.compile(r'\.transferFrom\s*\('),
+    re.compile(r'\bwithdraw\s*\('),
+]
+
+_ACCOUNTING_UPDATE_PATTERNS = [
+    re.compile(r'\w+\s*-=\s*\w+'),
+    re.compile(r'\w+\s*=\s*\w+\s*-\s*\w+'),
+    re.compile(r'\bdelete\b\s+\w+'),
+    re.compile(r'\w+\[.+\]\s*-='),
+]
+
+_FN_HEADER = re.compile(
+    r'\bfunction\s+(\w+)\s*\(',
+    re.MULTILINE,
+)
+
+_CONTRACT_HEADER = re.compile(
+    r'\bcontract\s+(\w+)\b',
+    re.MULTILINE,
+)
+
+
+def _extract_function_body(source: str, start: int) -> str:
+    """Return source text of the function starting at `start` (the opening brace)."""
+    depth = 0
+    i = start
+    body_start = source.find('{', i)
+    if body_start == -1:
+        return ""
+    i = body_start
+    while i < len(source):
+        if source[i] == '{':
+            depth += 1
+        elif source[i] == '}':
+            depth -= 1
+            if depth == 0:
+                return source[body_start : i + 1]
+        i += 1
+    return source[body_start:]
+
+
+def find_transfer_without_accounting(source: str) -> List[Dict]:
+    """
+    Static filter: find functions that have outgoing transfer calls but no
+    accounting decrement (variable -= amount). Returns list of dicts with
+    function_name, contract_name, body.
+    """
+    results: List[Dict] = []
+    current_contract = "Unknown"
+
+    for contract_match in _CONTRACT_HEADER.finditer(source):
+        current_contract = contract_match.group(1)
+
+    # Scan every function definition
+    for fn_match in _FN_HEADER.finditer(source):
+        fn_name = fn_match.group(1)
+        body = _extract_function_body(source, fn_match.start())
+        if not body:
+            continue
+
+        has_transfer = any(p.search(body) for p in _OUTGOING_TRANSFER_PATTERNS)
+        if not has_transfer:
+            continue
+
+        has_accounting = any(p.search(body) for p in _ACCOUNTING_UPDATE_PATTERNS)
+        if not has_accounting:
+            # Find closest contract for this function
+            contract_name = current_contract
+            for cm in _CONTRACT_HEADER.finditer(source[: fn_match.start()]):
+                contract_name = cm.group(1)
+            results.append(
+                {
+                    "function_name": fn_name,
+                    "contract_name": contract_name,
+                    "body": body[:2000],  # cap to avoid huge contexts
+                }
+            )
+
+    return results
+
+
+def build_accounting_check_context(items: List[Dict]) -> str:
+    """Format candidate functions into a context block for the accounting verifier prompt."""
+    sections = []
+    for item in items:
+        sections.append(
+            f"=== FUNCTION: {item['contract_name']}.{item['function_name']} ===\n{item['body']}"
+        )
+    return "\n\n".join(sections)

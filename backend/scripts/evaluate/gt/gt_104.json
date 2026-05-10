@@ -1,0 +1,65 @@
+[
+  {
+    "h_id": "H-01",
+    "title": "ERC20 transferFrom return values not checked",
+    "description": "The mintToken function calls transferFrom() to collect mint fees but does not check the boolean return value. Some tokens like EURS and BAT do not revert on failed transfers but return false instead. This allows users to mint NFTs for free if a non-reverting ERC20 is used as the payableToken, since the failed transfer is silently ignored.",
+    "function_name": "mintToken",
+    "contract_name": "CoreCollection"
+  },
+  {
+    "h_id": "H-02",
+    "title": "Splitter: Anyone can call incrementWindow to steal the tokens in the contract",
+    "description": "The incrementWindow function only checks that msg.sender implements the IRoyaltyVault interface and that getSplitter() returns the Splitter address. An attacker can deploy a fake RoyaltyVault contract satisfying these checks, call incrementWindow to inflate balanceForWindow beyond the actual contract balance, and then claim tokens via claim or claimForAllWindows to drain the contract.",
+    "function_name": "incrementWindow",
+    "contract_name": "Splitter"
+  },
+  {
+    "h_id": "H-03",
+    "title": "DoS: claimForAllWindows() May Be Made Unusable By An Attacker",
+    "description": "The claimForAllWindows function iterates over all windows from 0 to currentWindow. An attacker can exploit the weak access control in incrementWindow (using a fake RoyaltyVault) to inflate currentWindow to a very large value, causing claimForAllWindows to exceed the block gas limit and become permanently unusable.",
+    "function_name": "claimForAllWindows",
+    "contract_name": "Splitter"
+  },
+  {
+    "h_id": "H-04",
+    "title": "CoreCollection can be reinitialized",
+    "description": "The initialize function in CoreCollection sets core variables including payableToken but does not check whether the contract has already been initialized. Since initialize is onlyOwner, an owner can reinitialize the contract, resetting payableToken and other critical variables. This allows the owner to redirect funds or break contract state, impacting all users.",
+    "function_name": "initialize",
+    "contract_name": "CoreCollection"
+  },
+  {
+    "h_id": "H-05",
+    "title": "Centralisation Risk: Owner Of RoyaltyVault Can Take All Funds",
+    "description": "The setPlatformFee function allows the RoyaltyVault owner to set platformFee to any arbitrary value including 100% (10000). This lets the owner redirect the entire contract balance and all future balances to the platformFeeRecipient (which they control), bypassing the splitter entirely and stealing all funds from royalty split recipients.",
+    "function_name": "setPlatformFee",
+    "contract_name": "RoyaltyVault"
+  },
+  {
+    "h_id": "H-06",
+    "title": "Storage collision between proxy and implementation due to lack of EIP-1967",
+    "description": "CoreProxy inherits from Ownable, placing the _owner variable at storage slot 0. The implementation contract shares the same storage layout through delegatecall. If the implementation also uses slot 0 for a different variable, the _owner variable in the proxy will be silently overwritten on any call that writes to slot 0 in the implementation, potentially allowing privilege escalation or bricking the contract.",
+    "function_name": "constructor",
+    "contract_name": "CoreProxy"
+  },
+  {
+    "h_id": "H-07",
+    "title": "Duplicate NFTs Can Be Minted if payableToken Has a Callback Attached to it",
+    "description": "The mintToken function collects the payableToken fee before minting the NFT. If payableToken has a callback (e.g., ERC777 tokensToSend hook), an attacker can reenter mintToken before totalSupply is updated. This bypasses the maxSupply check and causes the tokenId calculation to wrap around, allowing duplicate NFTs to be minted.",
+    "function_name": "mintToken",
+    "contract_name": "CoreCollection"
+  },
+  {
+    "h_id": "H-08",
+    "title": "Funds cannot be withdrawn in CoreCollection.withdraw",
+    "description": "The withdraw function calls payableToken.transferFrom(address(this), msg.sender, amount) instead of payableToken.transfer(msg.sender, amount). Since CoreCollection has not approved itself to spend its own tokens, the transferFrom call will revert because allowance[CoreCollection][CoreCollection] == 0, permanently locking all collected fees in the contract.",
+    "function_name": "withdraw",
+    "contract_name": "CoreCollection"
+  },
+  {
+    "h_id": "H-09",
+    "title": "ERC20 tokens with no return value will fail to transfer",
+    "description": "The sendToSplitter function calls transfer() on the splitAsset ERC20 token. Many widely-used tokens such as USDT do not return a boolean from transfer(). When Solidity calls such a token, it checks that RETURNDATASIZE matches the ERC20 interface and reverts if it does not, causing sendToSplitter to always revert for non-compliant tokens even when the transfer would succeed.",
+    "function_name": "sendToSplitter",
+    "contract_name": "RoyaltyVault"
+  }
+]

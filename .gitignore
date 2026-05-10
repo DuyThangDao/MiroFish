@@ -64,3 +64,5 @@ backend/results/
 
 # Docker 数据
 data/
+
+/benchmark

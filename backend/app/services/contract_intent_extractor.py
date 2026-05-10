@@ -277,7 +277,8 @@ class ContractIntentExtractor:
                 temperature=0.2,
                 max_tokens=2048,
             )
-            intent_statements = _robust_parse_json(raw).get("intent_statements", [])[:10]
+            raw_stmts = _robust_parse_json(raw).get("intent_statements", [])
+            intent_statements = [s for s in raw_stmts if isinstance(s, dict)][:10]
             logger.info(f"Intent extraction attempt 1 OK: {len(intent_statements)} statements")
         except Exception as e:
             logger.warning(f"Intent extraction attempt 1 failed: {e}")
@@ -301,7 +302,8 @@ class ContractIntentExtractor:
                         temperature=0.2,
                         max_tokens=1024,
                     )
-                    intent_statements = _robust_parse_json(raw).get("intent_statements", [])[:5]
+                    raw_stmts2 = _robust_parse_json(raw).get("intent_statements", [])
+                    intent_statements = [s for s in raw_stmts2 if isinstance(s, dict)][:5]
                     logger.info(f"Intent extraction attempt 2 (minimal) OK: {len(intent_statements)} statements")
                 except Exception as e2:
                     logger.warning(f"Intent extraction attempt 2 failed: {e2}")

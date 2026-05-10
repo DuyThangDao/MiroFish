@@ -1941,6 +1941,20 @@ class CyberSessionOrchestrator:
         n_r1 = len(candidate_pool)
         logger.info(f"[v2] After anchor dedup: {n_r1} canonical findings")
 
+        # ── Accounting Invariant Micro-Pass ───────────────────────────────────
+        if os.environ.get("ENABLE_ACCOUNTING_MICROPASS", "true").lower() == "true":
+            micro_findings = self._run_accounting_micropass(network_summary)
+            for f in micro_findings:
+                anchor = f.get("code_anchor", "")
+                if anchor and not any(
+                    cf.get("code_anchor") == anchor for cf in candidate_pool.values()
+                ):
+                    pair_id = f"micro_{uuid.uuid4().hex[:8]}"
+                    f["pair_id"] = pair_id
+                    f.setdefault("submitters", ["accounting_micropass"])
+                    candidate_pool[pair_id] = f
+                    logger.info(f"  [micro] Added: {f.get('title', '')}")
+
         # ── Early exit after anchor dedup (STOP_AFTER_DEDUP=true) ───────────
         if os.environ.get("STOP_AFTER_DEDUP", "").lower() == "true":
             import json as _json
@@ -2878,3 +2892,63 @@ class CyberSessionOrchestrator:
                 discarded.append(finding)
 
         return confirmed, borderline, discarded
+
+    # ── Accounting Invariant Micro-Pass ───────────────────────────────────────
+
+    def _run_accounting_micropass(self, source: str) -> List[Dict]:
+        from app.services.contract_dep_graph import (
+            find_transfer_without_accounting,
+            build_accounting_check_context,
+        )
+        from app.services.contract_oasis_env import build_accounting_verifier_prompt
+
+        candidates = find_transfer_without_accounting(source)
+        if not candidates:
+            logger.info("[micro] No transfer-without-accounting candidates found")
+            return []
+        logger.info(f"[micro] {len(candidates)} candidate functions for accounting check")
+        prompt = build_accounting_verifier_prompt(build_accounting_check_context(candidates))
+        raw = self._simple_llm_call(prompt, max_tokens=4096)
+        return self._parse_accounting_findings(raw)
+
+    def _simple_llm_call(self, prompt: str, max_tokens: int = 4096) -> str:
+        """Single LLM call using the orchestrator's existing LLM client."""
+        try:
+            return self.llm.chat(
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0,
+                max_tokens=max_tokens,
+            )
+        except Exception as e:
+            logger.warning(f"[micro] LLM call failed: {e}")
+            return ""
+
+    def _parse_accounting_findings(self, raw: str) -> List[Dict]:
+        """Parse FINDING blocks from accounting verifier output."""
+        findings = []
+        blocks = re.split(r'\n(?=FINDING\b)', raw)
+        for block in blocks:
+            if not block.strip().startswith("FINDING"):
+                continue
+            def _field(name: str) -> str:
+                m = re.search(rf'^  {name}:\s*(.+)$', block, re.MULTILINE)
+                return m.group(1).strip() if m else ""
+            title = _field("TITLE")
+            fn = _field("FUNCTION")
+            contract = _field("CONTRACT")
+            evidence = _field("EVIDENCE")
+            if not (title and fn):
+                continue
+            attack_m = re.search(r'ATTACK_PATH:(.*?)(?=\n\n|\Z)', block, re.DOTALL)
+            attack_text = attack_m.group(1).strip() if attack_m else ""
+            findings.append({
+                "title": title,
+                "function_name": fn,
+                "contract_name": contract,
+                "description": f"{title}. {evidence}",
+                "evidence_snippets": [evidence] if evidence else [],
+                "attack_path": attack_text,
+                "code_anchor": evidence,
+                "severity": "HIGH",
+            })
+        return findings
