@@ -118,6 +118,10 @@ class ContractDepGraph:
                 _os.environ["PATH"] = entry + _os.pathsep + current_path
                 current_path = _os.environ["PATH"]
 
+        # Skip TypeScript type-checking in projects that use hardhat.config.ts
+        # — deploy scripts often have type errors that don't affect Solidity compilation.
+        _os.environ.setdefault("TS_NODE_TRANSPILE_ONLY", "true")
+
     @staticmethod
     def _set_solc_version(version: str) -> bool:
         """Switch solc via solc-select. Returns True on success."""

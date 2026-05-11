@@ -404,9 +404,9 @@ def _classify_files(
                 if cname in extra_scope_contracts:
                     reachable.add(key)
 
-        # Size cap: if full union > 200KB, use selective secondary roots
+        # Size cap: if full union > 300KB, use selective secondary roots
         total_chars = sum(len(sources.get(k, "")) for k in reachable)
-        if total_chars > 200_000:
+        if total_chars > 300_000:
             primary_key = manifest.get("primary_key")
             if primary_key and primary_key in graph:
                 primary_reachable = _get_reachable_set(primary_key, graph)
@@ -429,7 +429,7 @@ def _classify_files(
                     new_contracts = (_get_reachable_set(root_key, graph) if root_key in graph else {root_key}) - primary_reachable
                     new_contracts.add(root_key)
                     added_chars = sum(len(sources.get(k, "")) for k in new_contracts - selective)
-                    if running_chars + added_chars <= 200_000:
+                    if running_chars + added_chars <= 300_000:
                         selective |= new_contracts
                         running_chars += added_chars
                 reachable = selective

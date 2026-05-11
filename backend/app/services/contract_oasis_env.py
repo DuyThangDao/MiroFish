@@ -1411,6 +1411,41 @@ Analyze every function. Do not limit your analysis to only public/external funct
 COVERAGE RULE — if a vulnerability pattern appears in MULTIPLE functions, write one FINDING per function.
 Do NOT collapse "function A and B" into a single FINDING. A missed function = a missed bug.
 
+PROTOCOL INVARIANT ANALYSIS — mandatory before writing any FINDING:
+
+STEP 1 — LIST INVARIANTS:
+  Read the full contract source and list 3–6 PROTOCOL-SPECIFIC invariants.
+  Format: INV-1: <invariant statement>, INV-2: ..., ...
+
+  Invariants MUST be strictly derived from the code, require() statements, or NatSpec.
+  Do NOT invent business rules or assume features not explicitly present in the code.
+  (Wrong example: "contract must have a pause() function" if no pause mechanism exists.)
+
+  Invariants MUST be protocol-specific — NOT acceptable:
+    ✗ Generic: "no reentrancy", "no overflow", "onlyOwner"
+    ✓ Specific accounting: "after borrow(), global_debts must increase by exactly amount + fee"
+    ✓ Specific state: "withdrawalDelay[id] may only be set when msg.sender == owner(id)"
+    ✓ Specific flow: "distribute() must only decrease mochiShare, never reset treasuryShare"
+    ✓ Specific math: "shares * pricePerShare / 1e18 must equal depositor's underlying assets"
+
+  How to find good invariants:
+  - Read NatSpec @notice/@dev — they often describe conditions that must hold
+  - Read require() messages — each require is an invariant candidate
+  - Look for state variables named "total", "global", "cumulative" — they usually must equal sum of sub-values
+  - Look for functions named "distribute", "reward", "migrate", "sync" — they often have ordering invariants
+
+STEP 2 — FIND VIOLATIONS:
+  For each invariant listed above, ask:
+  Q1: Is there any execution path (sequence of function calls) that can make this invariant false?
+  Q2: If yes — can an attacker control that path? Or does it only occur due to a logic bug?
+  Q3: If violated, what is the measurable impact?
+
+  If Q1 = YES → write a FINDING with:
+    EVIDENCE: INV: <invariant statement> | VIOLATED_AT: <fn()> | COUNTEREXAMPLE: <condition that causes violation>
+
+  After listing invariants, IMMEDIATELY proceed to writing FINDING blocks.
+  No summary or commentary needed — go straight to findings.
+
 CAST & COMPARISON PRECISION — before writing any arithmetic finding, answer these questions:
 
 For every explicit narrowing cast (uint256→uint128, uint128→int128, uint256→int24, etc.):

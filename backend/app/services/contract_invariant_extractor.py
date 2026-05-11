@@ -337,7 +337,12 @@ def _build_invariant_section(invariants: List[Dict[str, Any]]) -> str:
     templates  = [i for i in invariants if i.get("source") == "template"]
     llm_based  = [i for i in invariants if i.get("source") not in ("structural", "template")]
 
-    lines = ["MISSING ENFORCEMENT TARGETS (verify each — these checks are ABSENT from code):"]
+    lines = [
+        "=== PROTOCOL INVARIANTS (pre-extracted by System Architect) ===",
+        "Use these as high-level starting points. In your PROTOCOL INVARIANT ANALYSIS step,",
+        "supplement with function-level invariants specific to this contract before finding violations.",
+        "--- MISSING ENFORCEMENT TARGETS (verify each — these checks are ABSENT from code):",
+    ]
 
     if structural:
         lines.append("  [STRUCTURAL — deterministic scan]")
