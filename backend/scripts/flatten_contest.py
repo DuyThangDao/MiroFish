@@ -349,9 +349,21 @@ def _is_infra_file(key: str) -> bool:
     return any(stem.endswith(s) for s in infra_suffixes)
 
 
+def _is_mock_or_test(key: str) -> bool:
+    """True if file is a mock, test, fixture, or deploy script — not auditable logic."""
+    skip_dirs = {"test", "tests", "mock", "mocks", "scripts", "deploy",
+                 "deployment", "deployments", "fixture", "fixtures"}
+    for part in Path(key).parts:
+        if part.lower() in skip_dirs:
+            return True
+    stem = Path(key).stem.lower()
+    return stem.startswith(("mock", "test", "fixture", "deploy"))
+
+
 def _classify_files(
     order: List[str],
     graph: Dict[str, List[str]],
+    sources: Dict[str, str],
     manifest: dict,
     contest_dir: str,
     extra_scope_contracts: Optional[Set[str]] = None,
@@ -372,12 +384,19 @@ def _classify_files(
     """
     base = Path(contest_dir)
 
-    # Tier 1: forward import graph — files transitively imported by primary
-    primary_key = manifest.get("primary_key")
-    if primary_key and primary_key in graph:
-        reachable: Set[str] = _get_reachable_set(primary_key, graph)
+    # Tier 1: multi-root BFS — union of import trees from all implementation contracts
+    all_impl_keys = [
+        k for k in order
+        if not _is_interface_only(sources.get(k, ""))
+        and not _is_mock_or_test(k)
+    ]
+    if all_impl_keys:
+        reachable: Set[str] = set()
+        for root_key in all_impl_keys:
+            if root_key in graph:
+                reachable |= _get_reachable_set(root_key, graph)
 
-        # Extend with Slither-identified callers (contracts that call primary at runtime)
+        # Extend with Slither-identified callers
         if extra_scope_contracts:
             cnames: Dict[str, str] = manifest.get("contract_names_map", {})
             for key in order:
@@ -385,9 +404,43 @@ def _classify_files(
                 if cname in extra_scope_contracts:
                     reachable.add(key)
 
+        # Size cap: if full union > 200KB, use selective secondary roots
+        total_chars = sum(len(sources.get(k, "")) for k in reachable)
+        if total_chars > 200_000:
+            primary_key = manifest.get("primary_key")
+            if primary_key and primary_key in graph:
+                primary_reachable = _get_reachable_set(primary_key, graph)
+                # Extend with Slither callers into primary set
+                if extra_scope_contracts:
+                    cnames = manifest.get("contract_names_map", {})
+                    for key in order:
+                        cname = cnames.get(key, Path(key).stem)
+                        if cname in extra_scope_contracts:
+                            primary_reachable.add(key)
+                # Find impl contracts not reachable from primary
+                unreached_impls = [
+                    k for k in all_impl_keys
+                    if k not in primary_reachable
+                ]
+                # Greedily add unreached impls that fit within cap
+                selective = set(primary_reachable)
+                running_chars = sum(len(sources.get(k, "")) for k in selective)
+                for root_key in unreached_impls:
+                    new_contracts = (_get_reachable_set(root_key, graph) if root_key in graph else {root_key}) - primary_reachable
+                    new_contracts.add(root_key)
+                    added_chars = sum(len(sources.get(k, "")) for k in new_contracts - selective)
+                    if running_chars + added_chars <= 200_000:
+                        selective |= new_contracts
+                        running_chars += added_chars
+                reachable = selective
+                method = "multi_root_bfs_selective_slither" if extra_scope_contracts else "multi_root_bfs_selective"
+            else:
+                method = "multi_root_bfs_capped"
+        else:
+            method = "multi_root_bfs_slither" if extra_scope_contracts else "multi_root_bfs"
+
         out_scope = [k for k in order if k not in reachable]
         if out_scope:
-            method = "import_graph_slither" if extra_scope_contracts else "import_graph"
             return {
                 "in_scope":  [k for k in order if k in reachable],
                 "out_scope": out_scope,
@@ -527,7 +580,7 @@ def flatten_contest_dir(
     # This ensures in-scope files (Manager, Position) are identified first and
     # protected from being dropped by the size budget.
     manifest = _compute_manifest(order, sources, graph, contest_dir)
-    classification = _classify_files(order, graph, manifest, contest_dir, extra_scope_contracts)
+    classification = _classify_files(order, graph, sources, manifest, contest_dir, extra_scope_contracts)
     in_scope_set  = set(classification["in_scope"])
     out_scope_set = set(classification["out_scope"])
     cls_method    = classification["method"]

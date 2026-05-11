@@ -1,0 +1,93 @@
+[
+  {
+    "h_id": "H-01",
+    "title": "Vault fails to track debt correctly that leads to bad debt",
+    "description": "In MochiVault.borrow(), the debt fee is applied when computing details[_id].debt (using increasingDebt = amount * 1005 / 1000), but the global debts variable is incremented by _amount (excluding the fee). When repay or liquidate later decrements debts by the full details[_id].debt amount (which includes the fee), debts underflows and liquidations revert, creating bad debt.",
+    "function_name": "borrow",
+    "contract_name": "MochiVault"
+  },
+  {
+    "h_id": "H-02",
+    "title": "FeePoolV0.distributeMochi() will unexpectedly flush treasuryShare",
+    "description": "distributeMochi() calls _shareMochi() which resets both mochiShare and treasuryShare to 0. However distributeMochi() is only supposed to convert mochiShare to Mochi tokens and distribute them; it should not touch treasuryShare. Anyone can call distributeMochi() to flush treasuryShare before sendToTreasury() is called, then call updateReserve() again to reallocate the leftover usdm entirely to mochiShare and repeat, draining all treasury funds.",
+    "function_name": "distributeMochi",
+    "contract_name": "FeePoolV0"
+  },
+  {
+    "h_id": "H-03",
+    "title": "ReferralFeePoolV0.claimRewardAsMochi() Array out of bound exception",
+    "description": "In claimRewardAsMochi(), the swap path array is declared with length 2 but three elements are assigned (usdm, WETH, mochi). Writing to path[2] on a length-2 array causes an out-of-bounds exception, making the function always revert and permanently locking all referral fees in the contract.",
+    "function_name": "claimRewardAsMochi",
+    "contract_name": "ReferralFeePoolV0"
+  },
+  {
+    "h_id": "H-04",
+    "title": "registerAsset() can overwrite _assetClass value",
+    "description": "registerAsset() in MochiProfileV0 is permissionless and does not check whether an asset has already been registered. Any caller can re-register an existing asset and overwrite its _assetClass to AssetClass.Sigma, changing risk parameters like liquidationFactor, riskFactor, and maxCollateralFactor, potentially triggering unwarranted liquidations or breaking vault accounting.",
+    "function_name": "registerAsset",
+    "contract_name": "MochiProfileV0"
+  },
+  {
+    "h_id": "H-05",
+    "title": "debts calculation is not accurate",
+    "description": "In MochiVault, borrow() increments the global debts by _amount (excluding the 0.5% fee), but repay() and liquidate() decrement debts by the full amount including the fee. Over time debts is understated relative to the sum of individual position debts, causing utilizationRatio, stabilityFee, and debt index calculations to be incorrect for all users.",
+    "function_name": "borrow",
+    "contract_name": "MochiVault"
+  },
+  {
+    "h_id": "H-06",
+    "title": "Referrer can drain ReferralFeePoolV0",
+    "description": "claimRewardAsMochi() in ReferralFeePoolV0 transfers the user's reward balance but never resets reward[msg.sender] to 0. A referrer can call claimRewardAsMochi() repeatedly to drain the entire pool by claiming the same reward balance multiple times.",
+    "function_name": "claimRewardAsMochi",
+    "contract_name": "ReferralFeePoolV0"
+  },
+  {
+    "h_id": "H-07",
+    "title": "Liquidation will never work with non-zero discounts",
+    "description": "triggerLiquidation in DutchAuctionLiquidator computes debt via vault.currentDebt() (no discount applied) and passes it as _usdm to vault.liquidate(). Inside liquidate(), the updateDebt modifier subtracts the discountedDebt from details[_id].debt first, making it smaller than _usdm. The subsequent details[_id].debt -= _usdm then underflows and reverts, permanently breaking liquidation for any discount profile with discount > 0.",
+    "function_name": "liquidate",
+    "contract_name": "MochiVault"
+  },
+  {
+    "h_id": "H-08",
+    "title": "Anyone can extend withdraw wait period by depositing zero collateral",
+    "description": "deposit() in MochiVault allows any caller to deposit collateral into any position ID with amount = 0. This overwrites lastDeposit[_id] with the current block timestamp, resetting the withdrawal waiting period for the position owner. A malicious user can grief all users by continuously calling deposit(id, 0) to prevent them from ever withdrawing their collateral.",
+    "function_name": "deposit",
+    "contract_name": "MochiVault"
+  },
+  {
+    "h_id": "H-09",
+    "title": "treasury is vulnerable to sandwich attack",
+    "description": "veCRVlock() in MochiTreasuryV0 is permissionless and performs a Uniswap swap to buy CRV. An attacker can sandwich this call: buy CRV to inflate the price, trigger veCRVlock() so the treasury buys CRV at the inflated price, then sell CRV for profit. This allows an attacker to drain treasury funds on every call to veCRVlock().",
+    "function_name": "veCRVlock",
+    "contract_name": "MochiTreasuryV0"
+  },
+  {
+    "h_id": "H-10",
+    "title": "Changing NFT contract in the MochiEngine would break the protocol",
+    "description": "changeNFT() in MochiEngine allows the governance/operator to replace the NFT contract address. Since all vaults reference engine.nft to look up position ownership, changing the NFT contract address causes all existing positions to become inaccessible — users can no longer deposit, borrow, repay, or withdraw, effectively breaking the entire protocol.",
+    "function_name": "changeNFT",
+    "contract_name": "MochiEngine"
+  },
+  {
+    "h_id": "H-11",
+    "title": "treasuryShare is Overwritten in FeePoolV0._shareMochi()",
+    "description": "_shareMochi() in FeePoolV0 resets treasuryShare to 0 after distributing mochiShare to vMochi and veCRV holders. This incorrectly flushes treasuryShare even though it was not spent. A veCRV holder can call distributeMochi() before sendToTreasury(), then call updateReserve() to reallocate the remaining usdm to mochiShare, and repeat the cycle to steal all funds intended for the treasury.",
+    "function_name": "_shareMochi",
+    "contract_name": "FeePoolV0"
+  },
+  {
+    "h_id": "H-12",
+    "title": "feePool is vulnerable to sandwich attack",
+    "description": "distributeMochi() in FeePoolV0 is permissionless and executes a Uniswap swap to convert usdm to Mochi with no slippage protection. An attacker can sandwich this call using a flash loan: manipulate the Mochi/usdm pool price, trigger distributeMochi() so the pool buys Mochi at an inflated price, then sell Mochi back for profit, stealing funds from the fee pool.",
+    "function_name": "distributeMochi",
+    "contract_name": "FeePoolV0"
+  },
+  {
+    "h_id": "H-13",
+    "title": "Tokens Can Be Stolen By Frontrunning VestedRewardPool.vest() and VestedRewardPool.lock()",
+    "description": "vest() and lock() in VestedRewardPool use transferFrom() without safeTransferFrom(), and anyone can call vest(recipient) with an arbitrary recipient. An attacker can frontrun a legitimate vest() call: observe the pending transaction, call vest() with themselves as recipient first to claim the tokens before the legitimate caller, stealing the vested mochi tokens.",
+    "function_name": "vest",
+    "contract_name": "VestedRewardPool"
+  }
+]

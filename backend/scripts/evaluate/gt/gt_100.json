@@ -1,0 +1,23 @@
+[
+  {
+    "h_id": "H-01",
+    "title": "Strategy Migration May Leave Tokens in the Old Strategy Impacting Share Calculations",
+    "description": "In SingleStrategyController.migrate(), after calling _oldStrategy.withdraw(), there is no check that all funds were actually withdrawn. Strategies may fail to return the full amount if liquidity is insufficient. Tokens left in the old strategy are excluded from totalValue(), causing subsequent deposits to receive more shares than deserved. If migrate() is called back to the old strategy, the recovered tokens inflate totalValue() and the recent depositor can withdraw more than they deposited, stealing from other users.",
+    "function_name": "migrate",
+    "contract_name": "SingleStrategyController"
+  },
+  {
+    "h_id": "H-02",
+    "title": "First depositor can break minting of shares",
+    "description": "In Collateral.deposit(), shares are calculated as _shares = (_amountToDeposit * totalSupply()) / _valueBefore. An attacker can be the first depositor and mint 1 share with 2 wei, then transfer a large amount directly to the strategyController to inflate totalValue(). All subsequent depositors receive 0 shares because _amountToDeposit * totalSupply() / _valueBefore rounds down to 0. Their deposited tokens accrue to the attacker who holds the only share and can withdraw the inflated balance.",
+    "function_name": "deposit",
+    "contract_name": "Collateral"
+  },
+  {
+    "h_id": "H-03",
+    "title": "Withdrawal delay can be circumvented",
+    "description": "In Collateral, after calling initiateWithdrawal(), collateral tokens can still be freely transferred. An attacker creates two accounts, initiates withdrawals at alternating blocks, and transfers the balance between them so that one account is always within a valid withdrawal window. This circumvents the intended delay mechanism entirely, allowing the attacker to withdraw at any time regardless of the delay period.",
+    "function_name": "initiateWithdrawal",
+    "contract_name": "Collateral"
+  }
+]
