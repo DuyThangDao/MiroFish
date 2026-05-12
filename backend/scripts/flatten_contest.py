@@ -59,12 +59,35 @@ _CONTRACT_RE  = re.compile(r'\b(contract|library|abstract\s+contract)\s+\w+', re
 # Manifest: class name patterns for primary/secondary classification.
 # No \b boundaries — match CamelCase suffixes (e.g. "Pool" in "ConcentratedLiquidityPool").
 _CORE_NAME_RE = re.compile(
-    r'Pool|Vault|Core|Engine|Logic|Manager|Strategy|Market|Exchange|Pair|AMM|Farm',
+    r'Pool|Vault|Core|Engine|Logic|Manager|Strategy|Market|Exchange|Pair|AMM|Farm'
+    r'|Reward|Treasury|Staking|Lending|Borrow',
     re.IGNORECASE,
 )
+# Soft infra penalty ×0.8 — utility/wiring, rarely contain core business logic,
+# but NOT blacklisted outright since some (e.g. Oracle with price manipulation) can be primary.
 _INFRA_NAME_RE = re.compile(
     r'Router|Helper|Deployer|Factory|Registry|Proxy|Base|Abstract|Interface|Mock'
     r'|Math|Library|ERC20|ERC721|ERC1155',
+    re.IGNORECASE,
+)
+# Removed from _INFRA_NAME_RE: Adapter|Oracle|CSSR|Snapshot|PriceFeed|Aggregator|Verifier
+# These can be primary audit targets (e.g. price manipulation in OracleAdapter).
+# Demoted naturally by in_degree=0 — no regex penalty needed.
+
+_VALUE_BEARING_RE = re.compile(
+    r'\b(transfer|transferFrom|safeTransfer|safeTransferFrom)\s*\('
+    r'|IERC20\s*[(\(]'
+    r'|msg\.value\b'
+    r'|address\(this\)\.balance'
+    r'|\.call\s*\{'
+    r'|\bdelegatecall\b',
+)
+
+_PROXY_NAME_RE = re.compile(
+    r'\b(Transparent|Beacon|UUPS|ERC1967|Minimal|Clones).*Proxy\b'
+    r'|\bProxy\b'
+    r'|\bUpgradeableProxy\b'
+    r'|\bProxyAdmin\b',
     re.IGNORECASE,
 )
 
@@ -279,21 +302,26 @@ def _extract_scope_from_readme(contest_dir: str) -> List[str]:
     return hints
 
 
+_MODIFIER_BODY_RE = re.compile(r'\bmodifier\b')
+_STRUCT_ENUM_BODY_RE = re.compile(r'\b(struct|enum)\b')
+
+
 def _compress_to_stub(src: str) -> str:
     """
-    Replace function/modifier/constructor bodies with { ... }, keeping all signatures.
-    Preserves: pragma, contract/library/interface headers, state variables,
-               function signatures, events, errors, structs, enums.
+    Replace function/constructor bodies with { ... }, keeping all signatures.
+    Preserves FULL BODY of: modifiers, structs, enums (critical for agent reasoning).
+    Preserves at any depth: state variables, events, custom errors, NatSpec.
 
     Uses brace-depth tracking (depth 0 = top-level, 1 = inside contract,
-    >=2 = inside a function body). Lines at depth >=2 are skipped.
+    >=2 = inside a function/modifier/struct body).
+    in_keepbody: True when inside a modifier/struct/enum whose body we want to keep.
     """
     lines = src.split('\n')
     result: List[str] = []
     depth = 0
+    in_keepbody = False  # True inside modifier/struct/enum bodies
 
     for line in lines:
-        # Skip single-line // comments (keep NatSpec /// for signatures)
         stripped = line.strip()
         if stripped.startswith('//') and not stripped.startswith('///'):
             depth += line.count('{') - line.count('}')
@@ -304,16 +332,23 @@ def _compress_to_stub(src: str) -> str:
         new_depth = depth + opens - closes
 
         if depth >= 2:
-            # Inside a function body — skip entirely
+            if in_keepbody:
+                result.append(line)
+            if new_depth < 2:
+                in_keepbody = False
             depth = new_depth
             continue
 
         if depth == 1 and opens > closes:
-            # Line opens a function/modifier body (net +1 brace at contract level)
-            # Truncate at last `{` and add stub marker
-            sig = line[:line.rfind('{')].rstrip()
-            if sig.strip():
-                result.append(sig + ' { ... }')
+            # Opening a body at contract level — keep modifier/struct/enum, stub functions
+            if _MODIFIER_BODY_RE.search(stripped) or _STRUCT_ENUM_BODY_RE.search(stripped):
+                result.append(line)
+                in_keepbody = True
+            else:
+                sig = line[:line.rfind('{')].rstrip()
+                if sig.strip():
+                    result.append(sig + ' { ... }')
+                in_keepbody = False
             depth = new_depth
             continue
 
@@ -384,70 +419,90 @@ def _classify_files(
     """
     base = Path(contest_dir)
 
-    # Tier 1: multi-root BFS — union of import trees from all implementation contracts
+    # Identify all implementation contracts (non-mock, non-interface)
     all_impl_keys = [
         k for k in order
         if not _is_interface_only(sources.get(k, ""))
         and not _is_mock_or_test(k)
     ]
     if all_impl_keys:
-        reachable: Set[str] = set()
-        for root_key in all_impl_keys:
-            if root_key in graph:
-                reachable |= _get_reachable_set(root_key, graph)
-
-        # Extend with Slither-identified callers
         if extra_scope_contracts:
+            # --- Skeletonization mode (Slither available) ---
+            # Tier 1 (full): primary + Slither caller keys
+            # Tier 2 (skeleton stubs): BFS deps of Tier 1 that are NOT in Tier 1
+            # Tier 3 (dropped): mocks, interfaces, unreachable
+            core_set: Set[str] = set()
+            for pk in (manifest.get("primary_keys") or [manifest.get("primary_key")]):
+                if pk:
+                    core_set.add(pk)
             cnames: Dict[str, str] = manifest.get("contract_names_map", {})
             for key in order:
                 cname = cnames.get(key, Path(key).stem)
                 if cname in extra_scope_contracts:
-                    reachable.add(key)
+                    core_set.add(key)
 
-        # Size cap: if full union > 300KB, use selective secondary roots
-        total_chars = sum(len(sources.get(k, "")) for k in reachable)
-        if total_chars > 300_000:
-            primary_key = manifest.get("primary_key")
-            if primary_key and primary_key in graph:
-                primary_reachable = _get_reachable_set(primary_key, graph)
-                # Extend with Slither callers into primary set
-                if extra_scope_contracts:
-                    cnames = manifest.get("contract_names_map", {})
-                    for key in order:
-                        cname = cnames.get(key, Path(key).stem)
-                        if cname in extra_scope_contracts:
-                            primary_reachable.add(key)
-                # Find impl contracts not reachable from primary
-                unreached_impls = [
-                    k for k in all_impl_keys
-                    if k not in primary_reachable
-                ]
-                # Greedily add unreached impls that fit within cap
-                selective = set(primary_reachable)
-                running_chars = sum(len(sources.get(k, "")) for k in selective)
-                for root_key in unreached_impls:
-                    new_contracts = (_get_reachable_set(root_key, graph) if root_key in graph else {root_key}) - primary_reachable
-                    new_contracts.add(root_key)
-                    added_chars = sum(len(sources.get(k, "")) for k in new_contracts - selective)
-                    if running_chars + added_chars <= 300_000:
-                        selective |= new_contracts
-                        running_chars += added_chars
-                reachable = selective
-                method = "multi_root_bfs_selective_slither" if extra_scope_contracts else "multi_root_bfs_selective"
-            else:
-                method = "multi_root_bfs_capped"
-        else:
-            method = "multi_root_bfs_slither" if extra_scope_contracts else "multi_root_bfs"
+            full_reachable: Set[str] = set()
+            for root_key in core_set:
+                if root_key in graph:
+                    full_reachable |= _get_reachable_set(root_key, graph)
 
-        out_scope = [k for k in order if k not in reachable]
-        if out_scope:
+            skeleton_set: Set[str] = {
+                k for k in full_reachable - core_set
+                if not _is_mock_or_test(k)
+                and not _is_interface_only(sources.get(k, ""))
+            }
+            tier3_set = set(order) - core_set - skeleton_set
+
             return {
-                "in_scope":  [k for k in order if k in reachable],
-                "out_scope": out_scope,
-                "method":    method,
+                "in_scope":  [k for k in order if k in core_set],
+                "skeleton":  [k for k in order if k in skeleton_set],
+                "out_scope": [k for k in order if k in tier3_set],
+                "method":    "skeletonized_slither",
             }
 
-    # Tier 2: README scope hints
+        else:
+            # --- Legacy multi-root BFS (no Slither) — unchanged from original ---
+            reachable: Set[str] = set()
+            for root_key in all_impl_keys:
+                if root_key in graph:
+                    reachable |= _get_reachable_set(root_key, graph)
+
+            # Size cap: if full union > 300KB, use selective secondary roots
+            total_chars = sum(len(sources.get(k, "")) for k in reachable)
+            if total_chars > 300_000:
+                primary_key = manifest.get("primary_key")
+                if primary_key and primary_key in graph:
+                    primary_reachable = _get_reachable_set(primary_key, graph)
+                    unreached_impls = [k for k in all_impl_keys if k not in primary_reachable]
+                    selective = set(primary_reachable)
+                    running_chars = sum(len(sources.get(k, "")) for k in selective)
+                    for root_key in unreached_impls:
+                        new_contracts = (
+                            (_get_reachable_set(root_key, graph) if root_key in graph else {root_key})
+                            - primary_reachable
+                        )
+                        new_contracts.add(root_key)
+                        added_chars = sum(len(sources.get(k, "")) for k in new_contracts - selective)
+                        if running_chars + added_chars <= 300_000:
+                            selective |= new_contracts
+                            running_chars += added_chars
+                    reachable = selective
+                    method = "multi_root_bfs_selective"
+                else:
+                    method = "multi_root_bfs_capped"
+            else:
+                method = "multi_root_bfs"
+
+            out_scope = [k for k in order if k not in reachable]
+            if out_scope:
+                return {
+                    "in_scope":  [k for k in order if k in reachable],
+                    "skeleton":  [],
+                    "out_scope": out_scope,
+                    "method":    method,
+                }
+
+    # Fallback: README scope hints
     hints = _extract_scope_from_readme(contest_dir)
     if hints:
         in_s, out_s = [], []
@@ -458,10 +513,10 @@ def _classify_files(
             else:
                 out_s.append(k)
         if out_s:
-            return {"in_scope": in_s, "out_scope": out_s, "method": "readme"}
+            return {"in_scope": in_s, "skeleton": [], "out_scope": out_s, "method": "readme"}
 
-    # Tier 3: conservative — no filtering
-    return {"in_scope": order, "out_scope": [], "method": "conservative"}
+    # Conservative fallback — no filtering
+    return {"in_scope": order, "skeleton": [], "out_scope": [], "method": "conservative"}
 
 
 def _is_interface_only(src: str) -> bool:
@@ -470,6 +525,36 @@ def _is_interface_only(src: str) -> bool:
     has_interface = bool(_INTERFACE_RE.search(stripped))
     has_contract  = bool(_CONTRACT_RE.search(stripped))
     return has_interface and not has_contract
+
+
+def _find_clusters(impl_keys: List[str], graph: Dict[str, List[str]]) -> List[List[str]]:
+    """BFS connected components on undirected import graph, restricted to impl_keys only."""
+    from collections import deque
+    impl_set = set(impl_keys)
+    undirected: Dict[str, Set[str]] = {k: set() for k in impl_keys}
+    for node in impl_keys:
+        for dep in graph.get(node, []):
+            if dep in impl_set:
+                undirected[node].add(dep)
+                undirected[dep].add(node)
+    visited: Set[str] = set()
+    clusters: List[List[str]] = []
+    for start in impl_keys:
+        if start in visited:
+            continue
+        cluster: List[str] = []
+        queue: deque = deque([start])
+        while queue:
+            node = queue.popleft()
+            if node in visited:
+                continue
+            visited.add(node)
+            cluster.append(node)
+            for nb in undirected.get(node, set()):
+                if nb not in visited:
+                    queue.append(nb)
+        clusters.append(cluster)
+    return clusters
 
 
 def _compute_manifest(
@@ -508,36 +593,147 @@ def _compute_manifest(
         m = _CONTRACT_RE.search(stripped)
         cname = m.group(0).split()[-1] if m else Path(key).stem
         contract_names[key] = cname
+        # Solidity `library` keyword = utility code, rarely the primary audit target
+        is_library = bool(m and m.group(1) == 'library')
+        # Proxy wrapper contracts (OZ Transparent/Beacon/UUPS etc.) = no business logic
+        is_proxy = bool(m and _PROXY_NAME_RE.search(cname))
 
         score = float(loc)
         if _CORE_NAME_RE.search(cname):
-            score *= 1.5
+            score *= 1.1   # tie-breaker only — name is a weak signal
         if _INFRA_NAME_RE.search(cname):
-            score *= 0.6
+            score *= 0.8   # soft penalty — Router/Helper/Factory rarely are primary
+        if is_library:
+            score *= 0.3
+        if is_proxy:
+            score *= 0.05
+        # Value-bearing and entrypoint heuristics — only for real implementation contracts
+        if not is_iface and not is_library and not is_proxy:
+            if _VALUE_BEARING_RE.search(stripped):
+                score *= 2.5   # strong behavioral signal — contracts that hold/move funds
+                # Extra boost for value-bearing contracts with many state-changing entry points.
+                # Intentionally NOT applied to non-VB contracts: a large oracle adapter with
+                # many public getters is not a high-priority audit target.
+                ext_count = len(re.findall(r'\b(?:external|public)\b(?!\s+(?:view|pure)\b)', stripped))
+                if ext_count >= 5:
+                    score *= 1.1
         # In-degree bonus only for real contracts — interfaces are imported widely
         # but that reflects dependency breadth, not implementation importance.
-        # Weight 200 (not 500) so LOC+name pattern dominates over pure import count.
+        # Weight 100 (not 200): prevents utility libs with high import count from
+        # outscoring low-LOC core contracts (e.g. Rlp in contest 42).
         if not is_iface:
-            score += in_degree.get(key, 0) * 200
+            score += in_degree.get(key, 0) * 100
         if is_iface:
             score *= 0.1
 
         scores[key] = score
 
     if not scores:
-        return {"primary": None, "secondary": [], "total_contracts": 0, "total_chars": 0}
+        return {"primary": None, "secondary": [], "primary_keys": [], "primary_names": [],
+                "clusters": {}, "total_contracts": 0, "total_chars": 0}
 
+    # --- Connected Components clustering ---
+    # Cluster using ALL local files (including interfaces — they are the connective tissue
+    # between contracts in Solidity). Exclude only external node_modules and mocks.
+    all_local_keys = [
+        k for k in order
+        if k in scores
+        and not _is_mock_or_test(k)
+        and "node_modules" not in k
+    ]
+    raw_clusters = _find_clusters(all_local_keys, graph)
+
+    # Within each cluster, candidates for primary = non-interface, non-library, non-proxy impls
+    def _is_audit_candidate(k: str) -> bool:
+        src = sources.get(k, "")
+        stripped = _strip_sol_comments(src)
+        m_c = _CONTRACT_RE.search(stripped)
+        cname_c = m_c.group(0).split()[-1] if m_c else Path(k).stem
+        return (
+            not _is_interface_only(src)
+            and not (m_c and m_c.group(1) == 'library')
+            and not _PROXY_NAME_RE.search(cname_c)
+        )
+
+    # Filter out tiny clusters (total LOC < 100) — isolated utility contracts
+    MIN_CLUSTER_LOC = 100
+    sig_clusters = [
+        c for c in raw_clusters
+        if sum(sources.get(k, "").count('\n') + 1 for k in c) >= MIN_CLUSTER_LOC
+    ]
+
+    # Build cluster membership map for ToC and context
+    cluster_map: Dict[str, List[str]] = {}
+    for cluster in sig_clusters:
+        candidates = [k for k in cluster if _is_audit_candidate(k) and k in scores]
+        if not candidates:
+            continue
+        best = max(candidates, key=lambda k: scores.get(k, 0))
+        cluster_map[best] = cluster  # representative → full cluster members
+
+    # Primary selection: top-N globally ranked audit candidates (not constrained to 1/cluster).
+    # Reason: protocols like Mochi connect all contracts through shared interfaces → single cluster,
+    # but FeePoolV0/VestedRewardPool/MochiEngine each merit independent Slither analysis.
+    MAX_PRIMARIES = 4
+    all_candidates = [
+        k for cluster in sig_clusters
+        for k in cluster
+        if _is_audit_candidate(k) and k in scores
+    ]
+    # Deduplicate (a key can appear in multiple sig_clusters if interface overlap caused merging)
+    seen_cands: Set[str] = set()
+    deduped_candidates: List[str] = []
+    for k in all_candidates:
+        if k not in seen_cands:
+            seen_cands.add(k)
+            deduped_candidates.append(k)
+
+    cluster_primary_keys = sorted(
+        deduped_candidates, key=lambda k: scores.get(k, 0), reverse=True
+    )[:MAX_PRIMARIES]
+
+    # Ensure cluster_map covers all chosen primaries
+    # (some primaries may not be the best-score representative of their cluster)
+    for pk in cluster_primary_keys:
+        if pk not in cluster_map:
+            # find which cluster this key belongs to and assign it
+            for cluster in sig_clusters:
+                if pk in cluster:
+                    cluster_map[pk] = cluster
+                    break
+
+    # Fallback: if all keys were filtered out, fall back to global top scorer
+    if not cluster_primary_keys:
+        sorted_keys_fb = sorted(scores, key=lambda k: scores[k], reverse=True)
+        cluster_primary_keys = [sorted_keys_fb[0]]
+        cluster_map = {sorted_keys_fb[0]: sorted_keys_fb}
+
+    primary_key = cluster_primary_keys[0]
     sorted_keys = sorted(scores, key=lambda k: scores[k], reverse=True)
-    primary_key = sorted_keys[0]
-    secondary_keys = sorted_keys[1:4]
+    secondary_keys = [k for k in sorted_keys if k != primary_key]
 
+    seen_names: Set[str] = set()
+    tier1_impls: List[str] = []
+    for k in sorted_keys:
+        cn = contract_names.get(k, "")
+        if cn and cn not in seen_names and k != primary_key:
+            seen_names.add(cn)
+            tier1_impls.append(cn)
+
+    primary_names = [contract_names.get(pk, Path(pk).stem) for pk in cluster_primary_keys]
     return {
-        "primary":            contract_names.get(primary_key),
+        # Backward-compatible single-primary fields
+        "primary":            primary_names[0],
         "primary_file":       str(Path(primary_key).relative_to(base)),
-        "primary_key":        primary_key,           # absolute path — used by _classify_files
-        "secondary":          [contract_names.get(k) for k in secondary_keys],
+        "primary_key":        primary_key,
+        "secondary":          tier1_impls[:8],
         "secondary_keys":     secondary_keys,
-        "contract_names_map": contract_names,        # key → contract_name, used by _classify_files
+        # Multi-primary fields
+        "primary_keys":       cluster_primary_keys,
+        "primary_names":      primary_names,
+        "clusters":           {pk: cluster_map[pk] for pk in cluster_primary_keys},
+        # Shared metadata
+        "contract_names_map": contract_names,
         "total_contracts":    len(scores),
         "total_chars":        sum(len(sources.get(k, "")) for k in order),
     }
@@ -545,7 +741,7 @@ def _compute_manifest(
 
 def flatten_contest_dir(
     contest_dir: str,
-    max_chars: int = 260_000,
+    max_chars: int = 200_000,
     verbose: bool = False,
     emit_manifest: bool = False,
     extra_scope_contracts: Optional[Set[str]] = None,
@@ -581,108 +777,175 @@ def flatten_contest_dir(
     # protected from being dropped by the size budget.
     manifest = _compute_manifest(order, sources, graph, contest_dir)
     classification = _classify_files(order, graph, sources, manifest, contest_dir, extra_scope_contracts)
-    in_scope_set  = set(classification["in_scope"])
-    out_scope_set = set(classification["out_scope"])
+    in_scope_set  = set(classification["in_scope"])           # Tier 1: full source
+    skeleton_set  = set(classification.get("skeleton", []))   # Tier 2: stub in in_scope_source
+    out_scope_set = set(classification["out_scope"])           # Tier 3: dropped
     cls_method    = classification["method"]
 
-    # Step 2: Size trimming — protect in-scope files, trim out-of-scope first.
-    total = sum(len(s) for s in sources.values())
-    if total > max_chars:
-        # 2a: Drop interface-only OUT-OF-SCOPE files first (safest drops)
-        interface_oos = [k for k in out_scope_set if _is_interface_only(sources.get(k, ""))]
-        if verbose and interface_oos:
-            print(f"  Total {total//1000}K > {max_chars//1000}K limit — "
-                  f"dropping {len(interface_oos)} interface-only out-of-scope files")
-        for k in interface_oos:
-            sources.pop(k, None)
-            order = [x for x in order if x != k]
-            out_scope_set.discard(k)
-
-    total = sum(len(sources.get(k, "")) for k in order)
-    if total > max_chars:
-        # 2b: Drop remaining out-of-scope files from the back to fit budget
-        in_scope_total = sum(len(sources.get(k, "")) for k in order if k in in_scope_set)
-        remaining_budget = max_chars - in_scope_total
-        kept_oos, running = [], 0
-        for k in order:
-            if k not in out_scope_set:
-                continue
-            s = sources.get(k, "")
-            if running + len(s) <= remaining_budget:
-                kept_oos.append(k)
-                running += len(s)
-        dropped_oos = out_scope_set - set(kept_oos)
-        if verbose and dropped_oos:
-            print(f"  Still too large — dropping {len(dropped_oos)} out-of-scope files "
-                  f"to fit {max_chars//1000}K limit")
-        for k in dropped_oos:
-            sources.pop(k, None)
-        order = [k for k in order if k in sources]
-        out_scope_set = set(kept_oos)
-
-    total = sum(len(sources.get(k, "")) for k in order)
-    if total > max_chars:
-        # 2c: Last resort — trim in-scope files from back (should rarely happen)
-        trimmed_order = []
-        running = 0
-        for k in order:
-            s = sources.get(k, "")
-            if running + len(s) <= max_chars:
-                trimmed_order.append(k)
-                running += len(s)
-        if verbose:
-            dropped = len(order) - len(trimmed_order)
-            print(f"  Still too large — dropping {dropped} in-scope files (last resort)")
-        dropped_keys = set(order) - set(trimmed_order)
-        for k in dropped_keys:
-            sources.pop(k, None)
-            in_scope_set.discard(k)
-            out_scope_set.discard(k)
-        order = trimmed_order
-
-    # Collect out-of-scope contract names for manifest + prompt
+    # Step 2: Size trimming
     base = Path(contest_dir)
+    is_skeletonized = (cls_method == "skeletonized_slither")
+
+    # 2a: Drop interface-only out-of-scope files first (cheapest drop for both modes)
+    interface_oos = [k for k in out_scope_set if _is_interface_only(sources.get(k, ""))]
+    if verbose and interface_oos:
+        print(f"  Dropping {len(interface_oos)} interface-only out-of-scope files")
+    for k in interface_oos:
+        sources.pop(k, None)
+        order = [x for x in order if x != k]
+        out_scope_set.discard(k)
+
+    if is_skeletonized:
+        # 2b (skeletonized): Tier 1 is NEVER dropped — trim Tier 2 skeleton if over budget
+        tier1_chars = sum(len(sources.get(k, "")) for k in in_scope_set if k in sources)
+        tier2_chars = sum(len(_compress_to_stub(sources.get(k, ""))) for k in skeleton_set if k in sources)
+        total_approx = tier1_chars + tier2_chars
+
+        if total_approx > max_chars:
+            remaining_budget = max_chars - tier1_chars
+            kept_skeleton, running = [], 0
+            for k in order:
+                if k not in skeleton_set:
+                    continue
+                stub_size = len(_compress_to_stub(sources.get(k, "")))
+                if running + stub_size <= remaining_budget:
+                    kept_skeleton.append(k)
+                    running += stub_size
+            dropped_skeleton = skeleton_set - set(kept_skeleton)
+            if verbose and dropped_skeleton:
+                print(f"  Skeleton budget: dropping {len(dropped_skeleton)} Tier2 files "
+                      f"to fit {max_chars//1000}K limit")
+            for k in dropped_skeleton:
+                skeleton_set.discard(k)
+                out_scope_set.add(k)
+    else:
+        # 2b (legacy/no-Slither): drop out-of-scope stubs to fit budget, trim in-scope last resort
+        total = sum(len(sources.get(k, "")) for k in order)
+        if total > max_chars:
+            in_scope_total = sum(len(sources.get(k, "")) for k in order if k in in_scope_set)
+            remaining_budget = max_chars - in_scope_total
+            kept_oos, running = [], 0
+            for k in order:
+                if k not in out_scope_set:
+                    continue
+                s = sources.get(k, "")
+                if running + len(s) <= remaining_budget:
+                    kept_oos.append(k)
+                    running += len(s)
+            dropped_oos = out_scope_set - set(kept_oos)
+            if verbose and dropped_oos:
+                print(f"  Still too large — dropping {len(dropped_oos)} out-of-scope files "
+                      f"to fit {max_chars//1000}K limit")
+            for k in dropped_oos:
+                sources.pop(k, None)
+            order = [k for k in order if k in sources]
+            out_scope_set = set(kept_oos)
+
+        total = sum(len(sources.get(k, "")) for k in order)
+        if total > max_chars:
+            trimmed_order = []
+            running = 0
+            for k in order:
+                s = sources.get(k, "")
+                if running + len(s) <= max_chars:
+                    trimmed_order.append(k)
+                    running += len(s)
+            if verbose:
+                print(f"  Still too large — dropping {len(order) - len(trimmed_order)} in-scope files (last resort)")
+            dropped_keys = set(order) - set(trimmed_order)
+            for k in dropped_keys:
+                sources.pop(k, None)
+                in_scope_set.discard(k)
+                out_scope_set.discard(k)
+            order = trimmed_order
+
+    # Collect skeleton contract names for scope header
+    skeleton_cnames: List[str] = []
+    for k in [x for x in order if x in skeleton_set]:
+        src = sources.get(k, "")
+        m = _CONTRACT_RE.search(_strip_sol_comments(src))
+        if m:
+            skeleton_cnames.append(m.group(0).split()[-1])
+
+    # Collect Tier 3 contract names for diagnostics
     out_scope_names: List[str] = []
     for k in classification["out_scope"]:
         src = sources.get(k, "")
-        stripped_src = _strip_sol_comments(src)
-        m = _CONTRACT_RE.search(stripped_src)
+        if not src:
+            continue
+        m = _CONTRACT_RE.search(_strip_sol_comments(src))
         if m:
             out_scope_names.append(m.group(0).split()[-1])
     manifest["out_scope_contracts"] = out_scope_names
     manifest["scope_method"]        = cls_method
 
-    # Update secondary to reflect actual in-scope implementation contracts.
+    # Update secondary: only Tier 1 impl contracts (shown in AUDIT SCOPE header)
     cnames_map = manifest.get("contract_names_map", {})
     primary_key = manifest.get("primary_key")
-    in_scope_impls = [
-        cnames_map.get(k, Path(k).stem)
-        for k in classification["in_scope"]
-        if k != primary_key and not _is_interface_only(sources.get(k, ""))
-    ]
-    manifest["secondary"] = in_scope_impls[:6]
+    seen_names: set = set()
+    tier1_impls = []
+    for k in classification["in_scope"]:
+        if k == primary_key or _is_interface_only(sources.get(k, "")):
+            continue
+        name = cnames_map.get(k, Path(k).stem)
+        if name and name not in seen_names:
+            seen_names.add(name)
+            tier1_impls.append(name)
+    manifest["secondary"]           = tier1_impls[:6]
+    manifest["skeleton_contracts"]  = skeleton_cnames
 
-    if verbose and out_scope_set:
-        print(f"  Scope ({cls_method}): {len(in_scope_set)} in-scope, "
-              f"{len(out_scope_set)} out-of-scope → stubs")
+    if verbose:
+        print(f"  Scope ({cls_method}): {len(in_scope_set)} Tier1 full, "
+              f"{len(skeleton_set)} Tier2 skeleton, {len(out_scope_set)} Tier3 dropped")
 
     # Build scope header injected at top (agents see this first)
-    primary   = manifest.get("primary", "unknown")
-    secondary = [s for s in manifest.get("secondary", []) if s]
-    scope_header_lines = [
-        f"// ═══ Web3Bugs Contest {Path(contest_dir).name} — Flattened Source ═══",
-        f"// AUDIT SCOPE: {primary}" + (f", {', '.join(secondary)}" if secondary else ""),
-    ]
-    if out_scope_names:
-        scope_header_lines.append(
-            f"// OUT-OF-SCOPE (stubs only — function bodies omitted): "
-            f"{', '.join(out_scope_names[:8])}"
-            + (" ..." if len(out_scope_names) > 8 else "")
-        )
+    primary        = manifest.get("primary", "unknown")
+    secondary      = [s for s in manifest.get("secondary", []) if s]
+    primary_names_list = manifest.get("primary_names", [primary])
+    clusters_info  = manifest.get("clusters", {})
+    cnames_map_hdr = manifest.get("contract_names_map", {})
+
+    if len(primary_names_list) > 1:
+        # Multi-primary: generate Table of Contents to anchor LLM attention
+        scope_header_lines = [
+            f"// ═══ Web3Bugs Contest {Path(contest_dir).name} — Flattened Source ═══",
+            f"// ⚠️  THIS PROTOCOL HAS {len(primary_names_list)} INDEPENDENT AUDIT TARGETS.",
+            "// Analyze each target SEPARATELY. Only report cross-cluster bugs if state",
+            "// is shared via direct external calls.",
+            "//",
+        ]
+        pk_list = manifest.get("primary_keys", [])
+        for i, (pk, pname) in enumerate(zip(pk_list, primary_names_list), 1):
+            members = clusters_info.get(pk, [pk])
+            member_names = [
+                cnames_map_hdr.get(m, Path(m).stem) for m in members
+                if m != pk and not _is_interface_only(sources.get(m, ""))
+            ]
+            scope_header_lines.append(f"// TARGET {i} — {pname} (primary)")
+            if member_names:
+                scope_header_lines.append(f"//   Related contracts: {', '.join(member_names[:6])}")
+        if skeleton_cnames:
+            scope_header_lines.append(
+                f"// SKELETON DEPS: {', '.join(skeleton_cnames[:6])}"
+                + (" ..." if len(skeleton_cnames) > 6 else "")
+            )
+        scope_header_lines.append("// " + "═" * 51)
+    else:
+        # Single-primary: existing compact header
+        scope_header_lines = [
+            f"// ═══ Web3Bugs Contest {Path(contest_dir).name} — Flattened Source ═══",
+            f"// AUDIT SCOPE (full source): {primary}" + (f", {', '.join(secondary)}" if secondary else ""),
+        ]
+        if skeleton_cnames:
+            scope_header_lines.append(
+                f"// SKELETON CONTEXT (signatures/state vars only — function bodies omitted): "
+                f"{', '.join(skeleton_cnames[:8])}"
+                + (" ..." if len(skeleton_cnames) > 8 else "")
+            )
     scope_header_lines.append("")
     parts = ["\n".join(scope_header_lines)]
 
-    # In-scope files: full content
+    # Tier 1: full source — both in parts and inscope_parts
     pragma_emitted = False
     seen_externals: Set[str] = set()
     inscope_parts = list(parts)  # copy scope header
@@ -707,22 +970,41 @@ def flatten_contest_dir(
         parts.append(stripped)
         inscope_parts.append(stripped)
 
-    # Out-of-scope files: compressed stubs (agents only — NOT in KG source)
-    seen_externals_stubs: Set[str] = set(seen_externals)
+    # Tier 2: skeleton stubs — in BOTH parts and inscope_parts (KG + agents see signatures)
+    seen_externals_skeleton: Set[str] = set(seen_externals)
     for key in order:
-        if key not in sources or key not in out_scope_set:
+        if key not in sources or key not in skeleton_set:
             continue
         src = sources[key]
         if not src.strip():
             continue
 
         rel = str(Path(key).relative_to(base))
-        parts.append(f"\n// ─── {rel} [OUT-OF-SCOPE — signatures only] ───\n")
+        file_header = f"\n// ─── {rel} [SKELETON — signatures only] ───\n"
+        parts.append(file_header)
+        inscope_parts.append(file_header)  # skeleton visible to KG builder
+
         stub = _compress_to_stub(src)
-        parts.append(_strip_file(stub, keep_pragma=False, seen_externals=seen_externals_stubs))
+        stripped_stub = _strip_file(stub, keep_pragma=False, seen_externals=seen_externals_skeleton)
+        parts.append(stripped_stub)
+        inscope_parts.append(stripped_stub)  # skeleton visible to KG builder
+
+    # Legacy out-of-scope stubs (agents only, NOT in inscope_parts) — only for non-skeletonized mode
+    if not is_skeletonized:
+        seen_externals_stubs: Set[str] = set(seen_externals)
+        for key in order:
+            if key not in sources or key not in out_scope_set:
+                continue
+            src = sources[key]
+            if not src.strip():
+                continue
+            rel = str(Path(key).relative_to(base))
+            parts.append(f"\n// ─── {rel} [OUT-OF-SCOPE — signatures only] ───\n")
+            stub = _compress_to_stub(src)
+            parts.append(_strip_file(stub, keep_pragma=False, seen_externals=seen_externals_stubs))
 
     result = "\n".join(parts)
-    # Store in_scope_source in manifest so callers can pass only in-scope code to KG builder
+    # Store in_scope_source: Tier 1 (full) + Tier 2 (skeleton) — used by KG builder and agents
     manifest["in_scope_source"] = "\n".join(inscope_parts)
 
     if verbose:
@@ -742,8 +1024,8 @@ if __name__ == "__main__":
     parser.add_argument("contest_dir", help="Path to contracts/<id>/ directory")
     parser.add_argument("--output", "-o", default=None,
                         help="Write output to file (default: print to stdout)")
-    parser.add_argument("--max-chars", type=int, default=260_000,
-                        help="Max chars in output (default: 260000)")
+    parser.add_argument("--max-chars", type=int, default=200_000,
+                        help="Max chars in output (default: 200000)")
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args()
 

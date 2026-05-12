@@ -344,23 +344,36 @@ def run_audit(
         # Falls back gracefully if Slither not installed or compilation fails.
         logger.info("\n[STEP 1.3/4] Building data-flow dependency graph (Slither / 1b)...")
         slither_target = sol_path  # contest_dir takes priority if provided via --contest-dir
-        # Use manifest primary contract name so Slither targets the right .sol file
-        # (contest_name is the directory number e.g. "35", not the contract name)
-        slither_contract_name = (
-            manifest.get("primary", contract_name) if manifest else contract_name
-        )
-        if slither_target:
-            logger.info(f"  Slither target contract: {slither_contract_name}")
-            dep_summary = dep_graph.build_and_summarize(
-                source_path=slither_target,
-                contract_name=slither_contract_name,
-            )
-            if dep_summary:
-                contract_summary += f"\n\n{dep_summary.text}"
-                logger.info(
-                    f"  Dep graph: {len(dep_summary.critical_vars)} critical vars, "
-                    f"primary={dep_summary.primary_contract}"
+        # Multi-primary: run dep graph for each cluster primary, merge critical_vars text.
+        _audit_primaries = (
+            manifest.get("primary_names") or [manifest.get("primary", contract_name)]
+        ) if manifest else [contract_name]
+        _audit_primaries = [n for n in _audit_primaries if n]
+        dep_summary = None
+        _dep_texts: list = []
+        for _pname in _audit_primaries:
+            if not slither_target:
+                break
+            logger.info(f"  Slither target contract: {_pname}")
+            try:
+                _ds = dep_graph.build_and_summarize(
+                    source_path=slither_target,
+                    contract_name=_pname,
                 )
+                if _ds:
+                    _dep_texts.append(_ds.text)
+                    if dep_summary is None:
+                        dep_summary = _ds  # first result drives backward-compat fields
+                    logger.info(
+                        f"  Dep graph: {len(_ds.critical_vars)} critical vars, "
+                        f"primary={_ds.primary_contract}"
+                    )
+            except Exception as _e:
+                logger.warning(f"  Dep graph failed for {_pname}: {_e}")
+        if _dep_texts:
+            contract_summary += "\n\n" + "\n\n".join(_dep_texts)
+        if slither_target:
+            if dep_summary:
                 _save_json(output_dir, "dep_graph.json", {
                     "primary_contract": dep_summary.primary_contract,
                     "critical_vars":    dep_summary.critical_vars,
@@ -790,29 +803,48 @@ def main():
             sys.exit(1)
         logger.info(f"  Manifest: primary={manifest.get('primary')}, secondary={manifest.get('secondary')}")
 
-        # Slither caller analysis: find contracts that call primary at runtime
-        # (e.g. Manager, Position — not reachable via forward import BFS).
+        # Slither caller analysis: find contracts that call each primary at runtime.
+        # Multi-primary: run for all cluster primaries and merge callers.
         # Falls back silently when node_modules missing or Slither unavailable.
-        _primary_name = manifest.get("primary")
-        if _primary_name:
-            logger.info(f"\n[STEP 0/4] Slither caller analysis for {_primary_name}...")
+        _primary_names_list = manifest.get("primary_names") or [manifest.get("primary")]
+        _primary_names_list = [n for n in _primary_names_list if n]
+        _caller_contracts: set = set()
+        if _primary_names_list:
             from app.services.contract_dep_graph import ContractDepGraph as _CDG
-            _caller_contracts = _CDG().get_callers_of_primary(
-                source_path=contest_dir,
-                contract_name=_primary_name,
+            _cdg = _CDG()
+            for _pname in _primary_names_list:
+                logger.info(f"\n[STEP 0/4] Slither caller analysis for {_pname}...")
+                try:
+                    _callers = _cdg.get_callers_of_primary(
+                        source_path=contest_dir,
+                        contract_name=_pname,
+                    )
+                    if _callers:
+                        logger.info(f"  {_pname} callers: {sorted(_callers)}")
+                        _caller_contracts.update(_callers)
+                    else:
+                        logger.info(f"  No callers found for {_pname}")
+                except Exception as _e:
+                    logger.warning(f"  Slither caller analysis failed for {_pname}: {_e}")
+
+        if _caller_contracts:
+            logger.info(f"  Callers merged ({len(_caller_contracts)}): {sorted(_caller_contracts)} — re-flattening")
+            source_code, manifest = flatten_contest_dir(
+                contest_dir,
+                verbose=False,
+                emit_manifest=True,
+                extra_scope_contracts=_caller_contracts,
             )
-            if _caller_contracts:
-                logger.info(f"  Callers: {sorted(_caller_contracts)} — re-flattening with Slither scope")
-                source_code, manifest = flatten_contest_dir(
-                    contest_dir,
-                    verbose=False,
-                    emit_manifest=True,
-                    extra_scope_contracts=_caller_contracts,
-                )
-                logger.info(f"  Reflatten scope: {manifest.get('scope_method')}, "
-                            f"secondary={manifest.get('secondary')}")
-            else:
-                logger.info("  No callers found or Slither unavailable — using forward BFS scope")
+            logger.info(f"  Reflatten scope: {manifest.get('scope_method')}, "
+                        f"secondary={manifest.get('secondary')}")
+            if manifest.get("pending_clusters"):
+                _pending = [
+                    manifest.get("contract_names_map", {}).get(pk, pk)
+                    for pk in manifest["pending_clusters"]
+                ]
+                logger.warning(f"  Budget exceeded — clusters DROPPED: {_pending}. Use --multi-primary for full coverage.")
+        else:
+            logger.info("  No callers found or Slither unavailable — using forward BFS scope")
     elif args.sol:
         sol_path = os.path.abspath(args.sol)
         if not os.path.exists(sol_path):
