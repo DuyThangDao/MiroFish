@@ -77,6 +77,42 @@ def _get_contract_modules():
 
 logger = get_logger("mirofish.cyber_orchestrator")
 
+# ── RAG singleton ─────────────────────────────────────────────────────────────
+_rag_retriever = None
+
+def _get_rag_retriever():
+    global _rag_retriever
+    if _rag_retriever is None:
+        import sys
+        __import__('pysqlite3')
+        sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
+        from scripts.rag.rag_retriever import SolodirRetriever
+        _rag_retriever = SolodirRetriever()
+    return _rag_retriever
+
+
+def _execute_rag_search(query: str, n_results: int = 3) -> str:
+    try:
+        retriever = _get_rag_retriever()
+        results = retriever.query(query, n_results=n_results)
+    except Exception as e:
+        return f"[RAG ERROR] {e}"
+    if not results:
+        return "[RAG] No similar findings found. This may be a novel pattern."
+    lines = [f"[RAG] Found {len(results)} similar historical findings:\n"]
+    for i, r in enumerate(results, 1):
+        preview = r["content"][:500].replace("\n", " ").strip()
+        if len(r["content"]) > 500:
+            preview += "..."
+        lines.append(
+            f"--- Finding {i} (similarity: {r['score']:.3f}) ---\n"
+            f"Title: {r['title']}\n"
+            f"Protocol: {r['protocol']} | Severity: {r['impact']}\n"
+            f"Source: {r['source']}\n"
+            f"Pattern: {preview}\n"
+        )
+    return "\n".join(lines)
+
 
 def _build_phase_c_review_list(
     expert_findings: List[Dict[str, Any]],
@@ -2532,15 +2568,95 @@ class CyberSessionOrchestrator:
         raw_pool: dict = {}
 
         def _discover_one(profile) -> list:
+            import re as _re
             t0 = time.time()
-            prompt = cm["r1_prompt"](profile, network_summary)
+
+            rag_enabled = os.environ.get("RAG_ENABLED", "true").lower() == "true"
+            prompt = cm["r1_prompt"](profile, network_summary, rag_enabled=rag_enabled)
+
+            messages = [{"role": "user", "content": prompt}]
+            MAX_RAG_CALLS = 3
+            rag_calls = 0
+            force_stop_sent = False
+            response = ""
+
             try:
-                response = self._call_agent_v2(prompt, max_tokens=self._V2_R1_MAX_TOKENS)
+                while True:
+                    response = self.llm.chat(
+                        messages,
+                        temperature=0.7,
+                        max_tokens=self._V2_R1_MAX_TOKENS,
+                        strip_think=True,
+                    )
+
+                    # Regex bao dung — bắt cả khi LLM quên ngoặc tròn hoặc thêm khoảng trắng
+                    action_match = _re.search(
+                        r'ACTION:\s*rag_search[^(]*\(?\s*(\{.*?\})\s*\)?',
+                        response,
+                        _re.DOTALL,
+                    )
+
+                    if action_match and rag_enabled:
+                        if rag_calls < MAX_RAG_CALLS:
+                            try:
+                                args = json.loads(action_match.group(1))
+                                query = args.get("query", "").strip()
+                            except (json.JSONDecodeError, KeyError):
+                                query = ""
+
+                            if query:
+                                rag_calls += 1
+                                observation = _execute_rag_search(query, n_results=3)
+                                logger.info(
+                                    f"[RAG] agent={profile.agent_id} call={rag_calls}/{MAX_RAG_CALLS} "
+                                    f"query='{query[:70]}'"
+                                )
+                                messages.append({"role": "assistant", "content": response})
+                                messages.append({
+                                    "role": "user",
+                                    "content": (
+                                        f"OBSERVATION:\n{observation}\n\n"
+                                        "Continue your analysis. "
+                                        f"You have {MAX_RAG_CALLS - rag_calls} rag_search call(s) remaining. "
+                                        "If you have enough information, write your FINDING blocks immediately."
+                                    ),
+                                })
+                                continue
+
+                        elif not force_stop_sent:
+                            force_stop_sent = True
+                            logger.info(
+                                f"[RAG] agent={profile.agent_id} exceeded MAX_RAG_CALLS — "
+                                f"forcing FINDING generation"
+                            )
+                            messages.append({"role": "assistant", "content": response})
+                            messages.append({
+                                "role": "user",
+                                "content": (
+                                    "SYSTEM LIMIT REACHED: You cannot use rag_search anymore. "
+                                    "Based on all information gathered, write your final FINDING blocks immediately."
+                                ),
+                            })
+                            continue
+
+                        else:
+                            logger.warning(
+                                f"[RAG] agent={profile.agent_id} ignored SYSTEM LIMIT — breaking loop"
+                            )
+                            break
+
+                    # Không có ACTION → response này chứa FINDING blocks
+                    break
+
             except Exception as e:
                 logger.warning(f"[v2 R1] agent={profile.agent_id} error: {e}")
                 return []
+
             elapsed = time.time() - t0
-            logger.info(f"[TIMING] Phase=v2 R1 agent={profile.agent_id} latency={elapsed:.1f}s")
+            logger.info(
+                f"[TIMING] Phase=v2 R1 agent={profile.agent_id} latency={elapsed:.1f}s "
+                f"rag_calls={rag_calls}"
+            )
 
             if _debug_dir:
                 try:
@@ -2549,6 +2665,9 @@ class CyberSessionOrchestrator:
                     resp_path = os.path.join(_debug_dir, f"r1_{profile.agent_id}.txt")
                     with open(resp_path, "w") as fh:
                         fh.write(response)
+                    prompt_path = os.path.join(_debug_dir, f"r1_{profile.agent_id}_prompt.txt")
+                    with open(prompt_path, "w") as fh:
+                        fh.write(messages[0]["content"] if messages else "")
                 except Exception:
                     pass
 
@@ -2557,7 +2676,7 @@ class CyberSessionOrchestrator:
             logger.info(
                 f"[v2 R1] agent={profile.agent_id}: "
                 f"raw_response={len(response)}chars "
-                f"parsed={n_findings}findings"
+                f"parsed={n_findings}findings rag_calls={rag_calls}"
             )
 
             results = []

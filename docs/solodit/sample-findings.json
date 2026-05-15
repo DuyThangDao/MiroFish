@@ -1,0 +1,180 @@
+{
+  "_meta": {
+    "fetched_at": "2026-05-14",
+    "request": {
+      "url": "POST https://solodit.cyfrin.io/api/v1/solodit/findings",
+      "body": {
+        "page": 1,
+        "pageSize": 3,
+        "filters": {
+          "impact": ["HIGH"],
+          "firms": [{"value": "Code4rena"}],
+          "sortField": "Quality",
+          "sortDirection": "Desc"
+        }
+      }
+    }
+  },
+  "findings": [
+    {
+      "id": "64869",
+      "kind": "GIT",
+      "auditfirm_id": "2",
+      "impact": "HIGH",
+      "finders_count": 26,
+      "protocol_id": "3313",
+      "title": "[H-01] Order double-linked list is broken because order.prevOrderId is not persisted",
+      "content": "\n\n* `clob/types/Book.sol` [# L275-L289](https://github.com/code-423n4/2025-07-gte-clob/blob/9f06332ebd4cfe2577d9eae81aeb58d3662ffccd/contracts/clob/types/Book.sol# L275-L289)\n* `clob/types/Book.sol` [# L150-L154](https://github.com/code-423n4/2025-07-gte-clob/blob/9f06332ebd4cfe2577d9eae81aeb58d3662ffccd/contracts/clob/types/Book.sol# L150-L154)\n\n`order.prevOrderId` is updated only in memory and not saved to storage, breaking the linked list. This causes order adding and removal issues, potentially leading to denial of service when the order book is full and the limit’s tailOrder becomes invalid.\n\n### Description\n\nOrders are stored as a double-linked list in the book.\n\nHowever, this linking is broken as `order.prevOrderId` is not actually stored in EVM storage:\n\n[File: contracts/clob/types/Book.sol](https://github.com/code-423n4/2025-07-gte-clob/blob/9f06332ebd4cfe2577d9eae81aeb58d3662ffccd/contracts/clob/types/Book.sol# L150-L154)\n```\n\n150:     function addOrderToBook(Book storage self, Order memory order) internal {\n151:         Limit storage limit = _updateBookPostOrder(self, order);\n152:\n153:@>       _updateLimitPostOrder(self, limit, order);\n154:     }\n```\n\nAs we can see in the above code, linked list is updated in the end. And order is passed as memory type:\n\n[File: contracts/clob/types/Book.sol](https://github.com/code-423n4/2025-07-gte-clob/blob/9f06332ebd4cfe2577d9eae81aeb58d3662ffccd/contracts/clob/types/Book.sol# L275-L289)\n```\n\n275:     function _updateLimitPostOrder(Book storage self, Limit storage limit, Order memory order) private {\n276:         limit.numOrders++;\n277:\n278:         if (limit.headOrder.isNull()) {\n279:             limit.headOrder = order.id;\n280:             limit.tailOrder = order.id;\n281:         } else {\n282:             Order storage tailOrder = self.orders[limit.tailOrder];\n283:             tailOrder.nextOrderId = order.id;\n284:@>           order.prevOrderId = tailOrder.id;\n285:             limit.tailOrder = order.id;\n286:         }\n287:\n288:         emit LimitOrderCreated(BookEventNonce.inc(), order.id, order.price, order.amount, order.side);\n289:     }\n```\n\nIn L284, `order.prevOrderId` is updated. However, it is not stored in EVM storage because order is passed as memory in L275.\n\nThis completely breaks linked list in future operations. For example, when removing orders:\n\n[File: contracts/clob/types/Book.sol](https://github.com/code-423n4/2025-07-gte-clob/blob/9f06332ebd4cfe2577d9eae81aeb58d3662ffccd/contracts/clob/types/Book.sol# L320-L327)\n```\n\n320:         OrderId prev = order.prevOrderId;\n321:         OrderId next = order.nextOrderId;\n322:\n323:         if (!prev.isNull()) self.orders[prev].nextOrderId = next;\n324:         else limit.headOrder = next;\n325:\n326:         if (!next.isNull()) self.orders[next].prevOrderId = prev;\n327:         else limit.tailOrder = prev;\n```\n\n* `prev` will be null in L320 because `prevOrderId` was not persisted\n* Thus, L323 will not be reached and L324 will always be reached. This means `prev` and `next` linkage will be broken\n* In L327, `limit.tailOrder` will always be set to null if removed entry was the tail\n\n### Impact\n\nOrder adding/removal will be affected.\n\nEspecially, when order book is full, CLOB can face DoS because limit tailOrder is set to empty order due to broken linked list.\n\nThis DoS is demonstrated by a POC.\n\n[View detailed Proof of Concept](https://code4rena.com/audits/2025-07-gte-spot-clob-and-router/submissions/F-18)\n\n---\n\n",
+      "summary": "\nThe bug report is about a problem in the code for a decentralized exchange called CLOB. The code is used to store and manage orders on the exchange. However, there is an issue with the way orders are linked together, which can cause problems when adding or removing orders from the exchange. This can potentially lead to a denial of service attack if the order book becomes full. This problem has been demonstrated by a proof of concept. ",
+      "report_date": {},
+      "contest_prize_txt": "63250",
+      "contest_link": "https://code4rena.com/reports/2025-07-gte-spot-clob-and-router",
+      "sponsor_name": "GTE",
+      "sponsor_link": "",
+      "quality_score": 5,
+      "general_score": 3,
+      "source_link": "https://code4rena.com/reports/2025-07-gte-spot-clob-and-router",
+      "github_link": "https://code4rena.com/audits/2025-07-gte-spot-clob-and-router/submissions/F-18",
+      "pdf_link": "",
+      "pdf_page_from": 0,
+      "contest_id": "514",
+      "slug": "h-01-order-double-linked-list-is-broken-because-orderprevorderid-is-not-persisted-code4rena-gte-gte-git",
+      "firm_name": "Code4rena",
+      "firm_logo_square": "code4rena_square.png",
+      "protocol_name": "GTE",
+      "bookmarked": false,
+      "read": false,
+      "issues_issue_finders": [
+        {"wardens_warden": {"handle": "volodya"}},
+        {"wardens_warden": {"handle": "0x1998"}},
+        {"wardens_warden": {"handle": "0xdice91"}},
+        {"wardens_warden": {"handle": "axelot"}},
+        {"wardens_warden": {"handle": "0xAsen"}},
+        {"wardens_warden": {"handle": "Olugbenga"}},
+        {"wardens_warden": {"handle": "Riceee"}},
+        {"wardens_warden": {"handle": "VulnViper"}},
+        {"wardens_warden": {"handle": "0xPhantom"}},
+        {"wardens_warden": {"handle": "0xlookman"}},
+        {"wardens_warden": {"handle": "Egbe"}},
+        {"wardens_warden": {"handle": "ayden"}},
+        {"wardens_warden": {"handle": "montecristo"}},
+        {"wardens_warden": {"handle": "surenyanoks"}},
+        {"wardens_warden": {"handle": "JuggerNaut63"}},
+        {"wardens_warden": {"handle": "Drynooo"}},
+        {"wardens_warden": {"handle": "taticuvostru"}},
+        {"wardens_warden": {"handle": "sedare64"}},
+        {"wardens_warden": {"handle": "boredpukar"}},
+        {"wardens_warden": {"handle": "DDEENNY"}},
+        {"wardens_warden": {"handle": "Ragnarok"}},
+        {"wardens_warden": {"handle": "dhank"}},
+        {"wardens_warden": {"handle": "touristS"}},
+        {"wardens_warden": {"handle": "lodelux"}},
+        {"wardens_warden": {"handle": "BenRai"}},
+        {"wardens_warden": {"handle": "gh0xt"}}
+      ],
+      "auditfirms_auditfirm": {
+        "name": "Code4rena",
+        "logo_square": "code4rena_square.png"
+      },
+      "protocols_protocol": {
+        "name": "GTE",
+        "protocols_protocolcategoryscore": []
+      },
+      "issues_issuetagscore": []
+    },
+    {
+      "id": "63761",
+      "kind": "GIT",
+      "auditfirm_id": "2",
+      "impact": "HIGH",
+      "finders_count": 1,
+      "protocol_id": "3296",
+      "title": "[H-02] Partial signature replay/frontrunning attack on session calls",
+      "content": "\n\n<https://github.com/code-423n4/2025-10-sequence/blob/b0e5fb15bf6735ec9aaba02f5eca28a7882d815d/src/modules/Calls.sol# L36-L48>\n\n<https://github.com/code-423n4/2025-10-sequence/blob/b0e5fb15bf6735ec9aaba02f5eca28a7882d815d/src/modules/Calls.sol# L61-L123>\n\n<https://github.com/code-423n4/2025-10-sequence/blob/b0e5fb15bf6735ec9aaba02f5eca28a7882d815d/src/extensions/sessions/SessionSig.sol# L136-L176>\n\nWhen a session call with `BEHAVIOR_REVERT_ON_ERROR` behavior fails, the entire execution reverts but the signature remains valid, since nonce is not yet consumed. Attackers can forge a valid partial signature from failed multi-call session, executing partial calls that were never intended to run independently.\n\nMoreover, if an attacker has access to mempool, they can frontrun a multi-call session to execute only a subset of calls to either grief the legitimate call, or inflict financial damage to the wallet owners.\n\n### Finding description and impact\n\nThe `Calls` contract consumes nonces before signature validation and execution...\n\n### Recommended mitigation steps\n\nBind session call signatures to the complete payload hash to prevent partial signature replay.",
+      "summary": "\nThis bug report discusses a vulnerability in the code that handles session calls in the `Calls.sol` and `SessionSig.sol` files. When a session call with `BEHAVIOR_REVERT_ON_ERROR` fails, the entire execution reverts but the signature remains valid. This allows attackers to forge a valid partial signature and execute calls that were not intended to run independently. Additionally, if an attacker has access to the mempool, they can frontrun a multi-call session and execute only a subset of calls, potentially causing financial loss, state corruption, or bypassing security measures. The recommended mitigation steps involve binding session call signatures to the complete payload hash to prevent partial signature replay. A proof of concept is also provided in the `POC.t.sol` file.",
+      "report_date": {},
+      "contest_prize_txt": "73000",
+      "contest_link": "https://code4rena.com/reports/2025-10-sequence",
+      "sponsor_name": "Sequence",
+      "sponsor_link": "",
+      "quality_score": 5,
+      "general_score": 4.333333333333333,
+      "source_link": "https://code4rena.com/reports/2025-10-sequence",
+      "github_link": "https://code4rena.com/audits/2025-10-sequence/submissions/F-395",
+      "pdf_link": "",
+      "pdf_page_from": 0,
+      "contest_id": "525",
+      "slug": "h-02-partial-signature-replayfrontrunning-attack-on-session-calls-code4rena-sequence-sequence-git",
+      "firm_name": "Code4rena",
+      "firm_logo_square": "code4rena_square.png",
+      "protocol_name": "Sequence",
+      "bookmarked": false,
+      "read": false,
+      "issues_issue_finders": [
+        {"wardens_warden": {"handle": "montecristo"}}
+      ],
+      "auditfirms_auditfirm": {
+        "name": "Code4rena",
+        "logo_square": "code4rena_square.png"
+      },
+      "protocols_protocol": {
+        "name": "Sequence",
+        "protocols_protocolcategoryscore": []
+      },
+      "issues_issuetagscore": []
+    },
+    {
+      "id": "63760",
+      "kind": "GIT",
+      "auditfirm_id": "2",
+      "impact": "HIGH",
+      "finders_count": 1,
+      "protocol_id": "3296",
+      "title": "[H-01] Chained signature with checkpoint usage disabled can bypass all checkpointer validation",
+      "content": "\n\n<https://github.com/code-423n4/2025-10-sequence/blob/b0e5fb15bf6735ec9aaba02f5eca28a7882d815d/src/modules/auth/BaseSig.sol# L88>\n\n### Finding description and impact\n\nConsider a scenario where (1) the wallet is behind the checkpointer and (2) a chained signature is used; however, bit 6 (`0x40` - the checkpointer usage flag) is zero. As a result, when `BaseSig.recover` is called the below if-block on `BaseSig.sol:88-106` will be skipped.\n\nWe can see that this will leave the following variables unset (zero-valued):\n\n* `_checkpointer`\n* `snapshot.checkpoint`\n* `snapshot.imageHash`\n\n**Impact:** an evicted signer can maliciously sign a payload (valid with respect to the stale wallet configuration) and perform operations on the wallet.\n\n### Recommended mitigation steps\n\nDo not permit the checkpointer to be disabled in the signature (bit 6 left unset) if a chained signature is used. The signature recovery should revert in this case.",
+      "summary": "\nThis bug report discusses a potential vulnerability in a code that is used for signing transactions in a wallet. The bug occurs when a specific scenario is met, where the wallet is behind a checkpointer and a chained signature is used. This leads to certain variables being left unset, which can allow an evicted signer to maliciously sign a payload and perform unauthorized operations on the wallet. The report recommends a mitigation step to prevent this bug from occurring and provides a proof of concept test case to demonstrate the issue.",
+      "report_date": {},
+      "contest_prize_txt": "73000",
+      "contest_link": "https://code4rena.com/reports/2025-10-sequence",
+      "sponsor_name": "Sequence",
+      "sponsor_link": "",
+      "quality_score": 5,
+      "general_score": 5,
+      "source_link": "https://code4rena.com/reports/2025-10-sequence",
+      "github_link": "https://code4rena.com/audits/2025-10-sequence/submissions/F-292",
+      "pdf_link": "",
+      "pdf_page_from": 0,
+      "contest_id": "525",
+      "slug": "h-01-chained-signature-with-checkpoint-usage-disabled-can-bypass-all-checkpointer-validation-code4rena-sequence-sequence-git",
+      "firm_name": "Code4rena",
+      "firm_logo_square": "code4rena_square.png",
+      "protocol_name": "Sequence",
+      "bookmarked": false,
+      "read": false,
+      "issues_issue_finders": [
+        {"wardens_warden": {"handle": "hgrano"}}
+      ],
+      "auditfirms_auditfirm": {
+        "name": "Code4rena",
+        "logo_square": "code4rena_square.png"
+      },
+      "protocols_protocol": {
+        "name": "Sequence",
+        "protocols_protocolcategoryscore": []
+      },
+      "issues_issuetagscore": []
+    }
+  ],
+  "metadata": {
+    "totalResults": 1669,
+    "currentPage": 1,
+    "pageSize": 3,
+    "totalPages": 557,
+    "elapsed": 0.312486288999964
+  },
+  "rateLimit": {
+    "limit": 20,
+    "remaining": 19,
+    "reset": 1778726460
+  }
+}

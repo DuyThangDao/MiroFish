@@ -1,0 +1,7 @@
+# RAG vector database — build locally, không commit
+data/rag_db/
+
+# Python
+__pycache__/
+*.pyc
+.env

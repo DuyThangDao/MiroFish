@@ -22,6 +22,43 @@ from .semantic_taxonomy import SEMANTIC_CATEGORY_PIPE_STRING, normalize_semantic
 
 logger = get_logger("mirofish.contract_oasis_env")
 
+_RAG_TOOL_SPEC = """
+=== RAG SEARCH TOOL ===
+You have access to a database of HIGH severity findings confirmed in real smart contract audits.
+Use it when you have a CONCRETE hypothesis and want to validate against historical precedent.
+
+Call format:
+  ACTION: rag_search({"query": "specific technical description of the suspected vulnerability"})
+
+Query guidelines:
+  GOOD: "reentrancy in withdraw via external call before balance update"
+  GOOD: "integer overflow in unchecked cast uint256 to uint128 token amount"
+  BAD:  "check for bugs"  <- too vague
+  BAD:  "vulnerability"   <- not a query
+
+After ACTION, you will receive an OBSERVATION with similar historical findings.
+Use the OBSERVATION to:
+  - Confirm or dismiss your hypothesis based on pattern match
+  - Strengthen FINDING evidence if confirmed
+  - Drop the hypothesis ONLY if the pattern clearly does not match the code evidence
+
+CRITICAL — RAG does NOT gatekeep your findings:
+  - If RAG returns low similarity scores or no results -> this does NOT invalidate your finding.
+    It may mean the vulnerability is novel or not yet in the database. Report it anyway.
+  - If RAG returns high similarity -> use as supporting evidence, not as proof of existence.
+    You still must verify the pattern exists in THIS contract's code.
+  - Your independent code analysis always takes priority over RAG results.
+    Never suppress a finding solely because RAG could not confirm it.
+
+Limits:
+  - Maximum 3 rag_search calls per analysis session
+  - Only call when you have a specific hypothesis — NOT for every function
+  - RAG is supplementary intelligence, not a prerequisite for writing FINDINGs
+
+If you have no more searches to do, proceed directly to writing FINDING blocks.
+=== END RAG TOOL SPEC ===
+"""
+
 
 # ─── Action Types ─────────────────────────────────────────────────────────────
 
@@ -1377,6 +1414,7 @@ def build_round1_prompt(
     dep_graph_text: str = "",
     intent_summary: str = "",
     focus_directive: str = "",
+    rag_enabled: bool = False,
 ) -> str:
     """
     Round 1 — Independent Discovery.
@@ -1389,6 +1427,16 @@ def build_round1_prompt(
     dep_block = f"\n=== STATIC DATA-FLOW SUMMARY ===\n{dep_graph_text}\n" if dep_graph_text else ""
     intent_block = f"\n=== CONTRACT INTENT ===\n{intent_summary}\n" if intent_summary else ""
     focus_block = f"\n{focus_directive}\n" if focus_directive else ""
+    rag_block = _RAG_TOOL_SPEC if rag_enabled else ""
+    rag_step = (
+        "\nSTEP 2.5 — RAG VALIDATION (mandatory when you find a potential vulnerability):\n"
+        "  For EACH potential violation found in STEP 2, before writing the FINDING block:\n"
+        "  1. Formulate a specific technical description of the suspected vulnerability.\n"
+        "  2. Call: ACTION: rag_search({\"query\": \"<specific technical description>\"})\n"
+        "  3. Wait for OBSERVATION, then incorporate the historical context into your FINDING.\n"
+        "  Do this for ALL hypotheses — up to 3 total rag_search calls.\n"
+        "  After all RAG calls (or if you have 0 hypotheses), write FINDING blocks.\n"
+    ) if rag_enabled else ""
 
     return f"""\
 === ROUND 1 — INDEPENDENT DISCOVERY ===
@@ -1398,7 +1446,7 @@ You are {agent_profile.agent_id} ({agent_profile.domain_group}/{agent_profile.pe
 ⚠ ROUND 1 FORMAT OVERRIDE — Use ONLY FINDING blocks.
   Do NOT write CLAIM, VALIDATE, CHALLENGE, CONFIRM, or DISMISS in this round.
 
-{focus_block}{intent_block}{dep_block}
+{focus_block}{intent_block}{dep_block}{rag_block}
 === CONTRACT UNDER REVIEW ===
 {context_summary}
 
@@ -1443,7 +1491,7 @@ STEP 2 — FIND VIOLATIONS:
   If Q1 = YES → write a FINDING with:
     EVIDENCE: INV: <invariant statement> | VIOLATED_AT: <fn()> | COUNTEREXAMPLE: <condition that causes violation>
 
-  After listing invariants, IMMEDIATELY proceed to writing FINDING blocks.
+{rag_step}  After analysis (and RAG calls if applicable), proceed to writing FINDING blocks.
   No summary or commentary needed — go straight to findings.
 
 CAST & COMPARISON PRECISION — before writing any arithmetic finding, answer these questions:
