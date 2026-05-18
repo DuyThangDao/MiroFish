@@ -22,44 +22,6 @@ from .semantic_taxonomy import SEMANTIC_CATEGORY_PIPE_STRING, normalize_semantic
 
 logger = get_logger("mirofish.contract_oasis_env")
 
-_RAG_TOOL_SPEC = """
-=== RAG SEARCH TOOL ===
-You have access to a database of HIGH severity findings confirmed in real smart contract audits.
-Use it when you have a CONCRETE hypothesis and want to validate against historical precedent.
-
-Call format:
-  ACTION: rag_search({"query": "specific technical description of the suspected vulnerability"})
-
-Query guidelines:
-  GOOD: "reentrancy in withdraw via external call before balance update"
-  GOOD: "integer overflow in unchecked cast uint256 to uint128 token amount"
-  BAD:  "check for bugs"  <- too vague
-  BAD:  "vulnerability"   <- not a query
-
-After ACTION, you will receive an OBSERVATION with similar historical findings.
-Use the OBSERVATION to:
-  - Confirm or dismiss your hypothesis based on pattern match
-  - Strengthen FINDING evidence if confirmed
-  - Drop the hypothesis ONLY if the pattern clearly does not match the code evidence
-
-CRITICAL — RAG does NOT gatekeep your findings:
-  - If RAG returns low similarity scores or no results -> this does NOT invalidate your finding.
-    It may mean the vulnerability is novel or not yet in the database. Report it anyway.
-  - If RAG returns high similarity -> use as supporting evidence, not as proof of existence.
-    You still must verify the pattern exists in THIS contract's code.
-  - Your independent code analysis always takes priority over RAG results.
-    Never suppress a finding solely because RAG could not confirm it.
-
-Limits:
-  - Maximum 3 rag_search calls per analysis session
-  - Only call when you have a specific hypothesis — NOT for every function
-  - RAG is supplementary intelligence, not a prerequisite for writing FINDINGs
-
-If you have no more searches to do, proceed directly to writing FINDING blocks.
-=== END RAG TOOL SPEC ===
-"""
-
-
 # ─── Action Types ─────────────────────────────────────────────────────────────
 
 CONTRACT_AUDIT_ACTIONS = {
@@ -1408,59 +1370,7 @@ Start the audit. Report your first findings based on the contract context above.
 
 # ─── v2 Round Prompt Builders ─────────────────────────────────────────────────
 
-def build_round1_prompt(
-    agent_profile: "ContractAgentProfile",
-    context_summary: str,
-    dep_graph_text: str = "",
-    intent_summary: str = "",
-    focus_directive: str = "",
-    rag_enabled: bool = False,
-) -> str:
-    """
-    Round 1 — Independent Discovery.
-
-    Rules:
-    - No prior findings injected (blind discovery)
-    - Unified FINDING format — no SWC: or CATEGORY: fields
-    - Only FINDING format allowed — no CLAIM/VALIDATE/CHALLENGE/CONFIRM/DISMISS
-    """
-    dep_block = f"\n=== STATIC DATA-FLOW SUMMARY ===\n{dep_graph_text}\n" if dep_graph_text else ""
-    intent_block = f"\n=== CONTRACT INTENT ===\n{intent_summary}\n" if intent_summary else ""
-    focus_block = f"\n{focus_directive}\n" if focus_directive else ""
-    rag_block = _RAG_TOOL_SPEC if rag_enabled else ""
-    rag_step = (
-        "\nSTEP 2.5 — RAG VALIDATION (mandatory when you find a potential vulnerability):\n"
-        "  For EACH potential violation found in STEP 2, before writing the FINDING block:\n"
-        "  1. Formulate a specific technical description of the suspected vulnerability.\n"
-        "  2. Call: ACTION: rag_search({\"query\": \"<specific technical description>\"})\n"
-        "  3. Wait for OBSERVATION, then incorporate the historical context into your FINDING.\n"
-        "  Do this for ALL hypotheses — up to 3 total rag_search calls.\n"
-        "  After all RAG calls (or if you have 0 hypotheses), write FINDING blocks.\n"
-    ) if rag_enabled else ""
-
-    return f"""\
-=== ROUND 1 — INDEPENDENT DISCOVERY ===
-You are {agent_profile.agent_id} ({agent_profile.domain_group}/{agent_profile.persona}).
-{agent_profile.system_prompt}
-
-⚠ ROUND 1 FORMAT OVERRIDE — Use ONLY FINDING blocks.
-  Do NOT write CLAIM, VALIDATE, CHALLENGE, CONFIRM, or DISMISS in this round.
-
-{focus_block}{intent_block}{dep_block}{rag_block}
-=== CONTRACT UNDER REVIEW ===
-{context_summary}
-
-=== INSTRUCTIONS ===
-Perform an independent security analysis. No other expert's findings are shared at this stage.
-
-The contract source above includes ALL functions — public, external, internal, and private.
-Analyze every function. Do not limit your analysis to only public/external functions.
-
-COVERAGE RULE — if a vulnerability pattern appears in MULTIPLE functions, write one FINDING per function.
-Do NOT collapse "function A and B" into a single FINDING. A missed function = a missed bug.
-
-PROTOCOL INVARIANT ANALYSIS — mandatory before writing any FINDING:
-
+_STEP1_BLOCK = """\
 STEP 1 — LIST INVARIANTS:
   Read the full contract source and list 3–6 PROTOCOL-SPECIFIC invariants.
   Format: INV-1: <invariant statement>, INV-2: ..., ...
@@ -1480,9 +1390,80 @@ STEP 1 — LIST INVARIANTS:
   - Read NatSpec @notice/@dev — they often describe conditions that must hold
   - Read require() messages — each require is an invariant candidate
   - Look for state variables named "total", "global", "cumulative" — they usually must equal sum of sub-values
-  - Look for functions named "distribute", "reward", "migrate", "sync" — they often have ordering invariants
+  - Look for functions named "distribute", "reward", "migrate", "sync" — they often have ordering invariants"""
 
-STEP 2 — FIND VIOLATIONS:
+
+def build_round1_prompt(
+    agent_profile: "ContractAgentProfile",
+    context_summary: str,
+    dep_graph_text: str = "",
+    intent_summary: str = "",
+    focus_directive: str = "",
+    invariant_only: bool = False,
+    injected_invariants: str = "",
+    step2_hint: str = "",
+) -> str:
+    """
+    Round 1 — Independent Discovery.
+
+    Rules:
+    - No prior findings injected (blind discovery)
+    - Unified FINDING format — no SWC: or CATEGORY: fields
+    - Only FINDING format allowed — no CLAIM/VALIDATE/CHALLENGE/CONFIRM/DISMISS
+    """
+    dep_block = f"\n=== STATIC DATA-FLOW SUMMARY ===\n{dep_graph_text}\n" if dep_graph_text else ""
+    intent_block = f"\n=== CONTRACT INTENT ===\n{intent_summary}\n" if intent_summary else ""
+    focus_block = f"\n{focus_directive}\n" if focus_directive else ""
+
+    if invariant_only:
+        return f"""\
+=== ROUND 1 — PHASE A: INVARIANT EXTRACTION ===
+You are {agent_profile.agent_id} ({agent_profile.domain_group}/{agent_profile.persona}).
+{agent_profile.system_prompt}
+{focus_block}{intent_block}{dep_block}
+=== CONTRACT UNDER REVIEW ===
+{context_summary}
+
+=== TASK: INVARIANT EXTRACTION ONLY ===
+{_STEP1_BLOCK}
+
+Output ONLY the numbered invariant list (INV-1, INV-2, ...). Do NOT write any FINDING block,
+violation analysis, or commentary. Violation analysis will happen in a separate step.
+"""
+
+    step1_section = (
+        f"Your invariants from Phase A (use these — do NOT re-derive):\n{injected_invariants}\n"
+        if injected_invariants
+        else _STEP1_BLOCK
+    )
+    hint_section = f"{step2_hint}\n" if step2_hint else ""
+
+    return f"""\
+=== ROUND 1 — INDEPENDENT DISCOVERY ===
+You are {agent_profile.agent_id} ({agent_profile.domain_group}/{agent_profile.persona}).
+{agent_profile.system_prompt}
+
+⚠ ROUND 1 FORMAT OVERRIDE — Use ONLY FINDING blocks.
+  Do NOT write CLAIM, VALIDATE, CHALLENGE, CONFIRM, or DISMISS in this round.
+
+{focus_block}{intent_block}{dep_block}
+=== CONTRACT UNDER REVIEW ===
+{context_summary}
+
+=== INSTRUCTIONS ===
+Perform an independent security analysis. No other expert's findings are shared at this stage.
+
+The contract source above includes ALL functions — public, external, internal, and private.
+Analyze every function. Do not limit your analysis to only public/external functions.
+
+COVERAGE RULE — if a vulnerability pattern appears in MULTIPLE functions, write one FINDING per function.
+Do NOT collapse "function A and B" into a single FINDING. A missed function = a missed bug.
+
+PROTOCOL INVARIANT ANALYSIS — mandatory before writing any FINDING:
+
+{step1_section}
+
+{hint_section}STEP 2 — FIND VIOLATIONS:
   For each invariant listed above, ask:
   Q1: Is there any execution path (sequence of function calls) that can make this invariant false?
   Q2: If yes — can an attacker control that path? Or does it only occur due to a logic bug?
@@ -1491,7 +1472,7 @@ STEP 2 — FIND VIOLATIONS:
   If Q1 = YES → write a FINDING with:
     EVIDENCE: INV: <invariant statement> | VIOLATED_AT: <fn()> | COUNTEREXAMPLE: <condition that causes violation>
 
-{rag_step}  After analysis (and RAG calls if applicable), proceed to writing FINDING blocks.
+  After analysis, proceed to writing FINDING blocks.
   No summary or commentary needed — go straight to findings.
 
 CAST & COMPARISON PRECISION — before writing any arithmetic finding, answer these questions:

@@ -79,39 +79,131 @@ logger = get_logger("mirofish.cyber_orchestrator")
 
 # ── RAG singleton ─────────────────────────────────────────────────────────────
 _rag_retriever = None
+_rag_lock = threading.Lock()  # serialize ChromaDB access — concurrent Rust bindings cause crashes
 
 def _get_rag_retriever():
     global _rag_retriever
     if _rag_retriever is None:
-        import sys
-        __import__('pysqlite3')
-        sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
-        from scripts.rag.rag_retriever import SolodirRetriever
-        _rag_retriever = SolodirRetriever()
+        with _rag_lock:
+            if _rag_retriever is None:  # double-checked locking
+                import sys
+                __import__('pysqlite3')
+                sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
+                from scripts.rag.rag_retriever import SolodirRetriever
+                _rag_retriever = SolodirRetriever()
     return _rag_retriever
 
 
-def _execute_rag_search(query: str, n_results: int = 3) -> str:
-    try:
-        retriever = _get_rag_retriever()
-        results = retriever.query(query, n_results=n_results)
-    except Exception as e:
-        return f"[RAG ERROR] {e}"
-    if not results:
-        return "[RAG] No similar findings found. This may be a novel pattern."
-    lines = [f"[RAG] Found {len(results)} similar historical findings:\n"]
-    for i, r in enumerate(results, 1):
-        preview = r["content"][:500].replace("\n", " ").strip()
-        if len(r["content"]) > 500:
-            preview += "..."
-        lines.append(
-            f"--- Finding {i} (similarity: {r['score']:.3f}) ---\n"
-            f"Title: {r['title']}\n"
-            f"Protocol: {r['protocol']} | Severity: {r['impact']}\n"
-            f"Source: {r['source']}\n"
-            f"Pattern: {preview}\n"
+import re as _re_rag
+
+# Parse FINDING blocks: title on FINDING: line, then full block until next FINDING or end
+_FINDING_BLOCK_RE = _re_rag.compile(
+    r'^FINDING:\s*(.+?)\n(.*?)(?=\nFINDING:|\Z)',
+    _re_rag.DOTALL | _re_rag.MULTILINE,
+)
+# Extract a single named field from a FINDING block
+_FIELD_RE = _re_rag.compile(
+    r'^([A-Z_]+):\s*(.+?)(?=\n[A-Z_]+:|\Z)',
+    _re_rag.DOTALL | _re_rag.MULTILINE,
+)
+_SCORE_INJECT_THRESHOLD     = 0.68
+_SCORE_SHOW_THRESHOLD       = 0.65
+_SCORE_INJECT_THRESHOLD_INV = 0.70  # calibrated from Phase 5c score distribution (0.576–0.737)
+
+
+def _extract_field(block: str, field: str) -> str:
+    m = _re_rag.search(
+        rf'^{field}:\s*(.+?)(?=\n[A-Z_]+:|\Z)', block,
+        _re_rag.DOTALL | _re_rag.MULTILINE,
+    )
+    return m.group(1).strip() if m else ""
+
+
+def build_rag_query(title: str, description: str) -> str:
+    text = f"{title}. {description}"
+    text = _re_rag.sub(r'\b\w+\s*\([^)]*\)', '', text)               # strip fn signatures
+    text = _re_rag.sub(r'\b[a-zA-Z_]+\.[a-zA-Z_]+\b', '', text)     # strip dotted refs
+    text = _re_rag.sub(r'\b[A-Z][a-z]+[A-Z][a-zA-Z]*\b', '', text)  # strip CamelCase
+    text = _re_rag.sub(
+        r'\b(?:Trident|BentoBox|Sushi|Uniswap|Aave|Compound|Balancer)\b',
+        '', text, flags=_re_rag.IGNORECASE,
+    )
+    return _re_rag.sub(r'\s+', ' ', text).strip()
+
+
+def _build_rag_observations(response: str, agent_id: str) -> list:
+    matches = list(_FINDING_BLOCK_RE.finditer(response))
+    if not matches:
+        return []
+    retriever = _get_rag_retriever()
+    observations = []
+    for i, m in enumerate(matches):
+        title = m.group(1).strip()
+        block = m.group(2)
+        # Use ATTACK_PATH as primary description; fall back to EVIDENCE
+        attack_path = _extract_field(block, "ATTACK_PATH")
+        evidence = _extract_field(block, "EVIDENCE")
+        description = attack_path or evidence
+        if not description:
+            continue
+        query = build_rag_query(title, description)
+        if not query:
+            continue
+        with _rag_lock:
+            results = retriever.query(query, n_results=3)
+        if not results:
+            continue
+        top_score = results[0]["score"]
+        logger.info(
+            f"[RAG] agent={agent_id} finding={i+1}/{len(matches)} "
+            f"top_score={top_score:.3f} title='{title[:50]}'"
         )
-    return "\n".join(lines)
+        if top_score < _SCORE_INJECT_THRESHOLD:
+            continue
+        lines = [f"--- Historical context for FINDING: '{title}' ---"]
+        for j, r in enumerate(results, 1):
+            if r["score"] < _SCORE_SHOW_THRESHOLD:
+                break
+            preview = r["content"][:400].replace("\n", " ").strip()
+            lines.append(
+                f"[{j}] score={r['score']:.3f} | {r['title']}\n"
+                f"    Protocol: {r['protocol']} | {preview}"
+            )
+        observations.append("\n".join(lines))
+    return observations
+
+
+def _build_invariant_rag_hints(invariant_text: str, agent_id: str) -> tuple:
+    """Returns (hint_block: str, num_matched: int) — query RAG per INV-N line."""
+    inv_pattern = _re_rag.compile(r'INV-\d+:\s*(.+)', _re_rag.IGNORECASE)
+    invariants = inv_pattern.findall(invariant_text)
+    if not invariants:
+        return "", 0
+    retriever = _get_rag_retriever()
+    hints = []
+    for i, inv in enumerate(invariants):
+        query = build_rag_query("", inv)
+        if not query:
+            continue
+        with _rag_lock:
+            results = retriever.query(query, n_results=3)
+        top_score = results[0]["score"] if results else 0.0
+        if not results or top_score < _SCORE_INJECT_THRESHOLD_INV:
+            logger.info(
+                f"[RAG] agent={agent_id} inv={i+1} score={top_score:.3f} → skip (below threshold)"
+            )
+            continue
+        logger.info(
+            f"[RAG] agent={agent_id} inv={i+1} score={top_score:.3f} inv='{inv[:60]}'"
+        )
+        block = [f"INV-{i+1} historical violations (score={top_score:.3f}):"]
+        for j, r in enumerate(results, 1):
+            if r["score"] < _SCORE_SHOW_THRESHOLD:
+                break
+            preview = r["content"][:350].replace("\n", " ").strip()
+            block.append(f"  [{j}] {r['title']} | {preview}")
+        hints.append("\n".join(block))
+    return "\n\n".join(hints), len(hints)
 
 
 def _build_phase_c_review_list(
@@ -2568,85 +2660,61 @@ class CyberSessionOrchestrator:
         raw_pool: dict = {}
 
         def _discover_one(profile) -> list:
-            import re as _re
             t0 = time.time()
 
             rag_enabled = os.environ.get("RAG_ENABLED", "true").lower() == "true"
-            prompt = cm["r1_prompt"](profile, network_summary, rag_enabled=rag_enabled)
-
-            messages = [{"role": "user", "content": prompt}]
-            MAX_RAG_CALLS = 3
             rag_calls = 0
-            force_stop_sent = False
-            response = ""
 
             try:
-                while True:
-                    response = self.llm.chat(
-                        messages,
-                        temperature=0.7,
-                        max_tokens=self._V2_R1_MAX_TOKENS,
-                        strip_think=True,
+                # Turn 1: agent extracts invariants only
+                # max_tokens must match Turn 2 — Gemini thinking model needs >= ~32K
+                # to generate any visible output (smaller values → content=None)
+                turn1_prompt = cm["r1_prompt"](profile, network_summary, invariant_only=True)
+                turn1_response = self.llm.chat(
+                    [{"role": "user", "content": turn1_prompt}],
+                    temperature=0.7,
+                    max_tokens=self._V2_R1_MAX_TOKENS,
+                    strip_think=False,  # keep think block — INV-N regex works on full content
+                )
+                if not turn1_response.strip():
+                    logger.warning(
+                        f"[v2 R1] agent={profile.agent_id} Turn 1 returned empty — "
+                        f"falling back to single-turn mode"
                     )
 
-                    # Regex bao dung — bắt cả khi LLM quên ngoặc tròn hoặc thêm khoảng trắng
-                    action_match = _re.search(
-                        r'ACTION:\s*rag_search[^(]*\(?\s*(\{.*?\})\s*\)?',
-                        response,
-                        _re.DOTALL,
+                # System: query RAG per invariant, build hint block
+                step2_hint = ""
+                if rag_enabled:
+                    hint_block, rag_calls = _build_invariant_rag_hints(
+                        turn1_response, profile.agent_id
                     )
+                    if hint_block:
+                        step2_hint = (
+                            "\nHISTORICAL VIOLATION PATTERNS from audit database:\n\n"
+                            f"{hint_block}\n\n"
+                            "For each INV where a historical pattern is shown above:\n"
+                            "  - BE SKEPTICAL: Assume the code is SAFE first. Do not force a match.\n"
+                            "  - Check if THIS contract's code has the EXACT SAME logical flaw.\n"
+                            "  - Only write a FINDING if you can extract the SPECIFIC CODE LINES proving it.\n"
+                            "  - If the historical exploit path is blocked or mitigated, EXPLICITLY state 'Mitigated' and skip.\n"
+                            "For INVs without historical patterns: reason independently.\n"
+                        )
 
-                    if action_match and rag_enabled:
-                        if rag_calls < MAX_RAG_CALLS:
-                            try:
-                                args = json.loads(action_match.group(1))
-                                query = args.get("query", "").strip()
-                            except (json.JSONDecodeError, KeyError):
-                                query = ""
+                # Strip think block before injecting into Turn 2 (clean display, save context)
+                turn1_clean = _re_rag.sub(r'<think>[\s\S]*?</think>', '', turn1_response).strip()
 
-                            if query:
-                                rag_calls += 1
-                                observation = _execute_rag_search(query, n_results=3)
-                                logger.info(
-                                    f"[RAG] agent={profile.agent_id} call={rag_calls}/{MAX_RAG_CALLS} "
-                                    f"query='{query[:70]}'"
-                                )
-                                messages.append({"role": "assistant", "content": response})
-                                messages.append({
-                                    "role": "user",
-                                    "content": (
-                                        f"OBSERVATION:\n{observation}\n\n"
-                                        "Continue your analysis. "
-                                        f"You have {MAX_RAG_CALLS - rag_calls} rag_search call(s) remaining. "
-                                        "If you have enough information, write your FINDING blocks immediately."
-                                    ),
-                                })
-                                continue
-
-                        elif not force_stop_sent:
-                            force_stop_sent = True
-                            logger.info(
-                                f"[RAG] agent={profile.agent_id} exceeded MAX_RAG_CALLS — "
-                                f"forcing FINDING generation"
-                            )
-                            messages.append({"role": "assistant", "content": response})
-                            messages.append({
-                                "role": "user",
-                                "content": (
-                                    "SYSTEM LIMIT REACHED: You cannot use rag_search anymore. "
-                                    "Based on all information gathered, write your final FINDING blocks immediately."
-                                ),
-                            })
-                            continue
-
-                        else:
-                            logger.warning(
-                                f"[RAG] agent={profile.agent_id} ignored SYSTEM LIMIT — breaking loop"
-                            )
-                            break
-
-                    # Không có ACTION → response này chứa FINDING blocks
-                    break
+                # Turn 2: full violation analysis — ALWAYS runs (Turn 1 only extracted invariants)
+                turn2_prompt = cm["r1_prompt"](
+                    profile, network_summary,
+                    injected_invariants=turn1_clean,
+                    step2_hint=step2_hint,
+                )
+                response = self.llm.chat(
+                    [{"role": "user", "content": turn2_prompt}],
+                    temperature=0.7,
+                    max_tokens=self._V2_R1_MAX_TOKENS,
+                    strip_think=True,
+                )
 
             except Exception as e:
                 logger.warning(f"[v2 R1] agent={profile.agent_id} error: {e}")
@@ -2662,12 +2730,12 @@ class CyberSessionOrchestrator:
                 try:
                     import pathlib
                     pathlib.Path(_debug_dir).mkdir(parents=True, exist_ok=True)
-                    resp_path = os.path.join(_debug_dir, f"r1_{profile.agent_id}.txt")
-                    with open(resp_path, "w") as fh:
+                    with open(os.path.join(_debug_dir, f"r1_{profile.agent_id}_inv.txt"), "w") as fh:
+                        fh.write(turn1_response)
+                    with open(os.path.join(_debug_dir, f"r1_{profile.agent_id}.txt"), "w") as fh:
                         fh.write(response)
-                    prompt_path = os.path.join(_debug_dir, f"r1_{profile.agent_id}_prompt.txt")
-                    with open(prompt_path, "w") as fh:
-                        fh.write(messages[0]["content"] if messages else "")
+                    with open(os.path.join(_debug_dir, f"r1_{profile.agent_id}_prompt.txt"), "w") as fh:
+                        fh.write(turn2_prompt)
                 except Exception:
                     pass
 

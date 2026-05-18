@@ -39,6 +39,27 @@ def _get_findings(report: dict | list) -> List[dict]:
     return report.get("findings") or report.get("consensus_vulns") or []
 
 
+def _tier2_candidates(findings: List[dict], gt_fn: str, gt_con: str) -> List[dict]:
+    """
+    Tier-2: findings that declared a different function but mention the GT function
+    in their attack_path or description — i.e. the agent analyzed the right function
+    but attributed the finding to a different entry point.
+    """
+    results = []
+    for f in findings:
+        fn = (f.get("function_name") or "").lower().rstrip("()")
+        con = (f.get("contract_name") or "").lower()
+        if fn == gt_fn and con == gt_con:
+            continue  # already a Tier-1 candidate
+        text = " ".join([
+            f.get("attack_path") or "",
+            f.get("description") or "",
+        ]).lower()
+        if gt_fn in text and gt_con in text:
+            results.append(f)
+    return results
+
+
 def run_eval(gt_path: str, findings_path: str, verbose: bool = False) -> dict:
     gt_bugs: List[dict] = _load_json(gt_path)
     report = _load_json(findings_path)
@@ -46,6 +67,7 @@ def run_eval(gt_path: str, findings_path: str, verbose: bool = False) -> dict:
 
     matched_h_ids: Set[str] = set()
     matched_finding_ids: Set[str] = set()
+    matched_t2_h_ids: Set[str] = set()  # subset matched via Tier-2
 
     match_details: List[dict] = []
 
@@ -54,6 +76,7 @@ def run_eval(gt_path: str, findings_path: str, verbose: bool = False) -> dict:
         gt_fn    = (gt.get("function_name") or "").lower().rstrip("()")
         gt_con   = (gt.get("contract_name") or "").lower()
 
+        # ── Tier-1: exact (contract, function) match ──────────────────────────
         candidates = [
             f for f in findings
             if (f.get("function_name") or "").lower().rstrip("()") == gt_fn
@@ -62,22 +85,48 @@ def run_eval(gt_path: str, findings_path: str, verbose: bool = False) -> dict:
 
         if verbose:
             print(f"\n[H] {h_id}: {gt.get('title','')[:60]}")
-            print(f"    location: {gt_con}.{gt_fn}  →  {len(candidates)} candidates")
+            print(f"    location: {gt_con}.{gt_fn}  →  {len(candidates)} T1 candidates")
 
+        t1_matched = False
         for pred in candidates:
             fid = pred.get("finding_id") or pred.get("title", "")[:30]
             is_match, reason = judge_match(gt, pred)
             if verbose:
-                print(f"    candidate '{fid[:40]}': {'YES' if is_match else 'NO'} — {reason}")
+                print(f"    [T1] '{fid[:40]}': {'YES' if is_match else 'NO'} — {reason}")
             if is_match:
                 matched_h_ids.add(h_id)
                 matched_finding_ids.add(fid)
                 match_details.append({
-                    "h_id": h_id, "finding_id": fid, "reason": reason,
+                    "h_id": h_id, "finding_id": fid, "tier": 1, "reason": reason,
                 })
-                break  # one TP per H bug is enough
+                t1_matched = True
+                break
+
+        if t1_matched:
+            continue  # Tier-1 already matched — no need for Tier-2
+
+        # ── Tier-2: attack_path/description mentions GT function ───────────────
+        t2_cands = _tier2_candidates(findings, gt_fn, gt_con)
+        if verbose and t2_cands:
+            print(f"    location: {gt_con}.{gt_fn}  →  {len(t2_cands)} T2 candidates")
+
+        for pred in t2_cands:
+            fid = pred.get("finding_id") or pred.get("title", "")[:30]
+            is_match, reason = judge_match(gt, pred)
+            if verbose:
+                print(f"    [T2] '{fid[:40]}': {'YES' if is_match else 'NO'} — {reason}")
+            if is_match:
+                matched_h_ids.add(h_id)
+                matched_finding_ids.add(fid)
+                matched_t2_h_ids.add(h_id)
+                match_details.append({
+                    "h_id": h_id, "finding_id": fid, "tier": 2, "reason": reason,
+                })
+                break
 
     tp = len(matched_h_ids)
+    tp_t1 = tp - len(matched_t2_h_ids)
+    tp_t2 = len(matched_t2_h_ids)
     fn = len(gt_bugs) - tp
     fp = sum(
         1 for f in findings
@@ -85,6 +134,8 @@ def run_eval(gt_path: str, findings_path: str, verbose: bool = False) -> dict:
     )
 
     metrics = compute_metrics(tp, fp, fn)
+    metrics["tp_t1"] = tp_t1
+    metrics["tp_t2"] = tp_t2
     metrics["match_details"] = match_details
 
     return metrics
@@ -100,13 +151,14 @@ def main():
     metrics = run_eval(args.gt_path, args.findings_path, verbose=args.verbose)
 
     print(f"\n=== Web3Bugs Evaluation ===")
-    print(f"TP={metrics['tp']}  FP={metrics['fp']}  FN={metrics['fn']}")
+    print(f"TP={metrics['tp']}  (T1={metrics['tp_t1']} T2={metrics['tp_t2']})  FP={metrics['fp']}  FN={metrics['fn']}")
     print(f"Precision={metrics['precision']:.3f}  Recall={metrics['recall']:.3f}  F1={metrics['f1']:.3f}")
 
     if args.verbose and metrics.get("match_details"):
         print("\nMatched H bugs:")
         for m in metrics["match_details"]:
-            print(f"  {m['h_id']} ← finding '{m['finding_id'][:40]}'")
+            tier_tag = f"[T{m.get('tier',1)}]"
+            print(f"  {m['h_id']} {tier_tag} ← finding '{m['finding_id'][:40]}'")
 
 
 if __name__ == "__main__":
