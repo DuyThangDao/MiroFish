@@ -218,22 +218,19 @@ def main():
     headers = {"Content-Type": "application/json", "X-Cyfrin-API-Key": API_KEY}
     base_filters = {
         "impact":    ["HIGH"],
-        "firms":     [{"value": "Code4rena"}],
+        "firms":     [{"value": "Spearbit"}],
         "languages": [{"value": "Solidity"}],
         "sortField": "Quality", "sortDirection": "Desc",
     }
 
-    # Early-exit: kiểm tra totalResults trước khi chạy full paginate
+    # Probe: lấy tổng số findings theo filter hiện tại
     probe = requests.post(
         SOLODIT_URL,
         json={"page": 1, "pageSize": 1, "filters": base_filters},
         headers=headers,
     )
     total_in_api = probe.json()["metadata"]["totalResults"]
-    if len(seen) >= total_in_api:
-        print(f"DB đã up-to-date: {len(seen)}/{total_in_api} findings. Không cần fetch.")
-        return
-    print(f"Cần fetch: seen={len(seen)}, totalResults={total_in_api}, ước tính mới ~{total_in_api - len(seen)}")
+    print(f"Fetching: totalResults={total_in_api} (seen_slugs global={len(seen)})")
     time.sleep(3.5)
 
     total_findings = 0
