@@ -109,6 +109,7 @@ _FIELD_RE = _re_rag.compile(
 _SCORE_INJECT_THRESHOLD     = 0.68
 _SCORE_SHOW_THRESHOLD       = 0.65
 _SCORE_INJECT_THRESHOLD_INV = 0.70  # calibrated from Phase 5c score distribution (0.576–0.737)
+_MAX_RAG_INJECT_PER_AGENT   = 2     # top-2 by score — tránh distractor effect khi nhiều INV pass
 
 
 def _extract_field(block: str, field: str) -> str:
@@ -180,7 +181,7 @@ def _build_invariant_rag_hints(invariant_text: str, agent_id: str) -> tuple:
     if not invariants:
         return "", 0
     retriever = _get_rag_retriever()
-    hints = []
+    candidates = []  # (top_score, hint_block_str) — collect all, sort later
     for i, inv in enumerate(invariants):
         query = build_rag_query("", inv)
         if not query:
@@ -202,7 +203,10 @@ def _build_invariant_rag_hints(invariant_text: str, agent_id: str) -> tuple:
                 break
             preview = r["content"][:350].replace("\n", " ").strip()
             block.append(f"  [{j}] {r['title']} | {preview}")
-        hints.append("\n".join(block))
+        candidates.append((top_score, "\n".join(block)))
+    # Inject top-N by score — giữ highest-confidence hints, bỏ borderline
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    hints = [b for _, b in candidates[:_MAX_RAG_INJECT_PER_AGENT]]
     return "\n\n".join(hints), len(hints)
 
 

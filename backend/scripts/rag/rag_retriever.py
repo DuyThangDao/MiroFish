@@ -17,10 +17,17 @@ PARENTS_PATH = CHROMA_PATH.parent / "parents.json"
 
 class VertexEmbedding(EmbeddingFunction):
     def __init__(self, task_type: str = "RETRIEVAL_QUERY"):
-        key_file = os.environ.get("LLM_VERTEX_AI_KEY_FILE", "")
+        # LLM2 project dùng riêng cho embed — tách quota khỏi LLM chat
+        key_file = (
+            os.environ.get("LLM2_VERTEX_AI_KEY_FILE")
+            or os.environ.get("LLM_VERTEX_AI_KEY_FILE", "")
+        )
         if key_file:
             os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = key_file
-        vertexai.init()
+            project_id = json.load(open(key_file)).get("project_id", "")
+        else:
+            project_id = ""
+        vertexai.init(project=project_id or None)
         self._model = TextEmbeddingModel.from_pretrained("text-embedding-004")
         self._task_type = task_type
 
