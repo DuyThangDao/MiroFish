@@ -109,7 +109,9 @@ _FIELD_RE = _re_rag.compile(
 _SCORE_INJECT_THRESHOLD     = 0.68
 _SCORE_SHOW_THRESHOLD       = 0.65
 _SCORE_INJECT_THRESHOLD_INV = 0.70  # calibrated from Phase 5c score distribution (0.576–0.737)
-_MAX_RAG_INJECT_PER_AGENT   = 2     # top-2 by score — tránh distractor effect khi nhiều INV pass
+_MAX_RAG_INJECT_PER_AGENT   = 4     # raised: after FIX-1/2 loại noise, không còn distractor effect
+_inv_cache: dict[str, tuple] = {}   # key → (score, hint_block); session-level semantic dedup
+_inv_cache_lock = threading.Lock()
 
 
 def _extract_field(block: str, field: str) -> str:
@@ -174,7 +176,29 @@ def _build_rag_observations(response: str, agent_id: str) -> list:
     return observations
 
 
-def _build_invariant_rag_hints(invariant_text: str, agent_id: str) -> tuple:
+def _normalize_inv_key(inv: str, target_contracts: list[str]) -> str:
+    """Cache key cho INV semantic dedup.
+
+    Dùng build_rag_query để strip fn sigs, CamelCase, dotted refs trước khi lấy 8 words đầu.
+    Đảm bảo 2 INVs cùng concept (khác word order) map về cùng key.
+    """
+    inv_lower = inv.lower()
+    matched_contract = next(
+        (c for c in target_contracts if c.lower() in inv_lower), "unknown"
+    )
+    clean_meaning = build_rag_query("", inv).lower()
+    words = clean_meaning.split()
+    return f"{matched_contract.lower()}::{' '.join(words[:8])}"
+
+
+def _extract_independent_targets(network_summary: str, primary: str) -> list[str]:
+    # Parse multi-target contest header: "// TARGET N — ContractName (primary)"
+    # Contest 42 (single target): no such header → returns []
+    targets = _re_rag.findall(r'TARGET \d+\s*[-—–]\s*(\w+)\s*\(primary\)', network_summary)
+    return [t for t in targets if t != primary]
+
+
+def _build_invariant_rag_hints(invariant_text: str, agent_id: str, independent_targets: list[str] | None = None) -> tuple:
     """Returns (hint_block: str, num_matched: int) — query RAG per INV-N line."""
     inv_pattern = _re_rag.compile(r'INV-\d+:\s*(.+)', _re_rag.IGNORECASE)
     invariants = inv_pattern.findall(invariant_text)
@@ -183,6 +207,24 @@ def _build_invariant_rag_hints(invariant_text: str, agent_id: str) -> tuple:
     retriever = _get_rag_retriever()
     candidates = []  # (top_score, hint_block_str) — collect all, sort later
     for i, inv in enumerate(invariants):
+        # FIX-1: skip INVs về independent audit targets khác (multi-target contest, e.g. HybridPool)
+        if independent_targets:
+            inv_lower = inv.lower()
+            if any(t.lower() in inv_lower for t in independent_targets):
+                logger.info(
+                    f"[RAG] agent={agent_id} inv={i+1} → skip (independent audit target)"
+                )
+                continue
+        # FIX-3: semantic dedup — reuse cache nếu cùng concept đã được query trong session này
+        cache_key = _normalize_inv_key(inv, [])
+        with _inv_cache_lock:
+            if cache_key in _inv_cache:
+                cached_score, cached_block = _inv_cache[cache_key]
+                logger.info(
+                    f"[RAG] agent={agent_id} inv={i+1} → reuse cache (key={cache_key[:50]})"
+                )
+                candidates.append((cached_score, cached_block))
+                continue
         query = build_rag_query("", inv)
         if not query:
             continue
@@ -203,6 +245,8 @@ def _build_invariant_rag_hints(invariant_text: str, agent_id: str) -> tuple:
                 break
             preview = r["content"][:350].replace("\n", " ").strip()
             block.append(f"  [{j}] {r['title']} | {preview}")
+        with _inv_cache_lock:
+            _inv_cache[cache_key] = (top_score, "\n".join(block))
         candidates.append((top_score, "\n".join(block)))
     # Inject top-N by score — giữ highest-confidence hints, bỏ borderline
     candidates.sort(key=lambda x: x[0], reverse=True)
@@ -657,6 +701,11 @@ class CyberSessionOrchestrator:
             # v2 feature flag — 3-round architecture
             _audit_v = os.environ.get("AUDIT_PIPELINE_VERSION", "v1").lower()
             if mode == "contract_audit" and _audit_v == "v2":
+                # Extract target contract names for RAG scope restriction
+                _tc: list[str] = []
+                if manifest:
+                    _tc = [manifest.get("primary", "")] + manifest.get("secondary", [])
+                    _tc = [c for c in _tc if c]
                 self._run_contract_audit_v2(
                     task_id=task_id,
                     session_id=session_id,
@@ -666,6 +715,7 @@ class CyberSessionOrchestrator:
                     known_functions=known_functions,
                     session_state=session_state,
                     invariants=invariants,
+                    target_contracts=_tc or None,
                 )
                 return
 
@@ -2040,6 +2090,7 @@ class CyberSessionOrchestrator:
         known_functions: Optional[set],
         session_state: "CyberSessionState",
         invariants: Optional[list] = None,
+        target_contracts: list[str] | None = None,
     ):
         """
         v2 entry point — replaces 10-round Phase A/B/C with 3-round flow.
@@ -2061,6 +2112,7 @@ class CyberSessionOrchestrator:
             network_summary=network_summary,
             known_functions=known_functions,
             session_id=session_id,
+            target_contracts=target_contracts,
         )
         n_r1 = len(candidate_pool)
         logger.info(f"[v2] Round 1 complete: {n_r1} unique (kind,fn) pairs discovered")
@@ -2637,6 +2689,7 @@ class CyberSessionOrchestrator:
         network_summary: str,
         known_functions: Optional[set],
         session_id: str,
+        target_contracts: list[str] | None = None,
     ) -> dict:
         """
         Call all N tier-1 agents in parallel.
@@ -2654,6 +2707,14 @@ class CyberSessionOrchestrator:
           requires at least one Solidity-specific code marker or a named function
           that survived RC-1 token filtering.
         """
+        # FIX-3: reset session-level dedup cache cho mỗi audit run mới
+        global _inv_cache
+        _inv_cache = {}
+        # FIX-1: extract independent audit targets cho multi-target contests
+        _primary = target_contracts[0] if target_contracts else ""
+        _independent_targets = _extract_independent_targets(network_summary, _primary)
+        if _independent_targets:
+            logger.info(f"[RAG] Multi-target contest — skip INVs about: {_independent_targets}")
         max_workers = int(os.environ.get("LLM_MAX_WORKERS", "1"))
         submit_delay = float(os.environ.get("LLM_SUBMIT_DELAY_S", "0"))
 
@@ -2690,7 +2751,8 @@ class CyberSessionOrchestrator:
                 step2_hint = ""
                 if rag_enabled:
                     hint_block, rag_calls = _build_invariant_rag_hints(
-                        turn1_response, profile.agent_id
+                        turn1_response, profile.agent_id,
+                        independent_targets=_independent_targets,
                     )
                     if hint_block:
                         step2_hint = (
