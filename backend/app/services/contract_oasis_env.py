@@ -1416,6 +1416,12 @@ def build_round1_prompt(
     focus_block = f"\n{focus_directive}\n" if focus_directive else ""
 
     if invariant_only:
+        _cq = getattr(agent_profile, "core_question", "")
+        cq_section = (
+            f"=== YOUR EPISTEMIC LENS ===\n"
+            f"Before generating invariants, anchor your perspective:\n"
+            f"{_cq}\n\n"
+        ) if _cq else ""
         return f"""\
 === ROUND 1 — PHASE A: INVARIANT EXTRACTION ===
 You are {agent_profile.agent_id} ({agent_profile.domain_group}/{agent_profile.persona}).
@@ -1424,7 +1430,7 @@ You are {agent_profile.agent_id} ({agent_profile.domain_group}/{agent_profile.pe
 === CONTRACT UNDER REVIEW ===
 {context_summary}
 
-=== TASK: INVARIANT EXTRACTION ONLY ===
+{cq_section}=== TASK: INVARIANT EXTRACTION ONLY ===
 {_STEP1_BLOCK}
 
 Output ONLY the numbered invariant list (INV-1, INV-2, ...). Do NOT write any FINDING block,
@@ -1437,6 +1443,12 @@ violation analysis, or commentary. Violation analysis will happen in a separate 
         else _STEP1_BLOCK
     )
     hint_section = f"{step2_hint}\n" if step2_hint else ""
+    _cq2 = getattr(agent_profile, "core_question", "")
+    cq_section2 = (
+        f"=== YOUR EPISTEMIC LENS ===\n"
+        f"Re-anchor your perspective before analyzing violations:\n"
+        f"{_cq2}\n\n"
+    ) if _cq2 else ""
 
     return f"""\
 === ROUND 1 — INDEPENDENT DISCOVERY ===
@@ -1463,7 +1475,7 @@ PROTOCOL INVARIANT ANALYSIS — mandatory before writing any FINDING:
 
 {step1_section}
 
-{hint_section}STEP 2 — FIND VIOLATIONS:
+{cq_section2}{hint_section}STEP 2 — FIND VIOLATIONS:
   For each invariant listed above, ask:
   Q1: Is there any execution path (sequence of function calls) that can make this invariant false?
   Q2: If yes — can an attacker control that path? Or does it only occur due to a logic bug?

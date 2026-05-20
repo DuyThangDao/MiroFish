@@ -44,8 +44,15 @@ from ..models.cyber_models import (
 )
 from ..utils.logger import get_logger
 from .semantic_taxonomy import normalize_semantic_category
+from .contract_profile_generator import CONTRACT_AGENT_MATRIX as _CONTRACT_AGENT_MATRIX
 
 logger = get_logger("mirofish.consensus_engine")
+
+
+def _get_agent_domain(agent_id: str) -> str:
+    """Map agent_id → domain_group. Falls back to split('_')[0] for unknown IDs."""
+    spec = _CONTRACT_AGENT_MATRIX.get(agent_id)
+    return spec["domain_group"] if spec else agent_id.split("_")[0]
 
 # ─── Contract audit domain config ─────────────────────────────────────────────
 
@@ -1163,7 +1170,7 @@ class ConsensusEngine:
                 "evidence":         evidence,
                 "patch":            _extract_patch(f),
                 "supporting_domains": list({
-                    ag.split("_")[0] for ag in f.get("submitters", [])
+                    _get_agent_domain(ag) for ag in f.get("submitters", [])
                 }),
                 "needs_review":     conf < 0.5,
                 "poc_verified":     False,

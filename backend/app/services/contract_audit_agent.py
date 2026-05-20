@@ -302,7 +302,7 @@ class ContractAuditReportAgent:
         engine = ConsensusEngine()
         consensus_vulns, semantic_results = engine.run(
             expert_findings, attacker_findings,
-            domain_group_count=7, mode="contract_audit",
+            domain_group_count=6, mode="contract_audit",
             semantic_findings_raw=semantic_findings or [],
         )
         unvalidated_swc_gaps = engine.enforce_swc_coverage(consensus_vulns, expert_findings)

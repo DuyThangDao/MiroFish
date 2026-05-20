@@ -80,57 +80,31 @@ def _get_llm_client() -> LLMClient:
 def _build_interview_system_prompt(agent_id: str) -> tuple[str, str, str]:
     """
     Reconstruct system prompt từ agent_id.
-    Returns (system_prompt, domain, persona).
-
-    agent_id format:
-      Tier 1: "<domain>_<persona>"           e.g. "appsec_offensive"
-      Tier 2: "attacker_<profile_key>"       e.g. "attacker_reentrancy_exploiter"
+    Returns (system_prompt, domain_group, agent_id).
     """
-    # ── Tier 2: Attacker profiles ─────────────────────────────────────────────
-    if agent_id.startswith("attacker_"):
-        profile_key = agent_id[len("attacker_"):]
-        profile = CONTRACT_ATTACKER_PROFILES.get(profile_key, {})
-        base_prompt = profile.get("prompt", f"You are {profile.get('name', agent_id)}.")
+    # ── Flat lookup trong Epistemic Lens matrix ───────────────────────────────
+    spec = CONTRACT_AGENT_MATRIX.get(agent_id)
+    if spec:
+        domain = spec["domain_group"]
+        swc_focus = spec.get("swc_focus", [])
+        swc_hint = f"Your SWC focus areas: {', '.join(swc_focus)}." if swc_focus else ""
         system_prompt = (
-            f"{base_prompt}\n\n"
-            f"You are in an interview context. Answer honestly from your attacker perspective.\n"
-            f"Be specific about what you would actually do to exploit vulnerabilities."
-        )
-        return system_prompt, "attacker", profile_key
+            f"{spec['prompt']}\n\n"
+            f"{swc_hint}\n\n"
+            f"You are in an interview context. Answer from your domain expertise.\n"
+            f"Reference specific functions, SWC IDs, and evidence from the audit session."
+        ).strip()
+        return system_prompt, domain, agent_id
 
-    # ── Tier 1: Domain × Persona experts ─────────────────────────────────────
-    # agent_id like "appsec_offensive", "smart_contract_economics_economist"
-    # Try progressively shorter domain prefixes to find the match
-    domain, persona = "", ""
-    for d in CONTRACT_AGENT_MATRIX:
-        sanitized_domain = d.replace(" ", "_")
-        if agent_id.startswith(sanitized_domain + "_"):
-            domain = d
-            persona = agent_id[len(sanitized_domain) + 1:]
-            break
-
-    if not domain:
-        # Fallback: split on last underscore
-        parts = agent_id.rsplit("_", 1)
-        domain = parts[0] if len(parts) == 2 else agent_id
-        persona = parts[1] if len(parts) == 2 else "auditor"
-
-    matrix_entry = CONTRACT_AGENT_MATRIX.get(domain, {})
-    persona_prompts = matrix_entry.get("persona_prompts", {})
-    base_prompt = persona_prompts.get(
-        persona,
-        f"You are a {domain} security expert with {persona} mindset."
-    )
-    swc_focus = matrix_entry.get("swc_focus", [])
-    swc_hint = f"Your SWC focus areas: {', '.join(swc_focus)}." if swc_focus else ""
-
+    # ── Fallback cho unknown agent IDs ───────────────────────────────────────
+    parts = agent_id.rsplit("_", 1)
+    domain = parts[0] if len(parts) == 2 else agent_id
+    persona = parts[1] if len(parts) == 2 else "auditor"
     system_prompt = (
-        f"{base_prompt}\n\n"
-        f"{swc_hint}\n\n"
+        f"You are a {agent_id} smart contract security specialist.\n\n"
         f"You are in an interview context. Answer from your domain expertise.\n"
-        f"Reference specific functions, SWC IDs, and evidence from the audit session."
-    ).strip()
-
+        f"Reference specific functions and evidence from the audit session."
+    )
     return system_prompt, domain, persona
 
 
@@ -352,12 +326,13 @@ def start_session():
                 user_id=p.get("user_id", idx),
                 agent_id=p.get("username", f"agent_{idx}"),
                 tier=p.get("_tier", 1),
-                domain_group=p.get("_domain_group", "appsec"),
+                domain_group=p.get("_domain_group", "code_security"),
                 persona=p.get("_persona", "auditor"),
                 display_name=p.get("name", ""),
                 system_prompt=p.get("persona", ""),
                 bio=p.get("bio", ""),
                 swc_focus=p.get("_swc_focus", []),
+                core_question=p.get("_core_question", ""),
             ))
 
         orchestrator = _get_orchestrator()
