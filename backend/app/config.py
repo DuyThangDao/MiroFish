@@ -49,6 +49,7 @@ class Config:
     BOOST_BASE_URL             = os.environ.get('BOOST_BASE_URL')
     BOOST_MODEL_NAME           = os.environ.get('BOOST_MODEL_NAME')
     BOOST_VERTEX_CLAUDE_REGION = os.environ.get('BOOST_VERTEX_CLAUDE_REGION')
+    BOOST_VERTEX_AI_KEY_FILE   = os.environ.get('BOOST_VERTEX_AI_KEY_FILE')
 
     # Zep配置
     ZEP_API_KEY = os.environ.get('ZEP_API_KEY')

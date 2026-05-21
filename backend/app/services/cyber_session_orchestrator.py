@@ -2015,7 +2015,8 @@ class CyberSessionOrchestrator:
             boost_url       = getattr(Config, "BOOST_BASE_URL",             None)
             boost_model     = getattr(Config, "BOOST_MODEL_NAME",           None)
             claude_region   = getattr(Config, "BOOST_VERTEX_CLAUDE_REGION", None)
-            vertex_key_file = getattr(Config, "LLM_VERTEX_AI_KEY_FILE",     None)
+            vertex_key_file = (getattr(Config, "BOOST_VERTEX_AI_KEY_FILE", None)
+                               or getattr(Config, "LLM_VERTEX_AI_KEY_FILE", None))
 
             if claude_region and boost_model:
                 # Mode A: Claude trên Vertex AI — single client (Claude không có multi-account pool)
