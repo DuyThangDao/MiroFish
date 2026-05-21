@@ -2140,7 +2140,7 @@ class CyberSessionOrchestrator:
                     logger.info(f"  [micro] Added: {f.get('title', '')}")
 
         # ── Early exit after anchor dedup (STOP_AFTER_DEDUP=true) ───────────
-        if os.environ.get("STOP_AFTER_DEDUP", "").lower() == "true":
+        if os.environ.get("STOP_AFTER_DEDUP", "").lower() in ("true", "1", "yes"):
             import json as _json
             out_path = os.environ.get("STOP_AFTER_DEDUP_OUT", "/tmp/dedup_findings.json")
             with open(out_path, "w") as _f:

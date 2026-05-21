@@ -80,6 +80,44 @@ OASIS simulations run as a separate subprocess to avoid Python GIL contention. C
 
 ## Cyber / Audit Mode Notes
 
+### Benchmark Audit (cách chuẩn — dùng cho mọi lần chạy mới)
+
+Kết quả được lưu vào `benchmark/web3bugs/agent-redesign/<contest_id>/run-N/`.
+Mỗi lần chạy mới tạo thêm `run-N` tiếp theo (run-1, run-2, ...).
+Sau khi xong, output dir tự có: `dedup_findings.json`, `audit_report_dedup.json`, `run.log`.
+
+```bash
+cd /home/thangdd/repos/MiroFish/backend
+
+# Chạy foreground (có progress output):
+bash scripts/run_benchmark.sh \
+  /home/thangdd/repos/web3bugs/contracts/<contest_id> \
+  ../benchmark/web3bugs/agent-redesign/<contest_id>/run-N
+
+# Chạy background:
+nohup bash scripts/run_benchmark.sh \
+  /home/thangdd/repos/web3bugs/contracts/<contest_id> \
+  ../benchmark/web3bugs/agent-redesign/<contest_id>/run-N \
+  > /tmp/benchmark_<contest_id>_runN.log 2>&1 &
+```
+
+**Eval sau khi xong (kết quả tự động lưu vào run dir):**
+```bash
+cd backend/scripts/evaluate
+RUN_DIR=../../benchmark/web3bugs/agent-redesign/<contest_id>/run-N
+REPORT=$RUN_DIR/<id>_*/audit_report_dedup.json
+python3 web3bugs_eval.py gt/gt_<contest_id>.json "$REPORT" --verbose \
+  | tee $RUN_DIR/eval_result.txt
+```
+
+Sau khi chạy eval, **bắt buộc lưu kết quả** vào `eval_result.txt` trong run dir bằng `tee` như trên.
+File `eval_result.txt` chứa toàn bộ output verbose (matched/missed H bugs + TP/FP/FN/Precision/Recall/F1).
+
+Flags đặt cứng trong script: `STOP_AFTER_DEDUP=true`, `RAG_ENABLED=true`.
+Đây là cách dùng chuẩn trong giai đoạn tăng recall (focus R1, bỏ R2 voting).
+
+---
+
 ### Running a Contest Audit (background, with logging)
 
 Tất cả contest source nằm ở `~/repos/web3bugs/contracts/<contest_id>/`.

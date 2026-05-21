@@ -903,6 +903,43 @@ def main():
         readme_text=readme_text,
     )
 
+    # ── Post-run: copy dedup findings + log into output_dir ──────────────────
+    import shutil as _shutil
+    _dedup_src = os.environ.get("STOP_AFTER_DEDUP_OUT", "/tmp/dedup_findings.json")
+    if os.path.isfile(_dedup_src) and os.environ.get("STOP_AFTER_DEDUP", "").lower() in ("true", "1", "yes"):
+        _dedup_dst = os.path.join(output_dir, "dedup_findings.json")
+        _shutil.copy2(_dedup_src, _dedup_dst)
+        # Build synthetic audit_report_dedup.json for eval
+        import json as _json, uuid as _uuid
+        from datetime import datetime as _dt
+        _raw = _json.load(open(_dedup_dst))
+        _findings = [
+            {
+                "finding_id": f.get("pair_id", str(_uuid.uuid4())[:8]),
+                "title": f.get("title", ""),
+                "description": f.get("description", ""),
+                "severity": f.get("severity", "high"),
+                "function_name": f.get("function_name", ""),
+                "contract_name": f.get("contract_name", ""),
+                "attack_path": f.get("attack_path", ""),
+                "evidence": f.get("evidence_snippets", ""),
+            }
+            for f in _raw
+        ]
+        _report = {
+            "session_id": "dedup_only",
+            "generated_at": _dt.now().isoformat(),
+            "pipeline_version": "v2_dedup_only",
+            "findings": _findings,
+            "consensus_vulns": [],
+        }
+        _json.dump(_report, open(os.path.join(output_dir, "audit_report_dedup.json"), "w"), indent=2, default=str)
+        logger.info(f"[post-run] dedup_findings.json + audit_report_dedup.json saved to {output_dir}")
+    _log_src = os.environ.get("AUDIT_LOG_FILE", "")
+    if _log_src and os.path.isfile(_log_src):
+        _shutil.copy2(_log_src, os.path.join(output_dir, "run.log"))
+        logger.info(f"[post-run] log copied to {output_dir}/run.log")
+
 
 if __name__ == "__main__":
     main()
