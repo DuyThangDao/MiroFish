@@ -1669,6 +1669,10 @@ FINDING SPLITTING RULE — passive bug vs active exploit:
   Pattern: any time-weighted accumulator with both an update-ordering bug and a JIT attack surface.
 
 Write ALL findings you can identify. Do not stop at the first one.
+
+⚠ OUTPUT COMMITMENT: Begin writing FINDING blocks immediately after completing your analysis.
+Do NOT end your response without either FINDING blocks or the marker NO_FINDINGS_IN_DOMAIN.
+If you genuinely find no vulnerability in your domain, output exactly one line: NO_FINDINGS_IN_DOMAIN
 """
 
 

@@ -108,7 +108,7 @@ _FIELD_RE = _re_rag.compile(
 )
 _SCORE_INJECT_THRESHOLD     = 0.68
 _SCORE_SHOW_THRESHOLD       = 0.65
-_SCORE_INJECT_THRESHOLD_INV = 0.70  # calibrated from Phase 5c score distribution (0.576–0.737)
+_SCORE_INJECT_THRESHOLD_INV = 0.65  # lowered: 0.70 was blocking ~60% of relevant patterns (range 0.576–0.737)
 _MAX_RAG_INJECT_PER_AGENT   = 4     # raised: after FIX-1/2 loại noise, không còn distractor effect
 _inv_cache: dict[str, tuple] = {}   # key → (score, hint_block); session-level semantic dedup
 _inv_cache_lock = threading.Lock()
@@ -198,7 +198,7 @@ def _extract_independent_targets(network_summary: str, primary: str) -> list[str
     return [t for t in targets if t != primary]
 
 
-def _build_invariant_rag_hints(invariant_text: str, agent_id: str, independent_targets: list[str] | None = None) -> tuple:
+def _build_invariant_rag_hints(invariant_text: str, agent_id: str) -> tuple:
     """Returns (hint_block: str, num_matched: int) — query RAG per INV-N line."""
     inv_pattern = _re_rag.compile(r'INV-\d+:\s*(.+)', _re_rag.IGNORECASE)
     invariants = inv_pattern.findall(invariant_text)
@@ -207,14 +207,6 @@ def _build_invariant_rag_hints(invariant_text: str, agent_id: str, independent_t
     retriever = _get_rag_retriever()
     candidates = []  # (top_score, hint_block_str) — collect all, sort later
     for i, inv in enumerate(invariants):
-        # FIX-1: skip INVs về independent audit targets khác (multi-target contest, e.g. HybridPool)
-        if independent_targets:
-            inv_lower = inv.lower()
-            if any(t.lower() in inv_lower for t in independent_targets):
-                logger.info(
-                    f"[RAG] agent={agent_id} inv={i+1} → skip (independent audit target)"
-                )
-                continue
         # FIX-3: semantic dedup — reuse cache nếu cùng concept đã được query trong session này
         cache_key = _normalize_inv_key(inv, [])
         with _inv_cache_lock:
@@ -2711,11 +2703,6 @@ class CyberSessionOrchestrator:
         # FIX-3: reset session-level dedup cache cho mỗi audit run mới
         global _inv_cache
         _inv_cache = {}
-        # FIX-1: extract independent audit targets cho multi-target contests
-        _primary = target_contracts[0] if target_contracts else ""
-        _independent_targets = _extract_independent_targets(network_summary, _primary)
-        if _independent_targets:
-            logger.info(f"[RAG] Multi-target contest — skip INVs about: {_independent_targets}")
         max_workers = int(os.environ.get("LLM_MAX_WORKERS", "1"))
         submit_delay = float(os.environ.get("LLM_SUBMIT_DELAY_S", "0"))
 
@@ -2753,7 +2740,6 @@ class CyberSessionOrchestrator:
                 if rag_enabled:
                     hint_block, rag_calls = _build_invariant_rag_hints(
                         turn1_response, profile.agent_id,
-                        independent_targets=_independent_targets,
                     )
                     if hint_block:
                         step2_hint = (
@@ -2782,6 +2768,18 @@ class CyberSessionOrchestrator:
                     max_tokens=self._V2_R1_MAX_TOKENS,
                     strip_think=True,
                 )
+
+                # Retry once if thinking model exhausted token budget (content=None → empty)
+                if not response.strip():
+                    logger.warning(
+                        f"[v2 R1] agent={profile.agent_id} Turn 2 empty — retrying once"
+                    )
+                    response = self.llm.chat(
+                        [{"role": "user", "content": turn2_prompt}],
+                        temperature=0.7,
+                        max_tokens=self._V2_R1_MAX_TOKENS,
+                        strip_think=True,
+                    )
 
             except Exception as e:
                 logger.warning(f"[v2 R1] agent={profile.agent_id} error: {e}")

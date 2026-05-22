@@ -451,7 +451,7 @@ class ContractInvariantExtractor:
                     {"role": "user",   "content": user_content},
                 ],
                 temperature=0.2,
-                max_tokens=4096,
+                max_tokens=65536,
             )
             llm_invs = _parse_invariants(raw)
         except Exception as e:
