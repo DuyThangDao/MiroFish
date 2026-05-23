@@ -198,7 +198,8 @@ def _extract_independent_targets(network_summary: str, primary: str) -> list[str
     return [t for t in targets if t != primary]
 
 
-def _build_invariant_rag_hints(invariant_text: str, agent_id: str) -> tuple:
+def _build_invariant_rag_hints(invariant_text: str, agent_id: str,
+                                target_contracts: list[str] | None = None) -> tuple:
     """Returns (hint_block: str, num_matched: int) — query RAG per INV-N line."""
     inv_pattern = _re_rag.compile(r'INV-\d+:\s*(.+)', _re_rag.IGNORECASE)
     invariants = inv_pattern.findall(invariant_text)
@@ -207,8 +208,16 @@ def _build_invariant_rag_hints(invariant_text: str, agent_id: str) -> tuple:
     retriever = _get_rag_retriever()
     candidates = []  # (top_score, hint_block_str) — collect all, sort later
     for i, inv in enumerate(invariants):
+        # M1: positive filter — skip invariants không liên quan đến target contracts
+        if target_contracts:
+            inv_lower = inv.lower()
+            if not any(c.lower() in inv_lower for c in target_contracts):
+                logger.info(
+                    f"[RAG] agent={agent_id} inv={i+1} → skip (not about primary target)"
+                )
+                continue
         # FIX-3: semantic dedup — reuse cache nếu cùng concept đã được query trong session này
-        cache_key = _normalize_inv_key(inv, [])
+        cache_key = _normalize_inv_key(inv, target_contracts or [])
         with _inv_cache_lock:
             if cache_key in _inv_cache:
                 cached_score, cached_block = _inv_cache[cache_key]
@@ -2740,6 +2749,7 @@ class CyberSessionOrchestrator:
                 if rag_enabled:
                     hint_block, rag_calls = _build_invariant_rag_hints(
                         turn1_response, profile.agent_id,
+                        target_contracts=target_contracts,
                     )
                     if hint_block:
                         step2_hint = (

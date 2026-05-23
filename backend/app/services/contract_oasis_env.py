@@ -1438,7 +1438,7 @@ violation analysis, or commentary. Violation analysis will happen in a separate 
 """
 
     step1_section = (
-        f"Your invariants from Phase A (use these — do NOT re-derive):\n{injected_invariants}\n"
+        f"Your invariants from Phase A (starting point — also apply ALL independent checks below):\n{injected_invariants}\n"
         if injected_invariants
         else _STEP1_BLOCK
     )
@@ -1484,9 +1484,6 @@ PROTOCOL INVARIANT ANALYSIS — mandatory before writing any FINDING:
   If Q1 = YES → write a FINDING with:
     EVIDENCE: INV: <invariant statement> | VIOLATED_AT: <fn()> | COUNTEREXAMPLE: <condition that causes violation>
 
-  After analysis, proceed to writing FINDING blocks.
-  No summary or commentary needed — go straight to findings.
-
 CAST & COMPARISON PRECISION — before writing any arithmetic finding, answer these questions:
 
 For every explicit narrowing cast (uint256→uint128, uint128→int128, uint256→int24, etc.):
@@ -1518,6 +1515,15 @@ INTRA-FUNCTION (wrong update order within one function):
   Correct: finish ALL computations that READ stateVar BEFORE overwriting it.
   Common pattern: secondsPerLiquidity / rewardPerShare must snapshot liquidity BEFORE it changes.
   EVIDENCE: SEQ: computeAccumulator() → updateLiquidity() via liquidityGlobal | ISSUE: accumulator uses post-change liquidity
+
+MANDATORY TRACE — for every function flagged by STATE UPDATE ORDERING:
+  Step 1: List ALL state-modifying lines IN ORDER as they appear in the function body:
+          `<line content>` → modifies: <variable_name>
+  Step 2: For each accumulator (secondsPerLiquidity, feeGrowthInside, rewardPerShare, rewardDebt):
+          Is this accumulator READ or UPDATED *after* the value it divides by
+          (liquidity, totalShares, totalSupply) has already been changed in the same function?
+  If YES → write FINDING. EVIDENCE: SEQ: <accumulator_line> → <liquidity_change_line>
+            via <accumulator_name> | ISSUE: accumulator computed using post-change denominator.
 
 FUNCTION ATTRIBUTION FOR ORDERING BUGS:
   APPLIES ONLY when the bug is wrong CALL ORDER (SEQ: evidence type) — NOT when the bug
@@ -1571,6 +1577,58 @@ PARAMETER PROPAGATION IN WRAPPER CONTRACTS — proactive check, independent of o
   ATTACK_PATH ACTOR: any caller / CALL: wrapper.fn(addr) → inner.fn(addr) /
     STATE_CHANGE: inner distributes shared assets to attacker-controlled addr /
     OUTCOME: attacker claims assets belonging to other users
+
+SECONDARY FUNCTION SWEEP — inspect these categories independently of invariants above:
+
+  ARITHMETIC SAFETY IN COMPUTATION FUNCTIONS:
+  Solidity 0.8+ reverts on overflow/underflow by default. Some protocols (Uniswap V3 forks,
+  concentrated liquidity) intentionally rely on wrapping arithmetic for fee/reward range math.
+  For every pure/view function that computes a difference of two accumulator values
+  (e.g. feeGrowthGlobal - feeGrowthBelow - feeGrowthAbove, rewardAccumulator - snapshot):
+    Q1: Can the subtrahend legitimately exceed the minuend due to wrapping semantics?
+        (e.g. tick crossing can cause feeGrowthBelow + feeGrowthAbove > feeGrowthGlobal)
+    Q2: Is the subtraction wrapped in an `unchecked {{}}` block?
+    If Q1=YES and Q2=NO → Solidity 0.8 reverts → all fee/reward claims permanently broken.
+    EVIDENCE: CODE: <the subtraction line missing unchecked>
+    ATTACK_PATH ACTOR: any user / CALL: <fn>() / STATE_CHANGE: arithmetic revert /
+      OUTCOME: pool or reward mechanism permanently DoS'd — all claims revert
+
+  INITIALIZATION PARAMETER VALIDATION:
+  For every initialize() / constructor() / setUp() function in scope:
+    Step 1: Identify all numeric input parameters (prices, ticks, ratios, rates).
+    Step 2: Check each against hard-coded contract bounds
+            (MIN_SQRT_RATIO, MAX_SQRT_RATIO, MIN_TICK, MAX_TICK, type(uint128).max, etc.).
+    Step 3: If parameter = 0 or out-of-bounds: does it cause permanent malfunction
+            (revert on first operation, wrong initial state, broken invariant from start)?
+    If validation missing → write FINDING.
+    EVIDENCE: MISSING: bounds check AT: initialize() | CODE_ANCHOR: the parameter usage line.
+
+MULTI-ANGLE EXHAUSTION — for every function where you found a finding, force 2 more checks:
+  (A) DIFFERENT CLASS: found arithmetic error → also check: can any caller invoke this?
+      Is there an update-ordering issue? A cross-call staleness path? A parameter abuse?
+      (e.g., burn(recipient) passes recipient externally → does pool.burn use it to send ALL tick fees?)
+  (B) INTERACTIONS: this function modifies State Variable X →
+      which other functions also read X? Can this function put X in a state that breaks
+      those functions' invariants for OTHER users?
+  Each distinct vulnerability class in the same function = separate FINDING.
+
+FINDING SPLITTING RULE — passive bug vs active exploit:
+  If a state variable X has BOTH:
+    (A) PASSIVE: X computed incorrectly by code logic regardless of any attacker
+        (ordering error, missing update, wrong formula)
+    (B) ACTIVE: attacker profits by timing transactions to exploit the incorrect X
+        (JIT attack, sandwich, front-run reward distribution)
+  → Write TWO separate FINDINGS:
+    Finding A — Implementation Bug:
+      FUNCTION: function where ordering/calculation error occurs (where fix changes code)
+      EVIDENCE: SEQ: or CODE: proving the logic error
+      ATTACK_PATH ACTOR: any user (no adversarial timing required)
+    Finding B — Economic Exploit:
+      FUNCTION: function attacker calls to extract profit
+      EVIDENCE: DESIGN: describing the mechanism abused
+      ATTACK_PATH ACTOR: attacker (requires deliberate timing)
+  Reason: different fix locations, different audit categories, different impact scope.
+  Pattern: any time-weighted accumulator with both an update-ordering bug and a JIT attack surface.
 
 OUTPUT FORMAT — use ONLY the FINDING format below. No CLAIM, VALIDATE, CHALLENGE, CONFIRM, or DISMISS.
 
@@ -1640,33 +1698,6 @@ ATTACK_PATH rules — MANDATORY. All four subfields must be present:
 
 ✗ Bad (will be dropped by parser):
   ATTACK_PATH: An attacker can exploit this vulnerability to drain funds from the contract.
-
-MULTI-ANGLE EXHAUSTION — for every function where you found a finding, force 2 more checks:
-  (A) DIFFERENT CLASS: found arithmetic error → also check: can any caller invoke this?
-      Is there an update-ordering issue? A cross-call staleness path? A parameter abuse?
-      (e.g., burn(recipient) passes recipient externally → does pool.burn use it to send ALL tick fees?)
-  (B) INTERACTIONS: this function modifies State Variable X →
-      which other functions also read X? Can this function put X in a state that breaks
-      those functions' invariants for OTHER users?
-  Each distinct vulnerability class in the same function = separate FINDING.
-
-FINDING SPLITTING RULE — passive bug vs active exploit:
-  If a state variable X has BOTH:
-    (A) PASSIVE: X computed incorrectly by code logic regardless of any attacker
-        (ordering error, missing update, wrong formula)
-    (B) ACTIVE: attacker profits by timing transactions to exploit the incorrect X
-        (JIT attack, sandwich, front-run reward distribution)
-  → Write TWO separate FINDINGS:
-    Finding A — Implementation Bug:
-      FUNCTION: function where ordering/calculation error occurs (where fix changes code)
-      EVIDENCE: SEQ: or CODE: proving the logic error
-      ATTACK_PATH ACTOR: any user (no adversarial timing required)
-    Finding B — Economic Exploit:
-      FUNCTION: function attacker calls to extract profit
-      EVIDENCE: DESIGN: describing the mechanism abused
-      ATTACK_PATH ACTOR: attacker (requires deliberate timing)
-  Reason: different fix locations, different audit categories, different impact scope.
-  Pattern: any time-weighted accumulator with both an update-ordering bug and a JIT attack surface.
 
 Write ALL findings you can identify. Do not stop at the first one.
 

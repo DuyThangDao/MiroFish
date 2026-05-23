@@ -252,6 +252,10 @@ CONTRACT_AGENT_MATRIX: Dict[str, Dict[str, Any]] = {
             "reserve values that diverge from actual balances after partial operations, "
             "reward accumulators updated in wrong order relative to liquidity changes, "
             "and per-user states that become inconsistent with global state across multiple calls. "
+            "CROSS-CALL STALENESS — identify WRITER functions that update per-tick or per-position "
+            "accumulators (fee growth trackers, time-weighted averages, reward snapshots) "
+            "and READER functions that compute payouts from them (collect, claim, withdraw). "
+            "If a user calls READER before WRITER updates the accumulator → stale data → user overpaid. "
             "SECONDARY — system-level failure modes: actively hunt for hidden external dependencies "
             "(interfaces, arbitrary token interactions, implicit price assumptions). "
             "If found, evaluate oracle dependency under stress, liquidity assumptions that break under "
@@ -261,7 +265,9 @@ CONTRACT_AGENT_MATRIX: Dict[str, Dict[str, Any]] = {
         "core_question": (
             "After every possible operation sequence (mint→burn, swap→collect, claim→claim, burn→claim): "
             "do all internal accounting invariants hold — reserves, fees, and reward states? "
-            "If the contract has external dependencies, what external conditions break its safety assumptions?"
+            "Specifically: are per-position accumulators (e.g. feeGrowthInside, secondsPerLiquidityInside, "
+            "rewardDebt) each snapshotted at the correct point relative to liquidity changes, "
+            "and can collect/claimReward return stale values if called out of order?"
         ),
     },
 
@@ -333,11 +339,19 @@ CONTRACT_AGENT_MATRIX: Dict[str, Dict[str, Any]] = {
             "Key patterns: missing transitions that leave funds permanently locked, "
             "initialization order dependencies that create exploitable windows, "
             "state inconsistency between storage variables after failed or partial operations, "
-            "and update ordering bugs where Variable A is read before B is updated — but should be after."
+            "and update ordering bugs where Variable A is read before B is updated — but should be after. "
+            "CONDITIONAL SYNC SKIP — look for conditional branches that skip state synchronization: "
+            "`if (condition) { sync_state(); update_snapshot(); }` — when branch is NOT taken, "
+            "the snapshot is NOT updated → subsequent reads return stale data. "
+            "INTRA-FUNCTION ORDERING — for every function that updates a time-weighted or per-share "
+            "accumulator, verify it is computed BEFORE the denominator (liquidity, shares, supply) is changed."
         ),
         "core_question": (
             "Can this contract enter a state from which recovery is impossible, "
-            "or where safety invariants are permanently broken?"
+            "or where safety invariants are permanently broken? "
+            "Specifically: are there conditional branches that skip synchronization of accumulators "
+            "(e.g. secondsPerLiquidity, rewardPerShare, feeGrowthInside), and are all such accumulators "
+            "computed BEFORE the liquidity/supply value they depend on is updated?"
         ),
     },
 
