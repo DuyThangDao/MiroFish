@@ -113,6 +113,34 @@ _MAX_RAG_INJECT_PER_AGENT   = 4     # raised: after FIX-1/2 loại noise, không
 _inv_cache: dict[str, tuple] = {}   # key → (score, hint_block); session-level semantic dedup
 _inv_cache_lock = threading.Lock()
 
+_MECHANICS_TURN1_PROMPT_TEMPLATE = """\
+You are a code mechanics analyst for smart contract security.
+
+Task: For each significant function in the contract source below, describe MECHANICALLY
+what the code actually does — focusing on arithmetic, type casts, comparisons, and state
+variable updates. Do NOT describe protocol intent or what the code should do.
+
+Rules:
+- Write 3–5 continuous sentences per function (NOT bullet points, NOT terse labels)
+- For arithmetic: name the types involved, whether inside unchecked block, what happens on overflow
+- For comparisons: state exactly whether < or <= is used and the impact on boundary values
+- For state variables: name which are UPDATED and which are NOT UPDATED after key operations
+- For ordering: describe what is updated before vs after the critical operation
+
+Output format (EXACTLY):
+FUNC <function_name>():
+  <3–5 sentences describing mechanics>
+
+FUNC <next_function>():
+  <3–5 sentences>
+
+Analyze functions that contain: arithmetic, type casts, comparisons, state mutations, external calls.
+Do NOT write protocol intent, invariants, or findings. Output ONLY the FUNC blocks.
+
+CONTRACT SOURCE:
+{source}
+"""
+
 
 def _extract_field(block: str, field: str) -> str:
     m = _re_rag.search(
@@ -253,6 +281,92 @@ def _build_invariant_rag_hints(invariant_text: str, agent_id: str,
     candidates.sort(key=lambda x: x[0], reverse=True)
     hints = [b for _, b in candidates[:_MAX_RAG_INJECT_PER_AGENT]]
     return "\n\n".join(hints), len(hints)
+
+
+_FUNC_HEADER_SPLIT_RE = _re_rag.compile(
+    r'(?:^|\n)[ \t]*(?:[#*`>-]+\s*)?FUNC\s+\w+\([^)]*\)[ \t]*:[ \t]*(?:\n|$)',
+    _re_rag.MULTILINE,
+)
+
+
+def _build_code_similarity_rag_hints(
+    turn1_mechanics: str,
+    agent_id: str,
+    target_contracts: list[str] | None = None,
+) -> tuple[str, int]:
+    """
+    RAG track cho code_similarity_auditor.
+    Query dựa trên FUNC blocks từ Turn 1 mechanics analysis (không phải INV statements).
+    """
+    retriever = _get_rag_retriever()
+
+    # Split on FUNC header lines — avoids the empty-line trap of findall + .+
+    # Handles prefix variations (##, **, etc.) and params in signatures
+    parts = _FUNC_HEADER_SPLIT_RE.split(turn1_mechanics)
+    # parts[0] = preamble before first FUNC header; parts[1:] = block contents
+    func_blocks = [p.strip() for p in parts[1:] if p.strip() and len(p.strip()) > 40]
+
+    # Fallback: no FUNC headers found — use paragraphs as queries
+    if not func_blocks and len(turn1_mechanics) > 60:
+        paras = [
+            p.strip() for p in _re_rag.split(r'\n\s*\n', turn1_mechanics)
+            if len(p.strip()) > 60
+        ]
+        func_blocks = paras[:3]
+
+    logger.info(
+        f"[code_sim] Turn1: {len(turn1_mechanics)} chars → {len(func_blocks)} blocks, "
+        f"preview: {repr(turn1_mechanics[:150])}"
+    )
+
+    if not func_blocks:
+        return "", 0
+
+    hints: list[str] = []
+    rag_calls = 0
+
+    for block_text in func_blocks[:3]:  # cap: 3 functions tối đa
+        text = block_text.strip()
+        if len(text) < 40:
+            continue
+        query = build_rag_query("", text)
+        if not query:
+            continue
+
+        cache_key = f"code_mech::{query[:64]}"
+        with _inv_cache_lock:
+            if cache_key in _inv_cache:
+                cached_score, cached_block = _inv_cache[cache_key]
+                if cached_score >= _SCORE_INJECT_THRESHOLD_INV and cached_block:
+                    hints.append(cached_block)
+                continue
+
+        with _rag_lock:
+            results = retriever.query(query, n_results=3)
+        rag_calls += 1
+
+        top_score = results[0]["score"] if results else 0.0
+        if top_score < _SCORE_INJECT_THRESHOLD_INV:
+            with _inv_cache_lock:
+                _inv_cache[cache_key] = (top_score, "")
+            continue
+
+        block_lines = [f"Code pattern similarity (score={top_score:.3f}):"]
+        added = 0
+        for r in results:
+            if r["score"] < _SCORE_INJECT_THRESHOLD_INV or added >= 2:
+                break
+            preview = r["content"][:350].replace("\n", " ").strip()
+            block_lines.append(f"  [{added + 1}] {r['title']} | {preview}")
+            added += 1
+
+        if added > 0:
+            hint_block = "\n".join(block_lines)
+            hints.append(hint_block)
+            with _inv_cache_lock:
+                _inv_cache[cache_key] = (top_score, hint_block)
+
+    return "\n\n".join(hints), rag_calls
 
 
 def _build_phase_c_review_list(
@@ -2728,6 +2842,100 @@ class CyberSessionOrchestrator:
             rag_calls = 0
 
             try:
+                # ── code_similarity_auditor: mechanics track ──────────────────
+                if profile.agent_id == "code_similarity_auditor":
+                    turn1_prompt = _MECHANICS_TURN1_PROMPT_TEMPLATE.replace("{source}", network_summary)
+                    turn1_response = self.llm.chat(
+                        [{"role": "user", "content": turn1_prompt}],
+                        temperature=0.7,
+                        max_tokens=self._V2_R1_MAX_TOKENS,
+                        strip_think=False,
+                    )
+                    turn1_mechanics = _re_rag.sub(
+                        r'<think>[\s\S]*?</think>', '', turn1_response
+                    ).strip()
+                    logger.info(
+                        f"[code_sim] Turn1 raw={len(turn1_response)}chars "
+                        f"mechanics={len(turn1_mechanics)}chars"
+                    )
+
+                    step2_hint = ""
+                    if rag_enabled:
+                        hint_block, rag_calls = _build_code_similarity_rag_hints(
+                            turn1_mechanics, profile.agent_id,
+                            target_contracts=target_contracts,
+                        )
+                        if hint_block:
+                            step2_hint = (
+                                "\nSIMILAR CODE PATTERNS from audit database:\n\n"
+                                f"{hint_block}\n\n"
+                                "For each code pattern shown above:\n"
+                                "  - BE SKEPTICAL: assume the contract is SAFE first.\n"
+                                "  - Check if THIS contract's mechanics match the historical vulnerability.\n"
+                                "  - Only write a FINDING if you can show the EXACT SAME structural flaw.\n"
+                                "  - If the historical pattern does not apply here, skip it.\n"
+                                "For functions without matching patterns: reason independently.\n"
+                            )
+
+                    turn2_prompt = cm["r1_prompt"](
+                        profile, network_summary,
+                        injected_invariants=turn1_mechanics,
+                        step2_hint=step2_hint,
+                    )
+                    response = self.llm.chat(
+                        [{"role": "user", "content": turn2_prompt}],
+                        temperature=0.7,
+                        max_tokens=self._V2_R1_MAX_TOKENS,
+                        strip_think=True,
+                    )
+                    if not response.strip():
+                        response = self.llm.chat(
+                            [{"role": "user", "content": turn2_prompt}],
+                            temperature=0.7,
+                            max_tokens=self._V2_R1_MAX_TOKENS,
+                            strip_think=True,
+                        )
+
+                    elapsed = time.time() - t0
+                    logger.info(
+                        f"[TIMING] Phase=v2 R1 agent={profile.agent_id} latency={elapsed:.1f}s "
+                        f"rag_calls={rag_calls}"
+                    )
+                    if _debug_dir:
+                        try:
+                            import pathlib
+                            pathlib.Path(_debug_dir).mkdir(parents=True, exist_ok=True)
+                            with open(os.path.join(_debug_dir, f"r1_{profile.agent_id}_mech.txt"), "w") as fh:
+                                fh.write(turn1_mechanics)
+                            with open(os.path.join(_debug_dir, f"r1_{profile.agent_id}.txt"), "w") as fh:
+                                fh.write(response)
+                        except Exception:
+                            pass
+
+                    parsed = cm["parse_all_findings"](
+                        response, profile, 1, known_functions=known_functions
+                    )
+                    parsed = parsed[:5]  # safeguard: max 5 findings
+                    n_findings = len(parsed)
+                    logger.info(
+                        f"[v2 R1] agent={profile.agent_id}: "
+                        f"raw_response={len(response)}chars "
+                        f"parsed={n_findings}findings rag_calls={rag_calls}"
+                    )
+                    results = []
+                    for f in parsed:
+                        fns = f.get("affected_functions") or ["_nofunc"]
+                        contract    = f.get("contract_name", "")
+                        title       = f.get("title", "")
+                        description = f.get("description", "") or ""
+                        attack_path = f.get("attack_path", [])
+                        ev          = (f.get("evidence") or [""])[0]
+                        code_anchor = f.get("code_anchor", "")
+                        for fn in fns:
+                            results.append((contract, fn, title, description, attack_path, ev, code_anchor))
+                    return results
+                # ── end code_similarity_auditor branch ───────────────────────
+
                 # Turn 1: agent extracts invariants only
                 # max_tokens must match Turn 2 — Gemini thinking model needs >= ~32K
                 # to generate any visible output (smaller values → content=None)

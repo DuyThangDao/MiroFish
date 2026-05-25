@@ -19,6 +19,14 @@ from .mitre_reference import MitreReference
 
 logger = get_logger("mirofish.cyber_profile")
 
+_CODE_SIMILARITY_SYSTEM_PROMPT = (
+    "You are a Code Similarity Auditor specializing in smart contract security. "
+    "Your approach: analyze contracts mechanically — describe what each function "
+    "physically does with arithmetic, type casts, and state variables — then compare "
+    "those mechanics against historically vulnerable implementations. "
+    "You identify bugs by recognizing structural code patterns, not by reasoning "
+    "about what the protocol should do."
+)
 
 # ─── Agent Matrix Definition ──────────────────────────────────────────────────
 
@@ -344,6 +352,18 @@ class CyberExpertProfileGenerator:
                 )
                 profiles.append(profile)
                 user_id += 1
+        profiles.append(CyberAgentProfile(
+            user_id=user_id,
+            agent_id="code_similarity_auditor",
+            tier=1,
+            domain_group="code_similarity",
+            persona="auditor",
+            display_name="Code Similarity Auditor",
+            system_prompt=_CODE_SIMILARITY_SYSTEM_PROMPT,
+            bio="Identifies vulnerabilities by matching contract code mechanics against historically exploited patterns.",
+            ttp_focus=["arithmetic_overflow", "type_casting", "boundary_conditions", "state_accounting"],
+            tools_known=["code_pattern_matching", "similarity_analysis"],
+        ))
         return profiles
 
     def _generate_tier2_profiles(
