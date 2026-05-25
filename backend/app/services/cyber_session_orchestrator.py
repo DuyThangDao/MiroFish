@@ -116,26 +116,40 @@ _inv_cache_lock = threading.Lock()
 _MECHANICS_TURN1_PROMPT_TEMPLATE = """\
 You are a code mechanics analyst for smart contract security.
 
-Task: For each significant function in the contract source below, describe MECHANICALLY
-what the code actually does — focusing on arithmetic, type casts, comparisons, and state
+PRIMARY TARGET CONTRACT: {primary_contract}
+
+Task: Analyze functions from {primary_contract} ONLY. Describe MECHANICALLY what each
+function physically does — focusing on arithmetic, type casts, comparisons, and state
 variable updates. Do NOT describe protocol intent or what the code should do.
+Do NOT analyze functions from other contracts (helper pools, libraries, etc.).
+
+Prioritize functions that contain ANY of these high-risk mechanics:
+1. Narrowing type casts: uint128 → int128, uint256 → uint128, int256 → int128
+2. Arithmetic inside unchecked {{ }} blocks that could wrap/overflow
+3. Comparisons using < vs <= at boundary values (tick boundaries, price limits)
+4. State variables (reserves, accumulators) that are NOT updated after a token transfer
+5. Update ordering: which state variable is updated BEFORE vs AFTER a key operation
 
 Rules:
 - Write 3–5 continuous sentences per function (NOT bullet points, NOT terse labels)
-- For arithmetic: name the types involved, whether inside unchecked block, what happens on overflow
+- For type casts: name the source and destination types and whether overflow is checked
+- For arithmetic: state whether inside unchecked block, what happens on overflow/underflow
 - For comparisons: state exactly whether < or <= is used and the impact on boundary values
 - For state variables: name which are UPDATED and which are NOT UPDATED after key operations
 - For ordering: describe what is updated before vs after the critical operation
 
-Output format (EXACTLY):
-FUNC <function_name>():
-  <3–5 sentences describing mechanics>
+Output format (EXACTLY — use plain function name, no contract prefix):
+FUNC burn():
+  <3–5 sentences describing mechanics of {primary_contract}.burn>
+
+FUNC mint():
+  <3–5 sentences describing mechanics of {primary_contract}.mint>
 
 FUNC <next_function>():
   <3–5 sentences>
 
-Analyze functions that contain: arithmetic, type casts, comparisons, state mutations, external calls.
-Do NOT write protocol intent, invariants, or findings. Output ONLY the FUNC blocks.
+Output ONLY the FUNC blocks for {primary_contract} functions.
+Do NOT write protocol intent, invariants, or findings.
 
 CONTRACT SOURCE:
 {source}
@@ -284,7 +298,7 @@ def _build_invariant_rag_hints(invariant_text: str, agent_id: str,
 
 
 _FUNC_HEADER_SPLIT_RE = _re_rag.compile(
-    r'(?:^|\n)[ \t]*(?:[#*`>-]+\s*)?FUNC\s+\w+\([^)]*\)[ \t]*:[ \t]*(?:\n|$)',
+    r'(?:^|\n)[ \t]*(?:[#*`>-]+\s*)?FUNC\s+[\w.]+\([^)]*\)[ \t]*:[ \t]*(?:\n|$)',
     _re_rag.MULTILINE,
 )
 
@@ -293,6 +307,7 @@ def _build_code_similarity_rag_hints(
     turn1_mechanics: str,
     agent_id: str,
     target_contracts: list[str] | None = None,
+    primary_contract: str = "",
 ) -> tuple[str, int]:
     """
     RAG track cho code_similarity_auditor.
@@ -302,6 +317,7 @@ def _build_code_similarity_rag_hints(
 
     # Split on FUNC header lines — avoids the empty-line trap of findall + .+
     # Handles prefix variations (##, **, etc.) and params in signatures
+    # [\w.]+ allows Contract.function() format as well as plain function() format
     parts = _FUNC_HEADER_SPLIT_RE.split(turn1_mechanics)
     # parts[0] = preamble before first FUNC header; parts[1:] = block contents
     func_blocks = [p.strip() for p in parts[1:] if p.strip() and len(p.strip()) > 40]
@@ -313,6 +329,23 @@ def _build_code_similarity_rag_hints(
             if len(p.strip()) > 60
         ]
         func_blocks = paras[:3]
+
+    # Filter to primary contract blocks if contract name is embedded in header text
+    if primary_contract and func_blocks:
+        pc_lower = primary_contract.lower()
+        # Find blocks where the surrounding FUNC header (in original text) mentions primary
+        # Build header list from original split positions
+        header_matches = list(_FUNC_HEADER_SPLIT_RE.finditer(turn1_mechanics))
+        if header_matches and len(header_matches) == len(func_blocks):
+            primary_blocks = [
+                b for h, b in zip(header_matches, func_blocks)
+                if pc_lower in h.group(0).lower()
+            ]
+            if primary_blocks:
+                func_blocks = primary_blocks
+                logger.info(
+                    f"[code_sim] Filtered to {len(func_blocks)} blocks for '{primary_contract}'"
+                )
 
     logger.info(
         f"[code_sim] Turn1: {len(turn1_mechanics)} chars → {len(func_blocks)} blocks, "
@@ -2844,7 +2877,17 @@ class CyberSessionOrchestrator:
             try:
                 # ── code_similarity_auditor: mechanics track ──────────────────
                 if profile.agent_id == "code_similarity_auditor":
-                    turn1_prompt = _MECHANICS_TURN1_PROMPT_TEMPLATE.replace("{source}", network_summary)
+                    # Extract primary contract name from network_summary header
+                    _pc_m = _re_rag.search(
+                        r'TARGET 1\s*[-—–]\s*(\w+)\s*\(primary\)', network_summary
+                    )
+                    primary_contract = _pc_m.group(1) if _pc_m else ""
+
+                    turn1_prompt = (
+                        _MECHANICS_TURN1_PROMPT_TEMPLATE
+                        .replace("{primary_contract}", primary_contract or "the primary target contract")
+                        .replace("{source}", network_summary)
+                    )
                     turn1_response = self.llm.chat(
                         [{"role": "user", "content": turn1_prompt}],
                         temperature=0.7,
@@ -2856,7 +2899,7 @@ class CyberSessionOrchestrator:
                     ).strip()
                     logger.info(
                         f"[code_sim] Turn1 raw={len(turn1_response)}chars "
-                        f"mechanics={len(turn1_mechanics)}chars"
+                        f"mechanics={len(turn1_mechanics)}chars primary={primary_contract}"
                     )
 
                     step2_hint = ""
@@ -2864,6 +2907,7 @@ class CyberSessionOrchestrator:
                         hint_block, rag_calls = _build_code_similarity_rag_hints(
                             turn1_mechanics, profile.agent_id,
                             target_contracts=target_contracts,
+                            primary_contract=primary_contract,
                         )
                         if hint_block:
                             step2_hint = (
