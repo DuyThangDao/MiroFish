@@ -155,6 +155,45 @@ CONTRACT SOURCE:
 {source}
 """
 
+# Turn 1.5: convert FUNC mechanics blocks → testable INV-Mx vulnerability hypotheses.
+# These INV-Mx lines are fed into the standard Turn 2 prompt as `injected_invariants`,
+# enabling the Q1/Q2/Q3 violation reasoning chain to work correctly on specific patterns.
+_MECHANICS_TO_INV_PROMPT_TEMPLATE = """\
+You are a vulnerability hypothesis extractor for smart contract auditing.
+
+INPUT: Mechanical descriptions of smart contract functions (FUNC blocks).
+TASK: Convert notable mechanics into testable vulnerability hypotheses (INV-Mx lines).
+
+Target exactly these 5 pattern classes — skip everything else:
+  PATTERN-A (sign-flip cast): A narrowing cast (uint128→int128, uint256→int128) where
+    input can exceed destination type max — causing the negated value to flip sign
+    (e.g., -int128(amount) becomes positive), adding liquidity instead of removing it.
+  PATTERN-B (unchecked-missing underflow): A subtraction OUTSIDE any unchecked block that
+    naturally underflows in correct usage — reverts under Solidity 0.8+ and permanently
+    blocks callers (DoS).
+  PATTERN-C (wrong boundary comparison): A strict < or > at a tick/price boundary that
+    wrongly excludes the boundary value, causing incorrect active-liquidity accounting.
+  PATTERN-D (missing reserve/state update): A reserve or unclaimed-reward variable that
+    is NOT decremented/cleared after tokens are transferred out — inflating accounting state.
+  PATTERN-E (wrong accumulator update order): An accumulator (secondsPerLiquidity,
+    rewardPerShare, feeGrowth) reads its denominator (liquidity, totalShares) AFTER that
+    denominator has already been modified in the same function — wrong value accumulated.
+
+Output format — EXACTLY one line per hypothesis:
+INV-M1: <fn>() — PATTERN-<X> — exact code: `<expression at fault>` — consequence: <what breaks>
+INV-M2: <fn>() — PATTERN-<X> — exact code: `<expression at fault>` — consequence: <what breaks>
+
+Rules:
+- Output ONLY INV-Mx lines. No headers, no FUNC blocks, no explanations.
+- Quote the EXACT code token or expression (cast, subtraction, comparison, variable name).
+- Skip any function with no clear match to PATTERN-A … PATTERN-E.
+- Maximum 8 INV lines total. Prefer quality over quantity.
+- If the same pattern appears in multiple functions, write one INV per function.
+
+FUNC MECHANICS:
+{turn1_mechanics}
+"""
+
 
 def _extract_field(block: str, field: str) -> str:
     m = _re_rag.search(
@@ -2902,8 +2941,39 @@ class CyberSessionOrchestrator:
                         f"mechanics={len(turn1_mechanics)}chars primary={primary_contract}"
                     )
 
+                    # ── Turn 1.5: convert FUNC mechanics → INV-Mx hypotheses ──
+                    # FUNC blocks are mechanics descriptions, not checkable invariants.
+                    # The standard Turn 2 prompt reasons over "invariants" via Q1/Q2/Q3.
+                    # Feeding raw FUNC blocks into injected_invariants causes the model
+                    # to ignore them. Converting to INV-Mx format fixes the mismatch.
+                    turn15_prompt = _MECHANICS_TO_INV_PROMPT_TEMPLATE.replace(
+                        "{turn1_mechanics}", turn1_mechanics
+                    )
+                    turn15_response = self.llm.chat(
+                        [{"role": "user", "content": turn15_prompt}],
+                        temperature=0.3,
+                        max_tokens=2000,
+                        strip_think=True,
+                    )
+                    # Extract only INV-Mx lines; fall back to raw mechanics if conversion fails
+                    inv_lines = [
+                        ln for ln in turn15_response.splitlines()
+                        if ln.strip().startswith("INV-M")
+                    ]
+                    if inv_lines:
+                        turn15_invs = "\n".join(inv_lines)
+                        logger.info(
+                            f"[code_sim] Turn1.5: {len(inv_lines)} INV-Mx lines extracted"
+                        )
+                    else:
+                        turn15_invs = turn1_mechanics  # fallback: keep raw mechanics
+                        logger.info(
+                            f"[code_sim] Turn1.5: no INV-Mx found, using raw mechanics fallback"
+                        )
+
                     step2_hint = ""
                     if rag_enabled:
+                        # RAG still uses raw mechanics (FUNC blocks) for semantic search
                         hint_block, rag_calls = _build_code_similarity_rag_hints(
                             turn1_mechanics, profile.agent_id,
                             target_contracts=target_contracts,
@@ -2923,7 +2993,7 @@ class CyberSessionOrchestrator:
 
                     turn2_prompt = cm["r1_prompt"](
                         profile, network_summary,
-                        injected_invariants=turn1_mechanics,
+                        injected_invariants=turn15_invs,   # INV-Mx lines, not raw FUNC blocks
                         step2_hint=step2_hint,
                     )
                     response = self.llm.chat(
