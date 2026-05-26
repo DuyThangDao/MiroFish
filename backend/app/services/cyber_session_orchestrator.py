@@ -190,6 +190,11 @@ Rules:
 - Maximum 8 INV lines total. Prefer quality over quantity.
 - If the same pattern appears in multiple functions, write one INV per function.
 
+EXAMPLE (copy this format exactly):
+INPUT: withdraw(): Converts uint256 shares to int256 via narrowing cast. Negates result to reduce position.
+OUTPUT:
+INV-M1: withdraw() — PATTERN-A — exact code: `int256(shares)` — consequence: if shares > type(int256).max, cast overflows, sign flips positive, position increased instead of decreased
+
 FUNC MECHANICS:
 {turn1_mechanics}
 """
@@ -341,6 +346,16 @@ _FUNC_HEADER_SPLIT_RE = _re_rag.compile(
     _re_rag.MULTILINE,
 )
 
+_FILE_SECTION_RE = _re_rag.compile(
+    r'(// ─── .+?\.sol.*? ───)',
+    _re_rag.MULTILINE,
+)
+
+_TARGET_DECL_RE = _re_rag.compile(
+    r'// TARGET \d+\s*[-—–]\s*(\w+)',
+    _re_rag.MULTILINE,
+)
+
 
 def _build_code_similarity_rag_hints(
     turn1_mechanics: str,
@@ -439,6 +454,118 @@ def _build_code_similarity_rag_hints(
                 _inv_cache[cache_key] = (top_score, hint_block)
 
     return "\n\n".join(hints), rag_calls
+
+
+_TARGET_LINE_RE = _re_rag.compile(
+    r'^// TARGET \d+\s*[-—–]\s*\w+.*$\n?',
+    _re_rag.MULTILINE,
+)
+
+# Matches the multi-target warning block produced by flatten_contest.py:
+#   // ⚠️  THIS PROTOCOL HAS N INDEPENDENT AUDIT TARGETS.
+#   // Analyze each target SEPARATELY. ...
+#   // is shared via direct external calls.
+#   //
+# Stops before any "// TARGET N — ..." line (negative lookahead on "// TARGET \d").
+_MULTI_TARGET_WARN_RE = _re_rag.compile(
+    r'^// ⚠️\s+THIS PROTOCOL HAS \d+ INDEPENDENT AUDIT TARGETS\..*$\n'
+    r'(?:^//(?! TARGET \d).+$\n|^//\s*$\n)*',
+    _re_rag.MULTILINE,
+)
+
+
+def _rewrite_header_for_scope(header: str, primary_contract: str) -> str:
+    """
+    Thay thế multi-target warning block + tất cả dòng TARGET N trong header
+    bằng scope declaration cho primary_contract.
+
+    Nếu header không có TARGET declarations → trả về nguyên vẹn.
+    """
+    if not _TARGET_LINE_RE.search(header):
+        return header
+    scope_block = (
+        f"// ⚠️  AUDIT SCOPE: {primary_contract} (primary)\n"
+        f"// (Other targets in this contest are outside this agent's specialization scope)\n"
+    )
+    # Step 1: remove the multi-line warning block ("THIS PROTOCOL HAS N INDEPENDENT AUDIT TARGETS")
+    rewritten = _MULTI_TARGET_WARN_RE.sub("", header)
+    # Step 2: replace first TARGET line with scope declaration, remove the rest
+    rewritten, n = _TARGET_LINE_RE.subn(scope_block, rewritten, count=1)
+    if n > 0:
+        rewritten = _TARGET_LINE_RE.sub("", rewritten)
+    return rewritten
+
+
+def _filter_source_to_primary(
+    network_summary: str,
+    primary_contract: str,
+    exclude_peripheral_suffixes: bool = True,
+) -> str:
+    """
+    Lọc network_summary để chỉ giữ lại source của primary contract
+    và các math library dependencies. Loại bỏ các non-primary target contracts.
+
+    Logic hoàn toàn generic — không hardcode tên contract:
+    1. Đọc danh sách tất cả TARGETs từ header của network_summary
+    2. Non-primary targets = tất cả TARGETs trừ primary_contract
+    3. Exclude file sections có tên khớp với non-primary target
+    4. Optionally exclude peripheral "Related contracts" theo suffix (Manager, Helper)
+    5. Giữ lại tất cả sections còn lại (primary + math libs)
+    6. Rewrite header để chỉ declare primary target (tránh hallucination)
+    """
+    _PERIPHERAL_SUFFIXES = ("manager", "helper")
+
+    if not primary_contract:
+        return network_summary
+
+    header_block = network_summary[:2000]
+    all_targets = _TARGET_DECL_RE.findall(header_block)
+    non_primary_targets = [t for t in all_targets if t != primary_contract]
+
+    if not all_targets:
+        logger.warning(
+            f"[code_sim] _filter_source_to_primary: no TARGET declarations found, "
+            f"returning full source"
+        )
+        return network_summary
+
+    parts = _FILE_SECTION_RE.split(network_summary)
+    # Rewrite header block so model sees only 1 audit target (prevents hallucination)
+    result = [_rewrite_header_for_scope(parts[0], primary_contract)]
+    excluded_peripheral: list[str] = []
+
+    for i in range(1, len(parts), 2):
+        header  = parts[i]
+        content = parts[i + 1] if i + 1 < len(parts) else ""
+
+        # Only exclude peripheral "Related contracts" by suffix (Manager, Helper).
+        # Co-primary TARGET contracts are kept in body for context.
+        if exclude_peripheral_suffixes:
+            fname_match = _re_rag.search(r'[\w]+\.sol', header)
+            if fname_match:
+                fname_stem = fname_match.group(0)[:-4]  # strip .sol
+                if any(fname_stem.lower().endswith(sfx) for sfx in _PERIPHERAL_SUFFIXES):
+                    excluded_peripheral.append(fname_stem)
+                    continue
+
+        result.append(header)
+        result.append(content)
+
+    filtered = "".join(result)
+    logger.info(
+        f"[code_sim] source filter: {len(network_summary)} → {len(filtered)} chars "
+        f"| co-primary targets kept: {non_primary_targets}"
+        f"| excluded peripheral: {excluded_peripheral}"
+        f"| header rewritten for scope: {primary_contract}"
+    )
+    return filtered
+
+
+# Agents in the standard flow that should receive filtered source (not full network_summary)
+_FILTERED_SOURCE_AGENTS: set[str] = {"clmm_specialist"}
+
+# Compiled regex for flexible INV-Mx line extraction (Fix C)
+_INV_LINE_RE = re.compile(r'INV-M\d+\s*:.+')
 
 
 def _build_phase_c_review_list(
@@ -2913,19 +3040,23 @@ class CyberSessionOrchestrator:
             rag_enabled = os.environ.get("RAG_ENABLED", "true").lower() == "true"
             rag_calls = 0
 
+            # Extract primary contract name once — used by both code_similarity_auditor and Fix B
+            _pc_m = _re_rag.search(
+                r'TARGET 1\s*[-—–]\s*(\w+)\s*\(primary\)', network_summary
+            )
+            primary_contract = _pc_m.group(1) if _pc_m else ""
+
             try:
                 # ── code_similarity_auditor: mechanics track ──────────────────
                 if profile.agent_id == "code_similarity_auditor":
-                    # Extract primary contract name from network_summary header
-                    _pc_m = _re_rag.search(
-                        r'TARGET 1\s*[-—–]\s*(\w+)\s*\(primary\)', network_summary
-                    )
-                    primary_contract = _pc_m.group(1) if _pc_m else ""
 
+                    primary_source = _filter_source_to_primary(
+                        network_summary, primary_contract
+                    )
                     turn1_prompt = (
                         _MECHANICS_TURN1_PROMPT_TEMPLATE
                         .replace("{primary_contract}", primary_contract or "the primary target contract")
-                        .replace("{source}", network_summary)
+                        .replace("{source}", primary_source)
                     )
                     turn1_response = self.llm.chat(
                         [{"role": "user", "content": turn1_prompt}],
@@ -2952,14 +3083,22 @@ class CyberSessionOrchestrator:
                     turn15_response = self.llm.chat(
                         [{"role": "user", "content": turn15_prompt}],
                         temperature=0.3,
-                        max_tokens=2000,
+                        max_tokens=4000,
                         strip_think=True,
+                        extra_body={"google": {"thinking_config": {"thinking_budget": 0}}},
+                    )
+                    # Log first 300 chars of Turn1.5 response for debugging format issues
+                    logger.info(
+                        f"[code_sim] Turn1.5 raw ({len(turn15_response)}chars): "
+                        f"{repr(turn15_response[:300])}"
                     )
                     # Extract only INV-Mx lines; fall back to raw mechanics if conversion fails
-                    inv_lines = [
-                        ln for ln in turn15_response.splitlines()
-                        if ln.strip().startswith("INV-M")
-                    ]
+                    # Fix C: flexible search instead of startswith — handles bullet/bold/numbered formats
+                    inv_lines = []
+                    for ln in turn15_response.splitlines():
+                        m = _INV_LINE_RE.search(ln)
+                        if m:
+                            inv_lines.append(m.group(0).strip())
                     if inv_lines:
                         turn15_invs = "\n".join(inv_lines)
                         logger.info(
@@ -2992,7 +3131,7 @@ class CyberSessionOrchestrator:
                             )
 
                     turn2_prompt = cm["r1_prompt"](
-                        profile, network_summary,
+                        profile, primary_source,          # filtered: primary + math libs only
                         injected_invariants=turn15_invs,   # INV-Mx lines, not raw FUNC blocks
                         step2_hint=step2_hint,
                     )
@@ -3050,10 +3189,17 @@ class CyberSessionOrchestrator:
                     return results
                 # ── end code_similarity_auditor branch ───────────────────────
 
+                # Fix B: filter source for agents that should only see primary contract
+                agent_source = (
+                    _filter_source_to_primary(network_summary, primary_contract)
+                    if profile.agent_id in _FILTERED_SOURCE_AGENTS
+                    else network_summary
+                )
+
                 # Turn 1: agent extracts invariants only
                 # max_tokens must match Turn 2 — Gemini thinking model needs >= ~32K
                 # to generate any visible output (smaller values → content=None)
-                turn1_prompt = cm["r1_prompt"](profile, network_summary, invariant_only=True)
+                turn1_prompt = cm["r1_prompt"](profile, agent_source, invariant_only=True)
                 turn1_response = self.llm.chat(
                     [{"role": "user", "content": turn1_prompt}],
                     temperature=0.7,
@@ -3090,7 +3236,7 @@ class CyberSessionOrchestrator:
 
                 # Turn 2: full violation analysis — ALWAYS runs (Turn 1 only extracted invariants)
                 turn2_prompt = cm["r1_prompt"](
-                    profile, network_summary,
+                    profile, agent_source,
                     injected_invariants=turn1_clean,
                     step2_hint=step2_hint,
                 )

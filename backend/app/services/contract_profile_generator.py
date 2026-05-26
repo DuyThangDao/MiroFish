@@ -69,7 +69,14 @@ CONTRACT_AGENT_MATRIX: Dict[str, Dict[str, Any]] = {
         "core_question": (
             "What security controls and input preconditions does this contract assume exist — "
             "and which of those assumptions might be violated under adversarial conditions? "
-            "For each function, are all necessary bounds, ranges, and relationship constraints explicitly enforced?"
+            "For each function, are all necessary bounds, ranges, and relationship constraints explicitly enforced? "
+            "INITIALIZER MANDATORY CHECK: for every initialize() or one-time setup function that "
+            "accepts a numeric parameter (price, rate, ratio, index, threshold) used directly in "
+            "subsequent mathematical operations: confirm the parameter is validated against "
+            "explicit [MIN, MAX] bounds before first use. "
+            "A missing bounds check on a setup parameter that causes all future operations to "
+            "revert is a permanent DoS — treat it as a HIGH finding regardless of who controls "
+            "the initializer call."
         ),
     },
 
@@ -105,7 +112,11 @@ CONTRACT_AGENT_MATRIX: Dict[str, Dict[str, Any]] = {
         ),
         "core_question": (
             "Is every narrowing cast and arithmetic operation in this contract's execution paths safe — "
-            "and what is the maximum realistic value at each cast point?"
+            "and what is the maximum realistic value at each cast point? "
+            "RETURN-VALUE CAST: for every expression that immediately casts a math library's "
+            "return value to a smaller integer type (pattern: smallerType(LibName.func(...))), "
+            "verify that the return value is guaranteed to fit in the target type across all "
+            "valid inputs — do NOT assume the library enforces this upper bound internally."
         ),
     },
 
@@ -216,7 +227,22 @@ CONTRACT_AGENT_MATRIX: Dict[str, Dict[str, Any]] = {
         ),
         "core_question": (
             "What is the set of inputs that causes any mathematical invariant in this contract — "
-            "including its libraries and internal helpers — to fail?"
+            "including its libraries and internal helpers — to fail? "
+            "BOUNDARY INEQUALITY: for every conditional that gates a state transition "
+            "(activation, inclusion, accrual) — WRITE AN INV that states which operator "
+            "(<  or  <=) is semantically required, then test the EXACT boundary value: "
+            "set input = threshold and trace which branch executes. "
+            "If input == threshold executes the wrong branch, the invariant is VIOLATED — "
+            "write a FINDING. "
+            "Only write a FINDING if you can show an exact input value that takes the wrong branch. "
+            "An off-by-one silently excludes valid states from downstream accounting. "
+            "ACCUMULATOR UPDATE ORDER: for every function that both (a) changes a denominator "
+            "state variable (liquidity, shares, supply, balance) AND (b) computes a rate or "
+            "time-weighted accumulator (reward-per-share, fee-growth, seconds-per-unit) — "
+            "verify that the accumulator is computed using the OLD denominator value (before "
+            "the change) not the NEW value (after the change). Using the post-update denominator "
+            "distorts the per-unit allocation for the current period and permanently misprices "
+            "rewards or fees for existing holders."
         ),
     },
 
@@ -267,7 +293,14 @@ CONTRACT_AGENT_MATRIX: Dict[str, Dict[str, Any]] = {
             "do all internal accounting invariants hold — reserves, fees, and reward states? "
             "Specifically: are per-position accumulators (e.g. feeGrowthInside, secondsPerLiquidityInside, "
             "rewardDebt) each snapshotted at the correct point relative to liquidity changes, "
-            "and can collect/claimReward return stale values if called out of order?"
+            "and can collect/claimReward return stale values if called out of order? "
+            "ACCUMULATOR UPDATE ORDER: for every function that both (a) changes a denominator "
+            "state variable (liquidity, shares, supply, balance) AND (b) computes a rate or "
+            "time-weighted accumulator (reward-per-share, fee-growth, seconds-per-unit) — "
+            "verify that the accumulator is computed using the OLD denominator value (before "
+            "the change) not the NEW value (after the change). Using the post-update denominator "
+            "distorts the per-unit allocation for the current period and permanently misprices "
+            "rewards or fees for existing holders."
         ),
     },
 
@@ -288,7 +321,15 @@ CONTRACT_AGENT_MATRIX: Dict[str, Dict[str, Any]] = {
             "If I am a rational actor with unlimited capital and perfect information, what strategy — "
             "including same-block add/remove operations, transaction ordering manipulation by a block builder, "
             "or JIT positioning before large trades — maximizes my profit at the expense of other participants "
-            "without any single step violating contract rules?"
+            "without any single step violating contract rules? "
+            "TIME-WEIGHTED REWARD JIT: find any accumulator that grows proportional to "
+            "time / active_supply (time per share, time per liquidity unit, or equivalent). "
+            "Trace the formula: if the denominator is the currently active supply at each block, "
+            "then entering with a large position when I am the SOLE participant for even 1 block "
+            "captures 100% of that block's increment. "
+            "Can I enter just before a snapshot, dominate the accumulator for 1 block, then exit — "
+            "and does the protocol have any mechanism (minimum hold time, vesting, "
+            "snapshot timing) preventing this?"
         ),
     },
 
@@ -428,7 +469,12 @@ CONTRACT_AGENT_MATRIX: Dict[str, Dict[str, Any]] = {
         ),
         "core_question": (
             "Does every math helper — both imported libraries and internal helper functions inside the main contract — "
-            "behave correctly in all edge cases, including those the caller does not validate?"
+            "behave correctly in all edge cases, including those the caller does not validate? "
+            "CALLER-SIDE CAST: when an internal helper calls an external math library and "
+            "immediately casts the return value to a smaller type "
+            "(pattern: uint128(LibName.func(...))), this cast occurs in the HELPER, not in the library. "
+            "Check: can the library legitimately return a value exceeding the target type's maximum "
+            "for any valid combination of parameters the caller might pass?"
         ),
     },
 
@@ -456,6 +502,61 @@ CONTRACT_AGENT_MATRIX: Dict[str, Dict[str, Any]] = {
             "is this the correct choice for the intended invariant? "
             "If the answer is 'possibly not', write a FINDING first, then articulate the worst-case scenario — "
             "do not use inability to prove the full attack path as a reason to stay silent."
+        ),
+    },
+
+    "clmm_specialist": {
+        "display_name": "CLMM Protocol Mechanics Specialist",
+        "domain_group": "clmm_mechanics",
+        "swc_focus": ["SWC-101", "SWC-130", "SWC-114"],
+        "prompt": (
+            "You are a Concentrated Liquidity Market Maker (CLMM) protocol specialist "
+            "with deep knowledge of Uniswap V3-style internal mechanics. "
+            "You know three invariants that must hold in every correct CLMM implementation: "
+            ""
+            "INVARIANT 1 — FEE GROWTH INITIALIZATION: "
+            "each per-tick fee growth tracker must be initialized using the ACTUAL current pool "
+            "state at the moment the tick is inserted — not a cached value, a 'nearest' proxy, "
+            "or any variable that could lag behind the real current price. "
+            "Using any indirect reference introduces a window where the tracker is initialized "
+            "with a stale value, making all downstream fee calculations wrong for that tick. "
+            ""
+            "INVARIANT 2 — TICK CROSS CONSISTENCY: "
+            "when a tick is crossed, each fee growth tracker must be updated for the "
+            "token whose fees are actually accumulating in that direction. "
+            "Swapping which tracker gets updated based on crossing direction silently "
+            "corrupts all fee calculations for positions that span that tick. "
+            ""
+            "INVARIANT 3 — TIME-WEIGHTED REWARD FAIRNESS: "
+            "any accumulator that grows proportional to time divided by active liquidity "
+            "creates a JIT attack surface: a large position added for a single block "
+            "when it is the sole active liquidity earns 100% of that block's accumulator "
+            "increment, regardless of how briefly it was held. "
+            "Protocols distributing rewards based on such accumulators must account for this."
+        ),
+        "core_question": (
+            "Three independent questions — apply each to the actual variable names in this contract: "
+            "(1) INITIALIZATION — when a new tick is inserted into the tick data structure, "
+            "which variable is used to determine the initial value of the per-tick fee tracker? "
+            "Is that variable guaranteed to equal the pool's actual current price at that instant — "
+            "or could it be a stale, cached, or indirect value that diverges under any condition? "
+            "(2) CROSS VARIABLE SWAP — when a tick is crossed during a swap, the cross() function "
+            "updates feeGrowthOutside0 and feeGrowthOutside1 inside an if/else branch on the swap "
+            "direction flag (zeroForOne or equivalent). "
+            "Read the EXACT assignments inside each branch: "
+            "when zeroForOne=true, feeGrowthOutside0 must be assigned feeGrowthGlobal0 - feeGrowthOutside0 "
+            "(NOT the token1 value), and feeGrowthOutside1 must be assigned feeGrowthGlobal1 - feeGrowthOutside1 "
+            "(NOT the token0 value). "
+            "Check whether the 0 and 1 suffixes are SWAPPED in the assignments — "
+            "this means feeGrowthOutside0 receives the token1 update and vice versa, "
+            "silently crediting fee growth to the wrong token direction for every position "
+            "spanning that tick. "
+            "(3) JIT REWARD — identify any accumulator whose value grows as "
+            "elapsed_time / active_liquidity (or equivalent). "
+            "Can a rational actor add a large position for exactly one block when it is "
+            "the sole active liquidity provider, capture a disproportionate share of the "
+            "accumulator, then immediately exit — and does the protocol have any mechanism "
+            "preventing this extraction?"
         ),
     },
 
@@ -499,6 +600,7 @@ _DOMAIN_GROUP_TO_SWC_DOMAIN: Dict[str, str] = {
     "governance":     "governance",
     "deep_analysis":  "appsec",
     "code_similarity": "appsec",
+    "clmm_mechanics": "defi",
 }
 
 

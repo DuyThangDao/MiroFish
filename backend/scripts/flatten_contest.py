@@ -52,6 +52,21 @@ _SPDX_RE     = re.compile(r'^\s*//\s*SPDX-License-Identifier:.*$', re.MULTILINE)
 _IMPORT_RE   = re.compile(r'''^\s*import\s+(?:[^"']*\s)?["']([^"']+)["'][^;]*;''', re.MULTILINE)
 _IMPORT_LINE = re.compile(r'''^\s*import\s+[^;]+;''', re.MULTILINE)
 
+# Fix D: detects `storage` as a Solidity data location keyword in a function parameter.
+# Matches only when `storage` is preceded by a Solidity TYPE expression:
+#   - closing paren/bracket: `mapping(K=>V) storage x`, `Type[] storage y`
+#   - Solidity primitive:     `uint256 storage x`, `address storage x`
+#   - Capitalized user type:  `Tick storage tick`, `PoolState storage state`
+# Followed by a lowercase variable name (Solidity naming convention).
+# Does NOT match English phrases: `"from storage slot"`, `"notice storage layout"`.
+_STORAGE_PARAM_RE = re.compile(
+    r'(?:'
+    r'[)\]]'                                              # mapping/array closing: `mapping(...) storage x`
+    r'|(?:uint\d*|int\d*|bytes\d*|address|bool|string)'  # Solidity primitives
+    r'|[A-Z]\w*'                                          # capitalized user-defined types (Tick, PoolState)
+    r')\s+storage\s+[a-z_]\w*'                            # data location + lowercase var name
+)
+
 # Files that are interface-only (all function bodies are empty / just signatures)
 _INTERFACE_RE = re.compile(r'\binterface\s+\w+', re.MULTILINE)
 _CONTRACT_RE  = re.compile(r'\b(contract|library|abstract\s+contract)\s+\w+', re.MULTILINE)
@@ -451,6 +466,24 @@ def _classify_files(
                 if not _is_mock_or_test(k)
                 and not _is_interface_only(sources.get(k, ""))
             }
+
+            # Fix D: promote skeleton libraries that modify state (have `storage` params)
+            # State-modifying libraries ALWAYS use `storage` in Solidity; pure math libs never do.
+            # Generic heuristic: no contract names hardcoded.
+            promoted: Set[str] = set()
+            for k in list(skeleton_set):
+                src = sources.get(k, "")
+                if _STORAGE_PARAM_RE.search(src):
+                    promoted.add(k)
+                    core_set.add(k)
+                    skeleton_set.discard(k)
+                    full_reachable |= _get_reachable_set(k, graph)
+            if promoted:
+                print(
+                    f"[flatten] Fix D: promoted {len(promoted)} skeleton lib(s) to core "
+                    f"(storage params detected): {sorted(k.split('/')[-1] for k in promoted)}"
+                )
+
             tier3_set = set(order) - core_set - skeleton_set
 
             return {

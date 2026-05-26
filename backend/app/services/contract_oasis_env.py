@@ -1471,6 +1471,14 @@ Analyze every function. Do not limit your analysis to only public/external funct
 COVERAGE RULE — if a vulnerability pattern appears in MULTIPLE functions, write one FINDING per function.
 Do NOT collapse "function A and B" into a single FINDING. A missed function = a missed bug.
 
+LOCATION RULE — before writing FUNCTION: or VIOLATED_AT: in any EVIDENCE block:
+  (1) Confirm the exact function name as it appears in the contract source.
+  (2) For UPDATE-ORDER bugs (accumulator must be computed BEFORE denominator changes):
+      VIOLATED_AT must be the function that performs the INCORRECT UPDATE SEQUENCE
+      (e.g., the function that changes liquidity/supply THEN computes the accumulator),
+      NOT a downstream function that merely reads the stale result.
+  (3) If you cannot find the exact function name in the source, do NOT guess — skip the FINDING.
+
 PROTOCOL INVARIANT ANALYSIS — mandatory before writing any FINDING:
 
 {step1_section}
