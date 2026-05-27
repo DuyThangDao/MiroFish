@@ -272,6 +272,96 @@ def run_audit(
     logger.info(f"Output: {output_dir}")
     logger.info("=" * 60)
 
+    # ── Checkpoint resume: skip KG/profiles if CHECKPOINT_DIR is set ───────────
+    _ckpt_dir = os.environ.get("CHECKPOINT_DIR", "")
+    if _ckpt_dir:
+        import json as _cjson, shutil as _cshutil
+        _ckpt_summary = os.path.join(_ckpt_dir, "session_summary.txt")
+        _ckpt_kg      = os.path.join(_ckpt_dir, "kg_result.json")
+        _ckpt_inv     = os.path.join(_ckpt_dir, "invariants.json")
+        _ckpt_prof    = os.path.join(_ckpt_dir, "profiles.json")
+        if all(os.path.exists(p) for p in [_ckpt_summary, _ckpt_kg, _ckpt_prof]):
+            logger.info(f"[CHECKPOINT] Loading from {_ckpt_dir} — skipping KG/profiles build")
+            os.makedirs(output_dir, exist_ok=True)
+            from app.models.task import TaskManager
+            from app.services.cyber_session_orchestrator import CyberSessionOrchestrator
+            from app.services.contract_audit_agent import ContractAuditReportAgent
+            from app.services.contract_profile_generator import ContractAgentProfile
+            task_manager  = TaskManager()
+            orchestrator  = CyberSessionOrchestrator()
+            report_agent  = ContractAuditReportAgent()
+            _ckpt_kg_data = _cjson.load(open(_ckpt_kg))
+            graph_id      = _ckpt_kg_data.get("graph_id", "checkpoint")
+            contract_summary   = open(_ckpt_summary).read()
+            _v2_session_summary = contract_summary
+            invariants    = _cjson.load(open(_ckpt_inv)).get("invariants", []) if os.path.exists(_ckpt_inv) else []
+            # Reconstruct profiles from saved JSON
+            _prof_raw  = _cjson.load(open(_ckpt_prof))
+            profiles   = [
+                ContractAgentProfile(
+                    user_id=p.get("user_id", 0),
+                    agent_id=p.get("agent_id", ""),
+                    tier=p.get("tier", 1),
+                    domain_group=p.get("domain_group", ""),
+                    persona=p.get("persona", ""),
+                    display_name=p.get("display_name", ""),
+                    system_prompt=p.get("system_prompt", ""),
+                    bio=p.get("bio", ""),
+                    swc_focus=p.get("swc_focus", []),
+                    core_question=p.get("core_question", ""),
+                )
+                for p in _prof_raw
+            ]
+            # Copy checkpoint files into new run dir for reference
+            for _fn in ["kg_result.json", "dep_graph.json", "invariants.json",
+                        "profiles.json", "intent.json", "contract_summary.txt"]:
+                _src = os.path.join(_ckpt_dir, _fn)
+                if os.path.exists(_src):
+                    _cshutil.copy2(_src, os.path.join(output_dir, _fn))
+            _save_text(output_dir, "session_summary.txt", _v2_session_summary)
+            logger.info(
+                f"[CHECKPOINT] graph_id={graph_id} profiles={len(profiles)} "
+                f"invariants={len(invariants)} summary={len(_v2_session_summary)}chars"
+            )
+            logger.info(f"\n[STEP 3/4] Running gap-fill only (CHECKPOINT_DIR mode)...")
+            task_id = orchestrator.run_session_async(
+                graph_id=graph_id,
+                network_summary=_v2_session_summary,
+                profiles=profiles,
+                mode="contract_audit",
+                invariants=invariants,
+                manifest=manifest,
+            )
+            from datetime import datetime as _dt
+            session_result = _poll_task(task_manager, task_id, "Audit Session", timeout=timeout_session)
+            expert_findings   = session_result.get("expert_findings", [])
+            attacker_findings = session_result.get("attacker_findings", [])
+            semantic_findings = session_result.get("semantic_findings", [])
+            v2_confirmed      = session_result.get("v2_confirmed")
+            v2_borderline     = session_result.get("v2_borderline", [])
+            v2_discarded      = session_result.get("v2_discarded", [])
+            os.makedirs(output_dir, exist_ok=True)
+            _save_json(output_dir, "session_result.json", session_result)
+            logger.info(f"\n[STEP 4/4] Generating audit report...")
+            task_id = report_agent.generate_report_async(
+                session_id=session_result.get("session_id", "checkpoint"),
+                expert_findings=expert_findings,
+                attacker_findings=attacker_findings,
+                contract_summary=contract_summary,
+                graph_id=graph_id,
+                semantic_findings=semantic_findings,
+                invariants=invariants,
+                v2_confirmed=v2_confirmed,
+                v2_borderline=v2_borderline,
+                v2_discarded=v2_discarded,
+            )
+            _poll_task(task_manager, task_id, "Report Gen", timeout=1800)
+            return  # post-run block handles dedup + log copy below
+        else:
+            logger.warning(
+                f"[CHECKPOINT] CHECKPOINT_DIR={_ckpt_dir} but missing files — running full pipeline"
+            )
+
     from app.models.task import TaskManager
     from app.services.contract_kg_builder import ContractKGBuilder
     from app.services.contract_profile_generator import ContractExpertProfileGenerator
@@ -423,6 +513,7 @@ def run_audit(
             _critical_fns = pick_critical_functions_from_summary(contract_summary, top_n=6)
             _critical_block = extract_function_bodies(_raw_src, _critical_fns) if _critical_fns else ""
             _v2_session_summary = contract_summary + ("\n\n" + _critical_block if _critical_block else "")
+            _save_text(output_dir, "session_summary.txt", _v2_session_summary)
             logger.info(
                 f"\n[STEP 3/4] Running 3-round v2 audit (Round 1 discovery / 2 voting / 3 attacker)..."
                 f"\n  context for agents: {len(_v2_session_summary)} chars "
@@ -806,10 +897,13 @@ def main():
         # Slither caller analysis: find contracts that call each primary at runtime.
         # Multi-primary: run for all cluster primaries and merge callers.
         # Falls back silently when node_modules missing or Slither unavailable.
+        # Skip when CHECKPOINT_DIR is set — callers already embedded in checkpoint source.
         _primary_names_list = manifest.get("primary_names") or [manifest.get("primary")]
         _primary_names_list = [n for n in _primary_names_list if n]
         _caller_contracts: set = set()
-        if _primary_names_list:
+        if os.environ.get("CHECKPOINT_DIR", ""):
+            logger.info("[STEP 0/4] Slither skipped — CHECKPOINT_DIR set, using checkpoint source")
+        elif _primary_names_list:
             from app.services.contract_dep_graph import ContractDepGraph as _CDG
             _cdg = _CDG()
             for _pname in _primary_names_list:
@@ -877,7 +971,7 @@ def main():
 
     # ── Timestamped output dir ────────────────────────────────────────────────
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = os.path.join(args.output, f"{contract_name}_{ts}")
+    output_dir = os.path.abspath(os.path.join(args.output, f"{contract_name}_{ts}"))
 
     # ── Resolve ground truth ─────────────────────────────────────────────────
     if args.ground_truth:
@@ -935,6 +1029,16 @@ def main():
         }
         _json.dump(_report, open(os.path.join(output_dir, "audit_report_dedup.json"), "w"), indent=2, default=str)
         logger.info(f"[post-run] dedup_findings.json + audit_report_dedup.json saved to {output_dir}")
+    # Copy checkpoints saved by orchestrator
+    for _ckpt_env, _ckpt_default, _ckpt_name in [
+        ("R1_FINDINGS_OUT",  "/tmp/r1_findings.json",  "r1_findings.json"),
+        ("PRE_DEDUP_OUT",    "/tmp/pre_dedup.json",    "pre_dedup.json"),
+        ("POST_DEDUP_OUT",   "/tmp/post_dedup.json",   "post_dedup.json"),
+    ]:
+        _src = os.environ.get(_ckpt_env, _ckpt_default)
+        if os.path.isfile(_src):
+            _shutil.copy2(_src, os.path.join(output_dir, _ckpt_name))
+            logger.info(f"[post-run] {_ckpt_name} saved to {output_dir}")
     _log_src = os.environ.get("AUDIT_LOG_FILE", "")
     if _log_src and os.path.isfile(_log_src):
         _shutil.copy2(_log_src, os.path.join(output_dir, "run.log"))

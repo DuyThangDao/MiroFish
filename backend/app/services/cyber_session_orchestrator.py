@@ -2416,32 +2416,144 @@ class CyberSessionOrchestrator:
         t2 = [p for p in profiles if p.tier == 2]
         n  = len(t1)
 
-        # ── Round 1: Independent Discovery ───────────────────────────────────
-        self.task_manager.update_task(
-            task_id, progress=10,
-            message=f"Round 1/3 — Independent Discovery ({n} tier-1 agents)"
-        )
-        candidate_pool = self._run_discovery_round(
-            cm=cm,
-            t1_profiles=t1,
-            network_summary=network_summary,
-            known_functions=known_functions,
-            session_id=session_id,
-            target_contracts=target_contracts,
-        )
-        n_r1 = len(candidate_pool)
-        logger.info(f"[v2] Round 1 complete: {n_r1} unique (kind,fn) pairs discovered")
-        session_state.current_round = 1
-        self._save_session_state(session_state)
+        # ── Checkpoint resume (4-tier) ────────────────────────────────────────
+        # Pipeline: R1 → gap-fill → dedup → micropass
+        #
+        # Tier A: post_dedup.json  → skip R1 + gap-fill + dedup + micropass
+        # Tier B: pre_dedup.json   → skip R1 + gap-fill; re-run dedup + micropass
+        # Tier C: r1_findings.json → skip R1; re-run gap-fill + dedup + micropass
+        # Tier D: no checkpoint    → full R1 + gap-fill + dedup + micropass
+        #
+        # Backward compat: pre_gap_fill.json treated as Tier A alias.
+        import json as _cjson
 
-        # ── Sequential Anchor Dedup ───────────────────────────────────────────
-        logger.info(f"[v2] Anchor dedup: {n_r1} raw → Bước 1 (static) + Bước 2 (LLM)...")
-        candidate_pool = self._run_anchor_dedup(candidate_pool, network_summary)
-        n_r1 = len(candidate_pool)
-        logger.info(f"[v2] After anchor dedup: {n_r1} canonical findings")
+        def _ckpt_save(env_key: str, default_path: str, pool: dict, label: str):
+            path = os.environ.get(env_key, default_path)
+            try:
+                with open(path, "w") as _cf:
+                    _cjson.dump(list(pool.values()), _cf, indent=2, default=str)
+                logger.info(f"[v2] checkpoint {label} saved: {path} ({len(pool)} findings)")
+            except Exception as _ce:
+                logger.warning(f"[v2] checkpoint {label} save failed: {_ce}")
 
-        # ── Accounting Invariant Micro-Pass ───────────────────────────────────
-        if os.environ.get("ENABLE_ACCOUNTING_MICROPASS", "true").lower() == "true":
+        def _ckpt_load(path: str) -> dict:
+            with open(path) as _cf:
+                _raw = _cjson.load(_cf)
+            return {v["pair_id"]: v for v in _raw}
+
+        _ckpt_dir = os.environ.get("CHECKPOINT_DIR", "")
+
+        def _ckpt_path(name: str) -> str:
+            return os.path.join(_ckpt_dir, name) if _ckpt_dir else ""
+
+        _post_dedup_f = _ckpt_path("post_dedup.json")
+        _pre_gap_f    = _ckpt_path("pre_gap_fill.json")   # backward compat alias for Tier A
+        _pre_dedup_f  = _ckpt_path("pre_dedup.json")
+        _r1_f         = _ckpt_path("r1_findings.json")
+
+        _tier_a = next((f for f in [_post_dedup_f, _pre_gap_f] if f and os.path.exists(f)), None)
+
+        _run_gap_fill  = os.environ.get("GAP_FILL_ENABLED", "true").lower() == "true"
+        _run_micropass = os.environ.get("ENABLE_ACCOUNTING_MICROPASS", "true").lower() == "true"
+
+        if _tier_a:
+            # ── Tier A: skip R1 + gap-fill + dedup + micropass ───────────────
+            candidate_pool = _ckpt_load(_tier_a)
+            n_r1 = len(candidate_pool)
+            logger.info(
+                f"[v2] CHECKPOINT-A — loaded {n_r1} findings from {_tier_a}, "
+                f"skipping R1 + gap-fill + dedup + micropass"
+            )
+
+        elif _pre_dedup_f and os.path.exists(_pre_dedup_f):
+            # ── Tier B: skip R1 + gap-fill; re-run dedup + micropass ─────────
+            candidate_pool = _ckpt_load(_pre_dedup_f)
+            n_r1 = len(candidate_pool)
+            logger.info(
+                f"[v2] CHECKPOINT-B — loaded {n_r1} findings from {_pre_dedup_f}, "
+                f"re-running dedup + micropass"
+            )
+            logger.info(f"[v2] Anchor dedup: {n_r1} → static + LLM...")
+            candidate_pool = self._run_anchor_dedup(candidate_pool, network_summary)
+            n_r1 = len(candidate_pool)
+            logger.info(f"[v2] After anchor dedup: {n_r1} canonical findings")
+
+        elif _r1_f and os.path.exists(_r1_f):
+            # ── Tier C: skip R1; re-run gap-fill + dedup + micropass ─────────
+            candidate_pool = _ckpt_load(_r1_f)
+            n_r1 = len(candidate_pool)
+            logger.info(
+                f"[v2] CHECKPOINT-C — loaded {n_r1} R1 findings from {_r1_f}, "
+                f"re-running gap-fill + dedup + micropass"
+            )
+            if _run_gap_fill:
+                logger.info(f"[v2] ════ GAP-FILL (from R1 ckpt) — pool={n_r1} ════")
+                gap_findings = self._run_gap_fill_pass(
+                    cm=cm, candidate_pool=candidate_pool,
+                    known_functions=known_functions,
+                    network_summary=network_summary,
+                    target_contracts=target_contracts,
+                )
+                candidate_pool.update(gap_findings)
+                logger.info(f"[v2] Gap-fill injected {len(gap_findings)} → pool={len(candidate_pool)}")
+            _ckpt_save("PRE_DEDUP_OUT", "/tmp/pre_dedup.json", candidate_pool, "pre_dedup")
+            logger.info(f"[v2] Anchor dedup: {len(candidate_pool)} → static + LLM...")
+            candidate_pool = self._run_anchor_dedup(candidate_pool, network_summary)
+            n_r1 = len(candidate_pool)
+            logger.info(f"[v2] After anchor dedup: {n_r1} canonical findings")
+
+        else:
+            # ── Tier D: full run ──────────────────────────────────────────────
+            if _ckpt_dir:
+                logger.warning(
+                    f"[v2] CHECKPOINT_DIR={_ckpt_dir} but no checkpoint files found — full run"
+                )
+            self.task_manager.update_task(
+                task_id, progress=10,
+                message=f"Round 1/3 — Independent Discovery ({n} tier-1 agents)"
+            )
+            candidate_pool = self._run_discovery_round(
+                cm=cm, t1_profiles=t1,
+                network_summary=network_summary,
+                known_functions=known_functions,
+                session_id=session_id,
+                target_contracts=target_contracts,
+            )
+            n_r1 = len(candidate_pool)
+            logger.info(f"[v2] Round 1 complete: {n_r1} raw findings")
+            session_state.current_round = 1
+            self._save_session_state(session_state)
+
+            _ckpt_save("R1_FINDINGS_OUT", "/tmp/r1_findings.json", candidate_pool, "r1_findings")
+
+            if _run_gap_fill:
+                logger.info(
+                    f"[v2] ════ GAP-FILL PASS — pool_before={n_r1} "
+                    f"known_fns={len(known_functions or set())} ════"
+                )
+                gap_findings = self._run_gap_fill_pass(
+                    cm=cm, candidate_pool=candidate_pool,
+                    known_functions=known_functions,
+                    network_summary=network_summary,
+                    target_contracts=target_contracts,
+                )
+                candidate_pool.update(gap_findings)
+                logger.info(
+                    f"[v2] ════ GAP-FILL DONE — injected={len(gap_findings)} "
+                    f"pool_after={len(candidate_pool)} ════"
+                )
+            else:
+                logger.info("[v2] GAP_FILL_ENABLED=false — skipped")
+
+            _ckpt_save("PRE_DEDUP_OUT", "/tmp/pre_dedup.json", candidate_pool, "pre_dedup")
+
+            logger.info(f"[v2] Anchor dedup: {len(candidate_pool)} → static + LLM...")
+            candidate_pool = self._run_anchor_dedup(candidate_pool, network_summary)
+            n_r1 = len(candidate_pool)
+            logger.info(f"[v2] After anchor dedup: {n_r1} canonical findings")
+
+        # ── Accounting Invariant Micro-Pass (Tier B / C / D only) ────────────
+        if _run_micropass and not _tier_a:
             micro_findings = self._run_accounting_micropass(network_summary)
             for f in micro_findings:
                 anchor = f.get("code_anchor", "")
@@ -2453,6 +2565,10 @@ class CyberSessionOrchestrator:
                     f.setdefault("submitters", ["accounting_micropass"])
                     candidate_pool[pair_id] = f
                     logger.info(f"  [micro] Added: {f.get('title', '')}")
+
+        # ── Checkpoint: post-dedup + micropass (Tier B / C / D) ──────────────
+        if not _tier_a:
+            _ckpt_save("POST_DEDUP_OUT", "/tmp/post_dedup.json", candidate_pool, "post_dedup")
 
         # ── Early exit after anchor dedup (STOP_AFTER_DEDUP=true) ───────────
         if os.environ.get("STOP_AFTER_DEDUP", "").lower() in ("true", "1", "yes"):
@@ -3682,3 +3798,336 @@ class CyberSessionOrchestrator:
                 "severity": "HIGH",
             })
         return findings
+
+    # ── Gap-Fill Pass ─────────────────────────────────────────────────────────
+
+    def _run_gap_fill_pass(
+        self,
+        cm: dict,
+        candidate_pool: dict,
+        known_functions: set,
+        network_summary: str,
+        target_contracts: list | None = None,
+    ) -> dict:
+        """
+        Post-R1 targeted re-analysis for primary-contract functions with zero findings.
+        Uses a single meta-agent (gap_filler) with full 2-turn flow (INV + RAG + violation).
+        Returns dict of new pair_id → finding to merge into candidate_pool.
+        """
+        from app.services.contract_profile_generator import ContractAgentProfile
+
+        max_fns = int(os.environ.get("GAP_FILL_MAX_FUNCTIONS", "8"))
+
+        # 1. Detect primary contract
+        _pc_m = re.search(r'TARGET 1\s*[-—–]\s*(\w+)\s*\(primary\)', network_summary)
+        primary_contract = _pc_m.group(1).lower() if _pc_m else ""
+        logger.info(f"[gap-fill] primary_contract={primary_contract!r}")
+
+        # 2. Extract function names from within the primary contract's own body only.
+        # _filter_source_to_primary still contains base contracts/libs — parse only
+        # the block starting at "contract <PrimaryName>" up to the next "contract".
+        primary_source = _filter_source_to_primary(network_summary, primary_contract)
+        _contract_start = re.search(
+            rf'\bcontract\s+{re.escape(primary_contract)}\b',
+            primary_source, re.IGNORECASE,
+        )
+        if _contract_start:
+            _body = primary_source[_contract_start.start():]
+            # Use line-anchored regex to skip "contract" in inline comments/strings
+            _next_contract = re.search(
+                r'^\s*(?:abstract\s+)?contract\s+\w+\b',
+                _body[len(primary_contract) + 10:],
+                re.MULTILINE,
+            )
+            _offset = len(primary_contract) + 10
+            _contract_body = _body[:_next_contract.start() + _offset] \
+                if _next_contract else _body
+        else:
+            _contract_body = primary_source
+        primary_fns_in_source = {
+            m.lower() for m in re.findall(r'\bfunction\s+(\w+)\s*\(', _contract_body)
+        }
+        logger.info(
+            f"[gap-fill] primary_contract_fns={len(primary_fns_in_source)}: "
+            f"{sorted(primary_fns_in_source)}"
+        )
+
+        # 3. Covered functions in primary contract (exclude _nofunc placeholder)
+        covered = {
+            v.get("function_name", "").lower().rstrip("()")
+            for v in candidate_pool.values()
+            if v.get("contract_name", "").lower() == primary_contract
+            and v.get("function_name", "") not in ("_nofunc", "")
+        }
+        logger.info(f"[gap-fill] covered={sorted(covered)}")
+
+        # 4. Uncovered = primary_source_fns - covered, skip pure view helpers, cap at max_fns
+        # Sort: public/external functions first (no leading _), then internal helpers
+        # Note: keep _get* (e.g. _getAmountsForLiquidity) — they can contain real bugs (H-05)
+        skip_prefixes = ("_compute", "compute")
+        _candidates = [
+            fn for fn in primary_fns_in_source
+            if fn not in covered and not fn.startswith(skip_prefixes)
+        ]
+        uncovered = (
+            sorted(fn for fn in _candidates if not fn.startswith("_"))
+            + sorted(fn for fn in _candidates if fn.startswith("_"))
+        )[:max_fns]
+
+        if not uncovered:
+            logger.info("[gap-fill] No uncovered functions — skipping")
+            return {}
+
+        logger.info(f"[gap-fill] {len(uncovered)} uncovered function(s) → targeting: {uncovered}")
+
+        # 4. Build gap_filler meta-agent profile (inline — not in CONTRACT_AGENT_MATRIX)
+        # Synthesizes all 22 agent domains so gap-fill works for any contest type.
+        gap_profile = ContractAgentProfile(
+            user_id=99, agent_id="gap_filler", tier=1,
+            domain_group="gap_coverage", persona="gap_filler",
+            display_name="Gap Coverage Auditor",
+            system_prompt=(
+                "You are a Gap Coverage Auditor — a security specialist who analyzes smart "
+                "contract functions that received zero findings from all other analysis passes. "
+                "You synthesize every security domain and apply all lenses simultaneously:\n"
+                "\n"
+                "CODE SECURITY:\n"
+                "(1) REENTRANCY: every external call is a re-entry vector — check CEI order, "
+                "cross-function reentrancy via shared state, read-only reentrancy, and "
+                "ERC721/ERC1155/ERC777 callback hooks that can re-enter before state is committed.\n"
+                "(2) MISSING CONTROLS: for every state-changing function, verify all necessary "
+                "access checks, bounds validation, and range constraints are enforced. "
+                "Initializer parameters accepted without explicit [MIN, MAX] bounds and used in "
+                "math ops are a permanent DoS risk.\n"
+                "(3) PRIVILEGE ESCALATION: unprotected admin functions, missing initializer guards "
+                "(initialize() callable twice), tx.origin authentication, single-step ownership "
+                "transfer, and delegatecall to user-controlled addresses.\n"
+                "(4) EVM INTERNALS: delegatecall context, storage slot collisions in proxies, "
+                "block.timestamp manipulability, and selfdestruct edge cases.\n"
+                "\n"
+                "ARITHMETIC & MATH:\n"
+                "(5) NARROWING CASTS: uint128→int128 sign flip, uint256→uint128 truncation, "
+                "int24 overflow. For every cast smallerType(expr), verify expr fits the target "
+                "type at maximum realistic input — do not assume the library enforces this.\n"
+                "(6) PRECISION & ROUNDING: integer division truncation, fixed-point precision loss, "
+                "decimal mismatches between tokens, share inflation via first-deposit (ERC4626).\n"
+                "(7) LIBRARY INTERNALS: edge cases in TickMath, FullMath, BitMath, PRBMath and "
+                "private/internal helpers — zero, max uint256, and boundary tick inputs. "
+                "Subtraction expected to underflow needs an unchecked block.\n"
+                "(8) MATHEMATICAL INVARIANTS: boundary inequalities (strict < vs non-strict <=) "
+                "at every state-transition gate — test the exact threshold value.\n"
+                "\n"
+                "DEFI & ECONOMICS:\n"
+                "(9) STATE ACCOUNTING: every token transfer or balance change must be mirrored by "
+                "the corresponding internal reserve/accounting variable update.\n"
+                "(10) ACCUMULATOR ORDER: time-weighted accumulators (fee-growth, reward-per-share, "
+                "seconds-per-unit) must checkpoint BEFORE the denominator (liquidity, shares, supply) "
+                "changes — whether in this function or a caller.\n"
+                "(11) FEE DOUBLE-COLLECTION: fee growth snapshot timing must prevent collecting "
+                "fees accrued before a position was opened.\n"
+                "(12) CROSS-CALL STALENESS: READER functions (collect, claim, withdraw) that "
+                "compute payouts from accumulators must receive up-to-date WRITER state — "
+                "calling READER before WRITER updates the snapshot returns stale data.\n"
+                "(13) FLASH LOAN / ORACLE: price oracle manipulation via spot DEX reserves, "
+                "stale oracle exploitation, same-block state manipulation with $100M+ capital.\n"
+                "(14) JIT ATTACKS: time-weighted accumulators (time/active_liquidity) allow a "
+                "rational actor to add a large position for 1 block as sole LP, capture 100% "
+                "of the increment, then exit — verify hold-time or vesting guards.\n"
+                "(15) TOKEN QUIRKS: fee-on-transfer tokens (received < sent), rebase tokens "
+                "(balance changes without Transfer events), ERC20 silent failure (returns false), "
+                "ERC777 tokensReceived hooks, missing SafeERC20.\n"
+                "(16) COMPOSABILITY: ERC721/1155/777 callbacks as reentrancy vectors, "
+                "cross-protocol trust assumptions that break when external protocol fails or pauses.\n"
+                "(17) GOVERNANCE EXTRACTION: unbounded privileged setters (fee, rate, ratio) that "
+                "drain user funds, upgrade functions replaceable with malicious logic, pause functions "
+                "that trap funds — even if owner-only, document extractable value.\n"
+                "\n"
+                "CLMM-SPECIFIC (Uniswap V3 / Trident style):\n"
+                "(18) CLMM FEE GROWTH INIT: new tick fee tracker must use the pool's ACTUAL current "
+                "state — not a cached or indirect value that could lag the real price.\n"
+                "(19) CLMM TICK CROSS VARIABLE SWAP: in cross(), feeGrowthOutside0 must update from "
+                "the token0 global and feeGrowthOutside1 from the token1 global — check 0/1 suffix swap.\n"
+                "(20) CLMM TICK BOUNDARY: active range is priceLower <= currentPrice < priceUpper "
+                "(inclusive lower, exclusive upper) — strict < on lower or non-strict <= on upper "
+                "silently miscounts active liquidity.\n"
+                "(21) RECIPIENT VALIDATION: user-controlled recipient address in mint/burn/collect "
+                "can redirect token transfers to an attacker."
+            ),
+            bio="Synthesizes all 22 agent security domains for universal gap coverage.",
+            swc_focus=["SWC-101", "SWC-107", "SWC-113", "SWC-114", "SWC-116", "SWC-130"],
+            core_question=(
+                "For the target function — answer each question:\n"
+                "(a) Can any external call allow re-entry before state is fully committed?\n"
+                "(b) Are ALL narrowing casts safe at the maximum realistic input value?\n"
+                "(c) Are ALL token transfers paired with matching reserve/accounting updates?\n"
+                "(d) Are ALL accumulators checkpointed BEFORE denominator (liquidity/supply) changes?\n"
+                "(e) Does fee snapshot use CURRENT (not stale) fee growth at position open?\n"
+                "(f) Do boundary conditionals use the correct strict/non-strict inequality?\n"
+                "(g) Are ALL token recipient parameters validated or caller-restricted?\n"
+                "(h) Are ALL initializer numeric parameters validated against explicit bounds?\n"
+                "(i) Can a flash-loan-funded attacker manipulate price or state in a single tx?\n"
+                "(j) [CLMM] Are tick fee trackers initialized with the pool's ACTUAL current state?\n"
+                "(k) [CLMM] Are feeGrowthOutside0/1 assigned to the CORRECT token in cross()?\n"
+                "(l) [CLMM] Does any time/liquidity accumulator lack JIT hold-time protection?"
+            ),
+        )
+
+        rag_enabled = os.environ.get("RAG_ENABLED", "true").lower() == "true"
+        pool_size = getattr(self.llm, "pool_size", 1)
+        max_workers = max(int(os.environ.get("GAP_FILL_MAX_WORKERS", "1")), pool_size)
+        submit_delay = float(os.environ.get("GAP_FILL_SUBMIT_DELAY_S", "1.0"))
+        logger.info(
+            f"[gap-fill] START max_fns={max_fns} rag_enabled={rag_enabled} "
+            f"max_workers={max_workers} pool_size={pool_size} "
+            f"candidate_pool={len(candidate_pool)} known_fns={len(known_functions or set())}"
+        )
+
+        def _gap_fill_one(fn_idx: int, fn_name: str) -> dict:
+            logger.info(
+                f"[gap-fill] ── fn {fn_idx}/{len(uncovered)}: {fn_name!r} ──────────────"
+            )
+            directive = (
+                f"GAP-FILL MODE — MANDATORY FUNCTION FOCUS\n"
+                f"The function `{fn_name}()` in {primary_contract} received ZERO findings "
+                f"from all previous analysis passes.\n"
+                f"You MUST analyze `{fn_name}()` exclusively and in depth.\n"
+                f"Do NOT write findings for other functions in this response.\n"
+                f"Assume the contract is SAFE by default — only report if you find a concrete "
+                f"vulnerability with a specific, verifiable attack path.\n"
+                f"If `{fn_name}()` appears secure, write nothing."
+            )
+            try:
+                t0 = time.time()
+
+                # Turn 1: extract invariants for fn_name only
+                turn1_prompt = cm["r1_prompt"](
+                    gap_profile, network_summary,
+                    focus_directive=directive,
+                    invariant_only=True,
+                )
+                logger.info(f"[gap-fill] fn={fn_name} Turn1 prompt={len(turn1_prompt)}chars → calling LLM...")
+                turn1_response = self.llm.chat(
+                    [{"role": "user", "content": turn1_prompt}],
+                    temperature=0.5,
+                    max_tokens=self._V2_R1_MAX_TOKENS,
+                    strip_think=False,
+                )
+                t1_elapsed = time.time() - t0
+                inv_lines = re.findall(r'INV-\d+[^\n]*', turn1_response, re.IGNORECASE)
+                logger.info(
+                    f"[gap-fill] fn={fn_name} Turn1 done: {len(turn1_response)}chars "
+                    f"inv={len(inv_lines)} latency={t1_elapsed:.1f}s"
+                )
+                for inv in inv_lines:
+                    logger.info(f"[gap-fill]   {inv[:120]}")
+
+                # RAG: query per invariant extracted in Turn 1
+                step2_hint = ""
+                rag_calls = 0
+                if rag_enabled and turn1_response.strip():
+                    logger.info(f"[gap-fill] fn={fn_name} RAG querying {len(inv_lines)} invariants...")
+                    hint_block, rag_calls = _build_invariant_rag_hints(
+                        turn1_response, "gap_filler",
+                        target_contracts=target_contracts,
+                    )
+                    logger.info(
+                        f"[gap-fill] fn={fn_name} RAG done: calls={rag_calls} "
+                        f"hint_chars={len(hint_block)}"
+                    )
+                    if hint_block:
+                        step2_hint = (
+                            "\nHISTORICAL VIOLATION PATTERNS from audit database:\n\n"
+                            f"{hint_block}\n\n"
+                            "For each INV where a historical pattern is shown above:\n"
+                            "  - BE SKEPTICAL: Assume the code is SAFE first.\n"
+                            "  - Only write a FINDING if you can extract SPECIFIC CODE LINES proving it.\n"
+                            "  - If the exploit path is blocked or mitigated, state 'Mitigated' and skip.\n"
+                            "For INVs without historical patterns: reason independently.\n"
+                        )
+
+                # Strip think block before Turn 2
+                turn1_clean = _re_rag.sub(r'<think>[\s\S]*?</think>', '', turn1_response).strip()
+
+                # Turn 2: full violation analysis
+                turn2_prompt = cm["r1_prompt"](
+                    gap_profile, network_summary,
+                    focus_directive=directive,
+                    injected_invariants=turn1_clean,
+                    step2_hint=step2_hint,
+                )
+                logger.info(
+                    f"[gap-fill] fn={fn_name} Turn2 prompt={len(turn2_prompt)}chars "
+                    f"step2_hint={'yes' if step2_hint else 'no'} → calling LLM..."
+                )
+                response = self.llm.chat(
+                    [{"role": "user", "content": turn2_prompt}],
+                    temperature=0.5,
+                    max_tokens=self._V2_R1_MAX_TOKENS,
+                    strip_think=True,
+                )
+
+                elapsed = time.time() - t0
+                parsed = cm["parse_all_findings"](
+                    response, gap_profile, 1, known_functions=known_functions
+                )
+                logger.info(
+                    f"[gap-fill] fn={fn_name} Turn2 done: {len(response)}chars "
+                    f"parsed={len(parsed)} total_latency={elapsed:.1f}s rag_calls={rag_calls}"
+                )
+
+                fn_findings: dict = {}
+                injected_this_fn = 0
+                for f in parsed:
+                    # Propagate the function being analyzed when LLM omits it
+                    if not f.get("function_name"):
+                        f["function_name"] = fn_name
+                    if not f.get("contract_name"):
+                        f["contract_name"] = primary_contract.title()
+                    anchor = f.get("code_anchor", "")
+                    title = f.get("title", "")
+                    fn_reported = f.get("function_name", "")
+                    contract_reported = f.get("contract_name", "")
+                    logger.info(
+                        f"[gap-fill]   parsed finding: title={title!r} "
+                        f"fn={fn_reported!r} contract={contract_reported!r} "
+                        f"anchor={anchor[:60]!r}"
+                    )
+                    if anchor:
+                        # No dedup here — anchor_dedup runs after gap-fill and handles it
+                        pair_id = f"gap_{uuid.uuid4().hex[:8]}"
+                        f["pair_id"] = pair_id
+                        f.setdefault("submitters", ["gap_filler"])
+                        fn_findings[pair_id] = f
+                        injected_this_fn += 1
+                        logger.info(f"[gap-fill]   → QUEUED as {pair_id} (dedup will filter)")
+                    else:
+                        logger.info(f"[gap-fill]   → DROPPED (no code_anchor)")
+
+                logger.info(
+                    f"[gap-fill] fn={fn_name} summary: parsed={len(parsed)} "
+                    f"injected={injected_this_fn}"
+                )
+                return fn_findings
+
+            except Exception as e:
+                logger.warning(f"[gap-fill] fn={fn_name} ERROR: {e}", exc_info=True)
+                return {}
+
+        new_findings: dict = {}
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures = {}
+            for fn_idx, fn_name in enumerate(uncovered, 1):
+                if fn_idx > 1 and submit_delay > 0:
+                    time.sleep(submit_delay)
+                futures[ex.submit(_gap_fill_one, fn_idx, fn_name)] = fn_name
+            for future, fn_name in futures.items():
+                try:
+                    new_findings.update(future.result())
+                except Exception as e:
+                    logger.warning(f"[gap-fill] fn={fn_name} unhandled error: {e}")
+
+        logger.info(
+            f"[gap-fill] COMPLETE — {len(new_findings)} new finding(s) injected "
+            f"from {len(uncovered)} function(s)"
+        )
+        return new_findings
