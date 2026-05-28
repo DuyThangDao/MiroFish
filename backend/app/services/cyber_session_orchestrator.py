@@ -303,6 +303,10 @@ def _extract_callee_coverage_block(network_summary: str) -> str:
     callee_line_re = _re_rag.compile(
         r'^\s+([a-zA-Z0-9_]+)\(\)\s*→\s*calls:\s*([^\n]+)', _re_rag.MULTILINE
     )
+    # Matches functions with ONLY external calls (no internal callees): fn() → [EXTERNAL: ...]
+    ext_only_re = _re_rag.compile(
+        r'^\s+([a-zA-Z0-9_]+)\(\)\s*→\s*\[EXTERNAL:\s*([^\]]+)\]', _re_rag.MULTILINE
+    )
 
     def _parse_entries(text: str) -> list[str]:
         entries = []
@@ -313,6 +317,12 @@ def _extract_callee_coverage_block(network_summary: str) -> str:
             callees = [c.strip() for c in raw.split(',') if c.strip()]
             if callees:
                 entries.append(f"  {caller}() → calls: {', '.join(callees)}")
+        # Include external-only functions so agents see DEX/token interactions
+        for m in ext_only_re.finditer(text):
+            caller = m.group(1)
+            ext_calls = [c.strip() for c in m.group(2).split(',') if c.strip()]
+            if ext_calls:
+                entries.append(f"  {caller}() → [EXTERNAL: {', '.join(ext_calls)}]")
         return entries
 
     # Detect per-contract format ([ContractName] headers)

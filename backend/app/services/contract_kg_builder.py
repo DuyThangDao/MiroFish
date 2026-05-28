@@ -403,8 +403,17 @@ class ContractKGBuilder:
 
         fn_set = set(known_functions)
         LOW_LEVEL = {"call", "delegatecall", "staticcall", "transfer", "send"}
+        # Solidity globals / built-ins that are NOT external contract references
+        _SOLIDITY_GLOBALS = frozenset({
+            'msg', 'block', 'tx', 'abi', 'address', 'bytes', 'string',
+            'uint', 'int', 'bool', 'this', 'super', 'type', 'gasleft',
+            'keccak256', 'sha256', 'ecrecover', 'addmod', 'mulmod',
+            'require', 'assert', 'revert', 'emit', 'new', 'delete',
+        })
         fn_body_re = re.compile(r'function\s+(\w+)\s*\([^)]*\)[^{]*\{', re.MULTILINE)
         call_re = re.compile(r'\b(\w+)\s*\(')
+        # variable.method( — catches stored contract-reference calls like uniswapRouter.swapExact...
+        _dot_call_re = re.compile(r'\b([a-z][a-zA-Z0-9_]*)\s*\.\s*([a-zA-Z]\w*)\s*\(')
 
         matches = list(fn_body_re.finditer(source_code))
         if not matches:
@@ -431,6 +440,11 @@ class ContractKGBuilder:
                 ext_markers.add("low-level-call")
             if re.search(r'I[A-Z]\w+\s*\(\s*\w+\s*\)\.', body):
                 ext_markers.add("interface-call")
+            # Detect variable.method() — stored contract-reference calls not caught above
+            for dc in _dot_call_re.finditer(body):
+                receiver, method = dc.group(1), dc.group(2)
+                if receiver not in _SOLIDITY_GLOBALS and receiver not in fn_set:
+                    ext_markers.add(method)
 
             parts: List[str] = []
             if called:
