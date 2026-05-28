@@ -15,7 +15,7 @@ from chromadb import EmbeddingFunction, Documents, Embeddings
 import vertexai
 from vertexai.language_models import TextEmbeddingModel, TextEmbeddingInput
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from google.api_core.exceptions import ResourceExhausted
+from google.api_core.exceptions import ResourceExhausted, TooManyRequests
 
 # ── Embedding ──────────────────────────────────────────────────────────────────
 
@@ -30,14 +30,14 @@ class VertexEmbedding(EmbeddingFunction):
 
     def __call__(self, input: Documents) -> Embeddings:
         inputs = [TextEmbeddingInput(text, self._task_type) for text in input]
-        max_retries = 5
+        max_retries = 8
         for attempt in range(max_retries):
             try:
                 return [e.values for e in self._model.get_embeddings(inputs)]
-            except ResourceExhausted:
+            except (ResourceExhausted, TooManyRequests):
                 if attempt == max_retries - 1:
                     raise
-                wait = 2 ** attempt  # 1, 2, 4, 8, 16s
+                wait = min(60, 2 ** attempt)
                 print(f"  [WARN] Vertex AI 429 — chờ {wait}s (attempt {attempt + 1}/{max_retries})")
                 time.sleep(wait)
 
@@ -218,7 +218,7 @@ def main():
     headers = {"Content-Type": "application/json", "X-Cyfrin-API-Key": API_KEY}
     base_filters = {
         "impact":    ["HIGH"],
-        "firms":     [{"value": "Spearbit"}],
+        "firms":     [{"value": "Cyfrin"}],
         "languages": [{"value": "Solidity"}],
         "sortField": "Quality", "sortDirection": "Desc",
     }

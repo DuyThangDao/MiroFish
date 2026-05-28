@@ -293,9 +293,13 @@ def _build_invariant_rag_hints(invariant_text: str, agent_id: str,
         return "", 0
     retriever = _get_rag_retriever()
     candidates = []  # (top_score, hint_block_str) — collect all, sort later
+    # Agents that write generic domain patterns (no contract names by design)
+    _M1_BYPASS_AGENTS = {"clmm_specialist"}
+
     for i, inv in enumerate(invariants):
         # M1: positive filter — skip invariants không liên quan đến target contracts
-        if target_contracts:
+        # Bypass for agents that intentionally write generic patterns (e.g. clmm_specialist)
+        if target_contracts and agent_id not in _M1_BYPASS_AGENTS:
             inv_lower = inv.lower()
             if not any(c.lower() in inv_lower for c in target_contracts):
                 logger.info(
@@ -3951,7 +3955,14 @@ class CyberSessionOrchestrator:
                 "(inclusive lower, exclusive upper) — strict < on lower or non-strict <= on upper "
                 "silently miscounts active liquidity.\n"
                 "(21) RECIPIENT VALIDATION: user-controlled recipient address in mint/burn/collect "
-                "can redirect token transfers to an attacker."
+                "can redirect token transfers to an attacker.\n"
+                "(22) INITIALIZATION BOUNDS: every numeric parameter accepted by an initialize() or "
+                "constructor (price, ratio, fee, rate, threshold) must be validated against explicit "
+                "[MIN, MAX] bounds before use in math. An unchecked initialPrice passed to a sqrt/log "
+                "or stored as a price reference allows the deployer or first caller to permanently "
+                "brick the contract or set an exploitable state (e.g., price=0 causes div-by-zero, "
+                "price > MAX_PRICE breaks tick math). Check: is there a require/revert guard bounding "
+                "the value? Is the bound tight enough (e.g., >= MIN_SQRT_RATIO and <= MAX_SQRT_RATIO)?"
             ),
             bio="Synthesizes all 22 agent security domains for universal gap coverage.",
             swc_focus=["SWC-101", "SWC-107", "SWC-113", "SWC-114", "SWC-116", "SWC-130"],
