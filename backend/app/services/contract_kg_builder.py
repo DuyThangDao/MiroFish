@@ -389,35 +389,28 @@ class ContractKGBuilder:
         return "\n".join(lines)
 
     @staticmethod
-    def _build_call_graph_summary(source_code: str, known_functions: List[str]) -> str:
-        """
-        Build a per-function call-dependency summary using known_functions from the parsed
-        entity. Only tracks calls to known functions — no hallucination from comment text.
-        Falls back to regex extraction if entity parsing yielded no functions.
-        Marks low-level / interface calls as [EXTERNAL].
+    def _build_call_graph_entries(source_code: str, known_functions: List[str]) -> List[str]:
+        """Build per-function call graph entry lines for one contract section.
+
+        Returns list of indented strings like '  mint() → calls: ...' ready to join.
         """
         if not known_functions:
-            # Regex fallback: extract from source directly (only real function names)
             known_functions = list(set(re.findall(
                 r'\bfunction\s+([a-zA-Z_]\w*)\s*\(', source_code
             )))
         if not known_functions:
-            return ""
+            return []
 
         fn_set = set(known_functions)
         LOW_LEVEL = {"call", "delegatecall", "staticcall", "transfer", "send"}
-
-        fn_body_re = re.compile(
-            r'function\s+(\w+)\s*\([^)]*\)[^{]*\{',
-            re.MULTILINE,
-        )
+        fn_body_re = re.compile(r'function\s+(\w+)\s*\([^)]*\)[^{]*\{', re.MULTILINE)
         call_re = re.compile(r'\b(\w+)\s*\(')
 
         matches = list(fn_body_re.finditer(source_code))
         if not matches:
-            return ""
+            return []
 
-        lines: List[str] = ["CALL GRAPH:"]
+        entries: List[str] = []
         for i, m in enumerate(matches):
             fn_name = m.group(1)
             start = m.end()
@@ -446,10 +439,42 @@ class ContractKGBuilder:
                 parts.append("[EXTERNAL: " + ", ".join(sorted(ext_markers)) + "]")
 
             desc = " | ".join(parts) if parts else "(leaf)"
-            lines.append(f"  {fn_name}() → {desc}")
+            entries.append(f"  {fn_name}() → {desc}")
 
-        lines.append("")
-        return "\n".join(lines)
+        return entries
+
+    @staticmethod
+    def _build_call_graph_summary(source_code: str, known_functions: List[str]) -> str:
+        """
+        Build a per-function call-dependency summary using known_functions from the parsed
+        entity. Only tracks calls to known functions — no hallucination from comment text.
+        Falls back to regex extraction if entity parsing yielded no functions.
+        Marks low-level / interface calls as [EXTERNAL].
+
+        For flattened multi-contract sources (containing '// ─── *.sol ───' markers),
+        builds a separate call graph per contract section with [ContractName] headers
+        to avoid cross-contract function name pollution.
+        """
+        file_section_re = re.compile(r'^// ─── (.+?\.sol)(?:[^\n]*) ───', re.MULTILINE)
+        markers = list(file_section_re.finditer(source_code))
+
+        if len(markers) >= 2:
+            # Multi-contract flattened source: build per-section with [ContractName] headers
+            parts: List[str] = []
+            for i, marker in enumerate(markers):
+                contract_name = marker.group(1).rsplit('/', 1)[-1].replace('.sol', '')
+                start = marker.end()
+                end = markers[i + 1].start() if i + 1 < len(markers) else len(source_code)
+                section = source_code[start:end]
+                local_fns = list(set(re.findall(r'\bfunction\s+([a-zA-Z_]\w*)\s*\(', section)))
+                entries = ContractKGBuilder._build_call_graph_entries(section, local_fns)
+                if entries:
+                    parts.append(f"[{contract_name}]\n" + "\n".join(entries))
+            return ("CALL GRAPH:\n" + "\n\n".join(parts) + "\n") if parts else ""
+
+        # Single contract: existing behavior
+        entries = ContractKGBuilder._build_call_graph_entries(source_code, known_functions)
+        return ("CALL GRAPH:\n" + "\n".join(entries) + "\n") if entries else ""
 
     # ─── Context summary for agent injection ─────────────────────────────────
 

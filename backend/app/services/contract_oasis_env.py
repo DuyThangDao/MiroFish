@@ -1402,6 +1402,7 @@ def build_round1_prompt(
     invariant_only: bool = False,
     injected_invariants: str = "",
     step2_hint: str = "",
+    call_chain_block: str = "",
 ) -> str:
     """
     Round 1 — Independent Discovery.
@@ -1413,6 +1414,7 @@ def build_round1_prompt(
     """
     dep_block = f"\n=== STATIC DATA-FLOW SUMMARY ===\n{dep_graph_text}\n" if dep_graph_text else ""
     intent_block = f"\n=== CONTRACT INTENT ===\n{intent_summary}\n" if intent_summary else ""
+    chain_block = f"\n{call_chain_block}\n" if call_chain_block else ""
     focus_block = f"\n{focus_directive}\n" if focus_directive else ""
 
     if invariant_only:
@@ -1429,7 +1431,7 @@ You are {agent_profile.agent_id} ({agent_profile.domain_group}/{agent_profile.pe
 {focus_block}{intent_block}{dep_block}
 === CONTRACT UNDER REVIEW ===
 {context_summary}
-
+{chain_block}
 {cq_section}=== TASK: INVARIANT EXTRACTION ONLY ===
 {_STEP1_BLOCK}
 
@@ -1461,7 +1463,7 @@ You are {agent_profile.agent_id} ({agent_profile.domain_group}/{agent_profile.pe
 {focus_block}{intent_block}{dep_block}
 === CONTRACT UNDER REVIEW ===
 {context_summary}
-
+{chain_block}
 === INSTRUCTIONS ===
 Perform an independent security analysis. No other expert's findings are shared at this stage.
 

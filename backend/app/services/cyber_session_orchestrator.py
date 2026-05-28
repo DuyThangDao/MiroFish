@@ -284,6 +284,62 @@ def _extract_independent_targets(network_summary: str, primary: str) -> list[str
     return [t for t in targets if t != primary]
 
 
+def _extract_callee_coverage_block(network_summary: str) -> str:
+    """Parse CALL GRAPH từ network_summary → INTERNAL FUNCTION TARGETS block.
+
+    For per-contract CALL GRAPH format (với [ContractName] headers), preserves
+    contract attribution in output. For flat format (single contract), uses
+    existing behavior. External calls ([EXTERNAL:]) are stripped from callee lists.
+    """
+    if not network_summary:
+        return ""
+    # Capture CALL GRAPH block: only lines starting with space/[ (callee lines / section
+    # headers) or blank lines. Stops at first non-CALL-GRAPH content (DATA-FLOW GRAPH, ===, etc.)
+    cg_match = _re_rag.search(r'CALL GRAPH:\s*\n((?:[ \t\[].*\n|\n)*)', network_summary)
+    if not cg_match:
+        return ""
+
+    cg_text = cg_match.group(1)
+    callee_line_re = _re_rag.compile(
+        r'^\s+([a-zA-Z0-9_]+)\(\)\s*→\s*calls:\s*([^\n]+)', _re_rag.MULTILINE
+    )
+
+    def _parse_entries(text: str) -> list[str]:
+        entries = []
+        for m in callee_line_re.finditer(text):
+            caller = m.group(1)
+            raw = _re_rag.sub(r'\s*\|\s*\[EXTERNAL:[^\]]+\]', '', m.group(2))
+            raw = raw.replace('(leaf)', '')
+            callees = [c.strip() for c in raw.split(',') if c.strip()]
+            if callees:
+                entries.append(f"  {caller}() → calls: {', '.join(callees)}")
+        return entries
+
+    # Detect per-contract format ([ContractName] headers)
+    section_header_re = _re_rag.compile(r'^\[(\w+)\]$', _re_rag.MULTILINE)
+    sections = list(section_header_re.finditer(cg_text))
+
+    if sections:
+        output_parts = ["=== INTERNAL FUNCTION TARGETS ==="]
+        for i, sec in enumerate(sections):
+            contract_name = sec.group(1)
+            start = sec.end()
+            end = sections[i + 1].start() if i + 1 < len(sections) else len(cg_text)
+            entries = _parse_entries(cg_text[start:end])
+            if entries:
+                output_parts.append(f"[{contract_name}]")
+                output_parts.extend(entries)
+        return "\n".join(output_parts) if len(output_parts) > 1 else ""
+
+    # Flat format (single contract): existing behavior
+    entries = _parse_entries(cg_text)
+    if not entries:
+        return ""
+    lines = ["=== INTERNAL FUNCTION TARGETS ==="]
+    lines.extend(entries)
+    return "\n".join(lines)
+
+
 def _build_invariant_rag_hints(invariant_text: str, agent_id: str,
                                 target_contracts: list[str] | None = None) -> tuple:
     """Returns (hint_block: str, num_matched: int) — query RAG per INV-N line."""
@@ -2457,7 +2513,7 @@ class CyberSessionOrchestrator:
 
         _tier_a = next((f for f in [_post_dedup_f, _pre_gap_f] if f and os.path.exists(f)), None)
 
-        _run_gap_fill  = os.environ.get("GAP_FILL_ENABLED", "true").lower() == "true"
+        _run_gap_fill  = os.environ.get("GAP_FILL_ENABLED", "false").lower() == "true"
         _run_micropass = os.environ.get("ENABLE_ACCOUNTING_MICROPASS", "true").lower() == "true"
 
         if _tier_a:
@@ -3316,10 +3372,21 @@ class CyberSessionOrchestrator:
                     else network_summary
                 )
 
+                # Extract call chain from the full network_summary (not filtered).
+                # The CALL GRAPH is appended after the last file section in the KG output
+                # and is excluded when _filter_source_to_primary removes peripheral
+                # file sections (e.g. TridentHelper.sol). There is only ONE CALL GRAPH
+                # per network_summary, so no need to filter.
+                call_chain_block = _extract_callee_coverage_block(network_summary)
+
                 # Turn 1: agent extracts invariants only
                 # max_tokens must match Turn 2 — Gemini thinking model needs >= ~32K
                 # to generate any visible output (smaller values → content=None)
-                turn1_prompt = cm["r1_prompt"](profile, agent_source, invariant_only=True)
+                turn1_prompt = cm["r1_prompt"](
+                    profile, agent_source,
+                    invariant_only=True,
+                    call_chain_block=call_chain_block,
+                )
                 turn1_response = self.llm.chat(
                     [{"role": "user", "content": turn1_prompt}],
                     temperature=0.7,
@@ -3359,6 +3426,7 @@ class CyberSessionOrchestrator:
                     profile, agent_source,
                     injected_invariants=turn1_clean,
                     step2_hint=step2_hint,
+                    call_chain_block=call_chain_block,
                 )
                 response = self.llm.chat(
                     [{"role": "user", "content": turn2_prompt}],

@@ -508,15 +508,29 @@ def pick_critical_functions_from_summary(contract_summary: str, top_n: int = 6) 
 
     Falls back to empty list if CALL GRAPH section is absent.
     """
-    # Find CALL GRAPH block
-    cg_match = re.search(r'CALL GRAPH:\s*\n(.*?)(?:\n\n|\Z)', contract_summary, re.DOTALL)
+    # Capture CALL GRAPH block: only lines starting with space/[ or blank (stops at
+    # DATA-FLOW GRAPH, === sections, or any non-CALL-GRAPH content that follows)
+    cg_match = re.search(r'CALL GRAPH:\s*\n((?:[ \t\[].*\n|\n)*)', contract_summary)
     if not cg_match:
         return []
+
+    cg_text = cg_match.group(1)
+
+    # For per-contract format ([ContractName] headers), filter to primary contract only
+    primary_m = re.search(r'TARGET 1\s*[-—–]\s*(\w+)\s*\(primary\)', contract_summary)
+    if primary_m:
+        primary = primary_m.group(1)
+        section_m = re.search(
+            rf'^\[{re.escape(primary)}\]\s*\n(.*?)(?=\n\[|\Z)',
+            cg_text, re.DOTALL | re.MULTILINE,
+        )
+        if section_m:
+            cg_text = section_m.group(1)
 
     # Parse lines like: "  swap() → calls: _transfer, _updateFees, ..."
     callee_count: Dict[str, int] = {}
     leaf_pattern = re.compile(r'^\s+(\w+)\(\)\s*→\s*calls:\s*(.+)$')
-    for line in cg_match.group(1).splitlines():
+    for line in cg_text.splitlines():
         m = leaf_pattern.match(line)
         if m:
             fn_name = m.group(1)
@@ -525,7 +539,7 @@ def pick_critical_functions_from_summary(contract_summary: str, top_n: int = 6) 
 
     # Also include functions with external calls (→ [EXTERNAL: ...])
     ext_pattern = re.compile(r'^\s+(\w+)\(\)\s*→\s*\[EXTERNAL', re.MULTILINE)
-    for m in ext_pattern.finditer(cg_match.group(1)):
+    for m in ext_pattern.finditer(cg_text):
         fn = m.group(1)
         callee_count[fn] = callee_count.get(fn, 0) + 10  # boost external-call functions
 
