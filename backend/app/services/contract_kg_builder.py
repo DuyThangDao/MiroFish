@@ -140,12 +140,17 @@ class ContractKGBuilder:
         self,
         parser: Optional[ContractParser] = None,
         graph_service: Optional[GraphBuilderService] = None,
+        hist_inv_cache_path: Optional[str] = None,
+        llm_client: Optional[Any] = None,
+        **kwargs,
     ):
         self.parser = parser or ContractParser()
         self._zep_enabled = _ENABLE_ZEP
         self.graph_service = graph_service or (GraphBuilderService() if self._zep_enabled else None)
         self.task_manager = TaskManager()
-        self._partial_graph_ids: dict = {}  # task_id -> graph_id, for cleanup on timeout
+        self._partial_graph_ids: dict = {}
+        self._hist_inv_cache_path = hist_inv_cache_path
+        self._llm = llm_client or self._build_hist_inv_llm_pool()
 
     # ─── Public async API ─────────────────────────────────────────────────────
 
@@ -388,6 +393,438 @@ class ContractKGBuilder:
 
         return "\n".join(lines)
 
+    # ─── HIST-INV: RAG-derived invariant annotation ──────────────────────────
+
+    @staticmethod
+    def _build_hist_inv_llm_pool() -> Any:
+        """Build LLM client for HIST-INV using ONLY LLM2 (erudite-flag project).
+
+        Intentionally avoids LLM1 (hopeful-frame) to prevent competing with R1 agents
+        which also use hopeful-frame via the main LLMClientPool. Sharing the same
+        Vertex AI project across two separate RPM counters doubles the effective load
+        and causes 429 errors during KG build.
+        """
+        from app.utils.llm_client import LLMClient
+        from app.config import Config as _Config
+        key2 = getattr(_Config, "LLM2_VERTEX_AI_KEY_FILE", None)
+        url2 = getattr(_Config, "LLM2_BASE_URL", None)
+        rpm = int(os.getenv("HIST_INV_RPM_LIMIT",
+                            str(getattr(_Config, "LLM2_GLOBAL_RPM_LIMIT", 18))))
+        if key2 and url2:
+            return LLMClient(
+                vertex_key_file=key2,
+                base_url=url2,
+                model=getattr(_Config, "LLM_MODEL_NAME", None),
+                rpm_slot_file="/tmp/mirofish_hist_inv_1.json",
+                rpm_limit=rpm,
+            )
+        # Fallback: no LLM2 configured — use LLM1 with conservative limit
+        return LLMClient(
+            rpm_slot_file="/tmp/mirofish_hist_inv_0.json",
+            rpm_limit=max(rpm // 2, 5),  # halve limit to share with R1
+        )
+
+    @staticmethod
+    def _generate_rag_query(fn_name: str, ext_markers: set, contract_name: str,
+                            fn_description: str = "",
+                            llm_client: Optional[Any] = None) -> str:
+        """Generate RAG query with priority: body description > ext_markers semantic > direct.
+
+        Priority:
+        1. fn_description (body description for leaf functions) — strongest signal
+           for arithmetic/logic bugs where fn_name alone is too generic
+        2. LLM semantic question about ext_markers — for external-call bugs (slippage, reentrancy)
+        3. Direct query fallback (fn_name + ext_markers)
+
+        Uses llm_client exclusively (LLM2/erudite-flag only, never LLM1/hopeful-frame).
+        """
+        from app.utils.llm_client import LLMClient
+
+        # Priority 1: body description for leaf functions
+        if fn_description:
+            return fn_description + " vulnerability smart contract"
+
+        if not llm_client:
+            return ContractKGBuilder._build_direct_query(fn_name, ext_markers)
+        ext_context = ", ".join(sorted(ext_markers)) if ext_markers else "none"
+        prompt = (
+            "You are a smart contract security expert generating a RAG search query.\n\n"
+            "Context (use for understanding only — do NOT copy contract name into query):\n"
+            f"- Contract type context: {contract_name}\n"
+            f"- Function: {fn_name}()\n"
+            f"- External calls made: {ext_context}\n\n"
+            "Generate ONE short question (under 15 words) asking about historical vulnerabilities\n"
+            "for this type of function. Write a semantic question, not a keyword list.\n\n"
+            "Rules:\n"
+            "- Use contract type (vault, AMM, lending) NOT the specific contract name\n"
+            "- Frame as a question — embedding models match questions to finding titles well\n"
+            "- Focus on what could go wrong\n\n"
+            "Output ONLY the question. No explanation.\n\n"
+            "Examples:\n"
+            "- _buyMochi, external: swapExactTokensForTokens\n"
+            '  → "What vulnerabilities occur when swapExactTokensForTokens is called without slippage?"\n'
+            "- rangeFeeGrowth, external: none\n"
+            '  → "What are common bugs in Uniswap V3 fee growth accounting functions?"\n'
+            "- constructor, external: delegatecall\n"
+            '  → "What storage collision issues arise in proxy contracts using delegatecall?"'
+        )
+        try:
+            result = llm_client.chat(
+                [{"role": "user", "content": prompt}],
+                temperature=0, max_tokens=1024,
+            ).strip()
+            if result:
+                return result
+        except Exception:
+            pass
+        return ContractKGBuilder._build_direct_query(fn_name, ext_markers)
+
+    @staticmethod
+    def _build_direct_query(fn_name: str, ext_markers: set) -> str:
+        """Fallback direct query when LLM unavailable."""
+        parts = [fn_name] + [m for m in sorted(ext_markers) if len(m) > 3][:3]
+        return " ".join(parts) + " vulnerability"
+
+    @staticmethod
+    def _extract_fn_body(source_code: str, fn_name: str) -> str:
+        """Extract function body source code from flattened source using brace counting.
+
+        Returns body text (excluding signature), max 800 chars.
+        Returns "" if function not found.
+        """
+        fn_re = re.compile(
+            rf'\bfunction\s+{re.escape(fn_name)}\s*\([^{{]*\{{',
+            re.DOTALL
+        )
+        m = fn_re.search(source_code)
+        if not m:
+            return ""
+        start = m.end()
+        depth = 1
+        pos = start
+        while pos < len(source_code) and depth > 0:
+            c = source_code[pos]
+            if c == '{':
+                depth += 1
+            elif c == '}':
+                depth -= 1
+            pos += 1
+        body = source_code[start:pos - 1].strip()
+        if len(body) <= 800:
+            return body
+        # Long function: prefer the LAST portion — this is where actual computation
+        # (return statements, final assignments) lives, which is what we need to describe.
+        # First 200 chars for variable declarations context + last 600 for computation.
+        return body[:200] + "\n...\n" + body[-600:]
+
+    @staticmethod
+    def _describe_function_body(fn_name: str, fn_body: str,
+                                llm_client: Optional[Any] = None) -> str:
+        """Describe what a function COMPUTES via LLM reading its source body.
+
+        Generates a precise NL description of arithmetic operations, type casts,
+        and storage patterns — NOT the business intent.  Used as RAG query for
+        leaf functions where fn_name alone is too generic to find relevant findings.
+
+        Examples of good descriptions:
+        - 'Converts uint256 getDy/getDx results to uint128 via explicit cast'
+        - 'Subtracts feeGrowthGlobal minus feeGrowthAbove minus feeGrowthBelow'
+        - 'Negates uint128 amount via -int128 cast for signed liquidity delta'
+        """
+        if not fn_body or not fn_body.strip() or not llm_client:
+            return ""
+        prompt = (
+            "You are a smart contract security expert.\n\n"
+            f"Describe in ONE concise sentence (under 20 words) what this Solidity function COMPUTES.\n"
+            "Focus on: arithmetic operations, type casts, storage reads/writes.\n"
+            "Do NOT describe business purpose. Describe the COMPUTATION itself.\n\n"
+            f"Function: {fn_name}()\n"
+            f"Body:\n{fn_body.strip()}\n\n"
+            "Output ONLY the description sentence. No explanation.\n\n"
+            "Examples:\n"
+            "- 'Converts uint256 getDy/getDx results to uint128 via explicit cast'\n"
+            "- 'Subtracts feeGrowthGlobal minus feeGrowthAbove minus feeGrowthBelow for range'\n"
+            "- 'Negates uint128 amount via -int128 cast for signed liquidity delta'\n"
+            "- 'Multiplies two uint256 values and divides by 2^96 without overflow check'\n"
+        )
+        try:
+            result = llm_client.chat(
+                [{"role": "user", "content": prompt}],
+                temperature=0, max_tokens=1024,
+            ).strip().strip('"\'')
+            return result if result else ""
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _extract_invariant_from_finding(title: str, content: str,
+                                        llm_client: Optional[Any] = None) -> str:
+        """Extract one abstract, protocol-agnostic invariant from a RAG finding."""
+        from app.utils.llm_client import LLMClient
+        prompt = (
+            "Extract ONE security invariant from this audit finding.\n\n"
+            f"Finding: {title}\n"
+            f"Detail: {content[:1500]}\n\n"
+            "Requirements:\n"
+            "- State what SHOULD be true (not the violation)\n"
+            "- Protocol-agnostic: no specific contract/token names\n"
+            "- Max 25 words, 1 sentence\n"
+            "- Focus on the security property\n\n"
+            "Output ONLY the invariant sentence.\n"
+            'Example: "DEX swap calls must specify a non-trivial minimum output amount to prevent sandwich attacks."'
+        )
+        try:
+            client = llm_client or LLMClient()
+            result = client.chat(
+                [{"role": "user", "content": prompt}],
+                temperature=0, max_tokens=1024,
+            )
+            return result.strip().strip('"\'')
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _build_call_graph_with_hist_inv(
+        source_code: str,
+        known_functions: List[str],
+        cache: Optional[Any] = None,
+        score_threshold: float = 0.68,
+        llm_client: Optional[Any] = None,
+    ) -> str:
+        """
+        Build CALL GRAPH với HIST-INV annotations inline.
+
+        Với mỗi CG entry:
+          1. LLM generate semantic question query (cached)
+          2. Direct fallback: fn_name + ext_markers raw
+          3. Dual query RAG, lấy max score
+          4. score ≥ score_threshold → LLM extract abstract invariant (cached)
+          5. Annotate entry: "    ↳ HIST: <invariant>"
+
+        Filter: skip chỉ khi fn_name là trivial exact getter {'get','set','is','has'}
+        VÀ không có external calls. Có ext_markers → luôn process.
+        """
+        from app.services.contract_hist_inv_cache import HistInvCache as _Cache
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        _TRIVIAL_EXACT = frozenset({'get', 'set', 'is', 'has'})
+        _N_WORKERS = int(os.getenv("HIST_INV_WORKERS", "1"))  # default 1 — TPM budget exhausted with 2
+
+        try:
+            from app.services.cyber_session_orchestrator import _get_rag_retriever
+            retriever = _get_rag_retriever() if cache is not None else None
+        except Exception:
+            retriever = None
+
+        file_section_re = re.compile(r'^// ─── (.+?\.sol)(?:[^\n]*) ───', re.MULTILINE)
+        markers = list(file_section_re.finditer(source_code))
+
+        # Detailed log: each entry → full pipeline trace, saved to hist_inv_detail.json
+        import threading as _threading
+        _log_lock = _threading.Lock()
+        _detail_log: list = []
+
+        def _log_entry(record: dict) -> None:
+            with _log_lock:
+                _detail_log.append(record)
+
+        def _process_entry(entry: str, contract_name: str,
+                           section_src: str = "") -> tuple[str, str]:
+            """Process 1 CG entry → (entry, inv_list).  Thread-safe."""
+            fn_match = re.match(r'\s+(\w+)\(\)', entry)
+            if not fn_match:
+                return entry, ""
+            fn_name = fn_match.group(1)
+
+            ext_match = re.search(r'\[EXTERNAL:\s*([^\]]+)\]', entry)
+            ext_markers: set = set()
+            if ext_match:
+                ext_markers = {m.strip() for m in ext_match.group(1).split(',')}
+
+            if fn_name.lower() in _TRIVIAL_EXACT and not ext_markers:
+                return entry, ""
+
+            cache_key = _Cache.entry_key(contract_name, entry.strip()) if cache else None
+            if cache and cache_key:
+                cached = cache.get(cache_key)
+                if cached is not None:
+                    raw = cached.get("inv_text", "")
+                    invs = [i for i in raw.split("\n") if i.strip()] if raw else []
+                    _log_entry({"fn": fn_name, "contract": contract_name,
+                                "cg_entry": entry.strip(), "source": "cache",
+                                "inv_texts": invs})
+                    return entry, invs
+
+            if not retriever:
+                return entry, []
+
+            # For leaf functions without ext_markers: describe body for richer query signal
+            fn_description = ""
+            if not ext_markers:
+                fn_body = ContractKGBuilder._extract_fn_body(section_src, fn_name)
+                if fn_body:
+                    fn_description = ContractKGBuilder._describe_function_body(
+                        fn_name, fn_body, llm_client=llm_client
+                    )
+
+            # LLM query: description > ext_markers semantic > direct fallback
+            llm_query = ContractKGBuilder._generate_rag_query(
+                fn_name, ext_markers, contract_name,
+                fn_description=fn_description,
+                llm_client=llm_client,
+            )
+            direct_query = ContractKGBuilder._build_direct_query(fn_name, ext_markers)
+
+            # Fetch top-3 diverse findings via MMR — collect ALL with scores for detail log
+            seen_titles: set = set()
+            all_docs: list = []
+            all_candidates: list = []
+            for q in dict.fromkeys([llm_query, direct_query]):
+                if not q or not q.strip():
+                    continue
+                try:
+                    docs = retriever.query(q, n_results=3)
+                    for d in (docs or []):
+                        all_candidates.append({
+                            "query": q[:80],
+                            "title": d['title'][:80],
+                            "score": round(d['score'], 3),
+                            "passed": d['score'] >= score_threshold,
+                        })
+                        if d['score'] >= score_threshold and d['title'] not in seen_titles:
+                            seen_titles.add(d['title'])
+                            all_docs.append(d)
+                except Exception:
+                    pass
+
+            best_query = llm_query or direct_query
+            if not all_docs:
+                if cache and cache_key:
+                    cache.set(cache_key, best_query, "", "", 0.0, entry.strip())
+                _log_entry({"fn": fn_name, "contract": contract_name,
+                            "cg_entry": entry.strip(), "fn_description": fn_description,
+                            "llm_query": llm_query[:80], "direct_query": direct_query[:60],
+                            "candidates": all_candidates, "passed_threshold": 0,
+                            "inv_texts": [], "source": "no_match"})
+                return entry, []
+
+            # Extract invariant from each qualifying finding, dedup by content
+            inv_texts: list = []
+            seen_inv_norm: set = set()
+            extraction_log: list = []
+            for doc in all_docs:
+                inv = ContractKGBuilder._extract_invariant_from_finding(
+                    doc['title'],
+                    doc.get('content', '')[:2000],
+                    llm_client=llm_client,
+                )
+                norm = inv.lower().strip() if inv else ""
+                status = "ok" if (inv and norm not in seen_inv_norm) else ("dup" if inv else "empty")
+                extraction_log.append({
+                    "title": doc['title'][:80], "score": round(doc['score'], 3),
+                    "inv": inv[:100] if inv else "", "status": status,
+                })
+                if inv and norm not in seen_inv_norm:
+                    seen_inv_norm.add(norm)
+                    inv_texts.append(inv)
+
+            best_score = all_docs[0]['score']
+            combined = "\n".join(inv_texts)
+            if cache and cache_key:
+                cache.set(cache_key, best_query, combined,
+                          all_docs[0]['title'], best_score, entry.strip())
+
+            _log_entry({"fn": fn_name, "contract": contract_name,
+                        "cg_entry": entry.strip(), "fn_description": fn_description,
+                        "llm_query": llm_query[:80], "direct_query": direct_query[:60],
+                        "candidates": all_candidates, "passed_threshold": len(all_docs),
+                        "extractions": extraction_log,
+                        "inv_texts": inv_texts, "source": "rag"})
+            return entry, inv_texts
+
+        def _enrich(contract_name: str, entries: List[str], section_src: str = "") -> List[str]:
+            """Run _process_entry in parallel (2 workers), preserve original order."""
+            if not retriever:
+                # No RAG — return entries as-is with cache hits only
+                result: List[str] = []
+                for entry in entries:
+                    result.append(entry)
+                    fn_match = re.match(r'\s+(\w+)\(\)', entry)
+                    if not fn_match:
+                        continue
+                    fn_name = fn_match.group(1)
+                    ext_match = re.search(r'\[EXTERNAL:\s*([^\]]+)\]', entry)
+                    ext_markers = {m.strip() for m in ext_match.group(1).split(',')} if ext_match else set()
+                    if fn_name.lower() in _TRIVIAL_EXACT and not ext_markers:
+                        continue
+                    cache_key = _Cache.entry_key(contract_name, entry.strip()) if cache else None
+                    if cache and cache_key:
+                        cached = cache.get(cache_key)
+                        if cached:
+                            raw = cached.get("inv_text", "")
+                            for inv in (raw.split("\n") if raw else []):
+                                if inv.strip():
+                                    result.append(f"    ↳ HIST: {inv.strip()}")
+                return result
+
+            # Parallel processing: submit all, preserve order via index
+            futures: dict = {}
+            with ThreadPoolExecutor(max_workers=_N_WORKERS) as pool:
+                for idx, entry in enumerate(entries):
+                    fut = pool.submit(_process_entry, entry, contract_name, section_src)
+                    futures[fut] = idx
+
+            ordered: dict = {}
+            for fut, idx in futures.items():
+                try:
+                    ordered[idx] = fut.result()
+                except Exception as _exc:
+                    import logging as _log
+                    _log.getLogger("mirofish.hist_inv").warning(
+                        "[HIST-INV] _process_entry exc entry[%d]: %s: %s", idx, type(_exc).__name__, _exc
+                    )
+                    ordered[idx] = (entries[idx], [])
+
+            result: List[str] = []
+            for idx in sorted(ordered):
+                entry, inv_texts = ordered[idx]
+                result.append(entry)
+                for inv in (inv_texts if isinstance(inv_texts, list) else []):
+                    if inv:
+                        result.append(f"    ↳ HIST: {inv}")
+            return result
+
+        def _save_detail_log() -> None:
+            """Save detailed pipeline trace to hist_inv_detail.json next to cache file."""
+            if not _detail_log or not cache:
+                return
+            try:
+                import json as _json
+                detail_path = str(cache.path).replace("hist_inv_cache.json", "hist_inv_detail.json")
+                with open(detail_path, "w", encoding="utf-8") as _f:
+                    _json.dump({"entries": _detail_log}, _f, indent=2, ensure_ascii=False)
+            except Exception:
+                pass
+
+        if len(markers) >= 2:
+            parts: List[str] = []
+            for i, marker in enumerate(markers):
+                contract_name = marker.group(1).rsplit('/', 1)[-1].replace('.sol', '')
+                start = marker.end()
+                end = markers[i + 1].start() if i + 1 < len(markers) else len(source_code)
+                section = source_code[start:end]
+                local_fns = list(set(re.findall(r'\bfunction\s+([a-zA-Z_]\w*)\s*\(', section)))
+                enriched = _enrich(contract_name, ContractKGBuilder._build_call_graph_entries(section, local_fns), section_src=section)
+                if enriched:
+                    parts.append(f"[{contract_name}]\n" + "\n".join(enriched))
+            result = ("CALL GRAPH:\n" + "\n\n".join(parts) + "\n") if parts else ""
+            _save_detail_log()
+            return result
+
+        enriched = _enrich("", ContractKGBuilder._build_call_graph_entries(source_code, known_functions), section_src=source_code)
+        _save_detail_log()
+        return ("CALL GRAPH:\n" + "\n".join(enriched) + "\n") if enriched else ""
+
     @staticmethod
     def _build_call_graph_entries(source_code: str, known_functions: List[str]) -> List[str]:
         """Build per-function call graph entry lines for one contract section.
@@ -592,9 +1029,19 @@ class ContractKGBuilder:
             if events_and_rules:
                 lines.append("")
                 lines.append(events_and_rules)
-            call_graph = ContractKGBuilder._build_call_graph_summary(
-                entity.source_code, all_fn_names
-            )
+            if self._hist_inv_cache_path:
+                from app.services.contract_hist_inv_cache import HistInvCache
+                _cache = HistInvCache(self._hist_inv_cache_path)
+                call_graph = ContractKGBuilder._build_call_graph_with_hist_inv(
+                    entity.source_code, all_fn_names, cache=_cache,
+                    score_threshold=float(os.getenv("HIST_INV_SCORE_THRESHOLD", "0.68")),
+                    llm_client=self._llm,
+                )
+                _cache.save()
+            else:
+                call_graph = ContractKGBuilder._build_call_graph_summary(
+                    entity.source_code, all_fn_names
+                )
             if call_graph:
                 lines.append(call_graph)
 

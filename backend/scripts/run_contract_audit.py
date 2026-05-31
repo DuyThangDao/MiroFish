@@ -372,7 +372,12 @@ def run_audit(
     from app.services.contract_dep_graph import ContractDepGraph
 
     task_manager        = TaskManager()
-    kg_builder          = ContractKGBuilder()
+    kg_builder          = ContractKGBuilder(
+        # Contest-level cache: shared across runs so HIST-INV only builds once per contest
+        # Contest-level cache: 2 levels up from session subdir (run-N/ → contest_id/)
+        # Survives across runs — no rebuild if source code unchanged
+        hist_inv_cache_path=os.path.join(os.path.dirname(os.path.dirname(output_dir)), "hist_inv_cache.json"),
+    )
     prof_gen            = ContractExpertProfileGenerator()
     orchestrator        = CyberSessionOrchestrator()
     report_agent        = ContractAuditReportAgent()
@@ -399,7 +404,7 @@ def run_audit(
             graph_name=graph_name,
             contract_name=contract_name,
         )
-        kg_result = _poll_task(task_manager, kg_task_id, "KG Build", timeout=1800)
+        kg_result = _poll_task(task_manager, kg_task_id, "KG Build", timeout=3600)
 
         graph_id        = kg_result["graph_id"]
         contract_id     = kg_result["contract_id"]
