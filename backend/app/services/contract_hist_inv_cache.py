@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-CACHE_VERSION = 1  # bump khi thay đổi schema cache
+CACHE_VERSION = 2  # v4: multi-query enumerate, invalidate v3 entries
 
 
 class HistInvCache:
