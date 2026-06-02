@@ -440,6 +440,44 @@ def _classify_files(
         if not _is_interface_only(sources.get(k, ""))
         and not _is_mock_or_test(k)
     ]
+
+    # ── Size gate: full audit for small contests ──────────────────────────
+    # Scope: only impl contracts in the same sub-project as primary
+    # e.g. primary_key="projects/mochi-core/contracts/vault/MochiVault.sol"
+    # → project prefix = "projects/mochi-core" (everything before /contracts/)
+    # primary_key is absolute: "/path/to/contest/projects/mochi-core/contracts/vault/MochiVault.sol"
+    # Path may have multiple "contracts" components (e.g. web3bugs/contracts/42/projects/mochi-core/contracts/...)
+    # Use the LAST occurrence of "contracts" → prefix = sub-project root (e.g. ".../mochi-core")
+    _primary_key = manifest.get("primary_key", "")
+    _pk_parts = _primary_key.split("/")
+    _ci = None
+    for _i in range(len(_pk_parts) - 1, -1, -1):
+        if _pk_parts[_i] == "contracts":
+            _ci = _i
+            break
+    _project_prefix = "/".join(_pk_parts[:_ci]) if (_ci is not None and _ci > 0) else ""
+    _scoped_impl_keys = [
+        k for k in all_impl_keys
+        if not _project_prefix or k.startswith(_project_prefix)
+    ]
+
+    _FULL_AUDIT_LIMIT = int(os.getenv("FULL_AUDIT_CHAR_LIMIT", "200000"))
+    _total_impl_chars = sum(len(sources.get(k, "")) for k in _scoped_impl_keys)
+    if _total_impl_chars <= _FULL_AUDIT_LIMIT:
+        _scoped_set = set(_scoped_impl_keys)
+        print(
+            f"[flatten] Size gate: {_total_impl_chars:,} chars ≤ {_FULL_AUDIT_LIMIT:,} "
+            f"— full audit ({len(_scoped_impl_keys)} impl contracts"
+            + (f" from '{_project_prefix}'" if _project_prefix else "") + ")"
+        )
+        return {
+            "in_scope":  _scoped_impl_keys,
+            "skeleton":  [],
+            "out_scope": [k for k in order if k not in _scoped_set],
+            "method":    "full_audit_size_gate",
+        }
+    # ── End size gate ─────────────────────────────────────────────────────
+
     if all_impl_keys:
         if extra_scope_contracts:
             # --- Skeletonization mode (Slither available) ---

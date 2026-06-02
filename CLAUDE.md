@@ -116,6 +116,11 @@ File `eval_result.txt` chứa toàn bộ output verbose (matched/missed H bugs +
 Flags đặt cứng trong script: `STOP_AFTER_DEDUP=true`, `RAG_ENABLED=true`.
 Đây là cách dùng chuẩn trong giai đoạn tăng recall (focus R1, bỏ R2 voting).
 
+**HIST-INV cache — KHÔNG xóa trừ khi user yêu cầu rõ ràng:**
+Cache nằm tại `benchmark/web3bugs/agent-redesign/<contest_id>/hist_inv_cache.json`.
+Cache này lưu kết quả LLM query cho từng function — deterministic, dùng lại được giữa các runs cùng contest.
+Chỉ xóa khi: thay đổi code HIST-INV, thay đổi prompt, hoặc user nói rõ "xóa cache".
+
 ---
 
 ### Running a Contest Audit (background, with logging)

@@ -554,36 +554,50 @@ class ContractKGBuilder:
     @staticmethod
     def _generate_fn_queries(fn_name: str, fn_body: str,
                               llm_client: Optional[Any] = None) -> list:
-        """V4: 1 LLM call enumerates ALL distinct operations → list of RAG queries."""
+        """V4c: enumerate ALL distinct operations → list of RAG queries.
+
+        Extends v4 prompt with sub-function interaction queries.
+        Falls back to v4 prompt when LLM returns empty (stochastic with large bodies).
+        """
         if not fn_body or not fn_body.strip() or not llm_client:
             return [f"{fn_name} vulnerability"]
-        prompt = (
-            "You are a Solidity code analyst.\n\n"
-            f"Function: {fn_name}()\n"
-            f"Body:\n{fn_body.strip()}\n\n"
-            "Generate search queries to find historical vulnerability findings "
-            "related to this function.\n"
-            "Each query must target a DIFFERENT operation or pattern in this function.\n"
-            "List ALL distinct operations — do not merge or skip any.\n"
-            "Focus on: type casts, arithmetic operations, state updates, unchecked blocks.\n"
-            "Be specific about data types (uint128, int128, uint256) and operations.\n"
-            "Do NOT describe business purpose. Do NOT add 'vulnerability' keyword.\n\n"
-            "Format: one query per line, max 15 words each.\n"
-            "Output ONLY the queries, nothing else."
-        )
-        try:
-            raw = llm_client.chat(
-                [{"role": "user", "content": prompt}],
-                temperature=0, max_tokens=6144,
-            ).strip()
-            queries = []
-            for line in raw.split('\n'):
-                line = line.strip().lstrip('0123456789.-) ').strip()
-                if line:
-                    queries.append(line)
-            return queries if queries else [f"{fn_name} vulnerability"]
-        except Exception:
-            return [f"{fn_name} vulnerability"]
+
+        def _call(extended: bool) -> list:
+            prompt = (
+                "You are a Solidity code analyst.\n\n"
+                f"Function: {fn_name}()\n"
+                f"Body:\n{fn_body.strip()}\n\n"
+                "Generate search queries to find historical vulnerability findings "
+                "related to this function.\n"
+                "Each query must target a DIFFERENT operation or pattern in this function.\n"
+                "List ALL distinct operations — do not merge or skip any.\n"
+                "Focus on: type casts, arithmetic operations, state updates, unchecked blocks.\n"
+            )
+            if extended:
+                prompt += (
+                    "Also include queries about interactions between sub-function calls "
+                    "and their effects on state variables.\n"
+                )
+            prompt += (
+                "Be specific about data types (uint128, int128, uint256) and operations.\n"
+                "Do NOT describe business purpose. Do NOT add 'vulnerability' keyword.\n\n"
+                "Format: one query per line, max 15 words each.\n"
+                "Output ONLY the queries, nothing else."
+            )
+            try:
+                raw = llm_client.chat(
+                    [{"role": "user", "content": prompt}],
+                    temperature=0, max_tokens=6144,
+                ).strip()
+                return [ln.strip().lstrip('0123456789.-) ').strip()
+                        for ln in raw.split('\n') if ln.strip()]
+            except Exception:
+                return []
+
+        queries = _call(extended=True)
+        if not queries:
+            queries = _call(extended=False)
+        return queries if queries else [f"{fn_name} vulnerability"]
 
     @staticmethod
     def _make_hist_annotation(rag_result: dict) -> str:
