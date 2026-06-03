@@ -551,9 +551,12 @@ class ContractKGBuilder:
         except Exception:
             return ""
 
+    _OP_CAP = 6  # max HIST annotations từ operation track per function
+    _ST_CAP = 4  # max HIST annotations từ structural track per function
+
     @staticmethod
-    def _generate_fn_queries(fn_name: str, fn_body: str,
-                              llm_client: Optional[Any] = None) -> list:
+    def _generate_operation_queries(fn_name: str, fn_body: str,
+                                     llm_client: Optional[Any] = None) -> list:
         """V4c: enumerate ALL distinct operations → list of RAG queries.
 
         Extends v4 prompt with sub-function interaction queries.
@@ -608,6 +611,44 @@ class ContractKGBuilder:
         if impact in ('HIGH', 'MEDIUM', 'CRITICAL'):
             ann += f" [{impact}]"
         return ann
+
+    @staticmethod
+    def _generate_structural_queries(fn_name: str, fn_body: str,
+                                      llm_client: Optional[Any] = None) -> list:
+        """V5: structural vulnerability property queries. Returns [] if NONE or empty."""
+        if not fn_body or not fn_body.strip() or not llm_client:
+            return []
+        prompt = (
+            "You are a smart contract security auditor.\n\n"
+            f"Function: {fn_name}()\n"
+            f"Body:\n{fn_body.strip()[:2000]}\n\n"
+            "Analyze this function for structural vulnerability properties.\n"
+            "For each property present, write ONE search query describing what goes wrong —\n"
+            "using the language of audit report finding titles.\n\n"
+            "Check ONLY for properties actually visible in this code:\n"
+            "- State written to mapping/storage WITHOUT reading/checking existing value first\n"
+            "- State mutation that executes unconditionally regardless of input amount (zero, max)\n"
+            "- Arithmetic where intermediate result can underflow/overflow for specific input range\n"
+            "- External call without slippage/deadline/minOutput protection\n"
+            "- Missing access control: state-changing function callable by anyone\n"
+            "- Token balance assumption that breaks with fee-on-transfer tokens\n"
+            "- Array/index access that can exceed bounds\n\n"
+            "Format: one query per line, max 15 words each.\n"
+            "Use phrasing like audit finding titles: \"X causes Y\", \"missing Z allows W\".\n"
+            "If NO structural vulnerability properties are found, output EXACTLY the word NONE and nothing else.\n"
+            "Output ONLY queries or NONE."
+        )
+        try:
+            raw = llm_client.chat(
+                [{"role": "user", "content": prompt}],
+                temperature=0, max_tokens=1024,
+            ).strip()
+            if not raw or raw.upper() == "NONE":
+                return []
+            return [ln.strip().lstrip('0123456789.-) ').strip()
+                    for ln in raw.split('\n') if ln.strip()]
+        except Exception:
+            return []
 
     @staticmethod
     def _extract_invariant_from_finding(title: str, content: str,
@@ -716,39 +757,50 @@ class ContractKGBuilder:
             if not retriever:
                 return entry, []
 
-            # V4: enumerate ALL operations → N queries → per-query top-1 → title+impact
+            # V5: dual-track (operation + structural) → per-track cap → merge annotations
             fn_body = ContractKGBuilder._extract_fn_body(section_src, fn_name)
-            queries = ContractKGBuilder._generate_fn_queries(
+            op_queries = ContractKGBuilder._generate_operation_queries(
                 fn_name, fn_body, llm_client=client
             )
+            st_queries = ContractKGBuilder._generate_structural_queries(
+                fn_name, fn_body, llm_client=client
+            )
+            queries = op_queries + st_queries  # for cache/logging
 
             seen_ann: set = set()
-            ordered_ann: list = []
             all_candidates: list = []
-            for q in queries:
-                if not q.strip():
-                    continue
-                try:
-                    docs = retriever.query(q, n_results=3)
-                    for d in (docs or []):
-                        all_candidates.append({
-                            "query": q[:80],
-                            "title": d['title'][:80],
-                            "score": round(d['score'], 3),
-                            "passed": d['score'] >= score_threshold,
-                        })
-                        if d['score'] < score_threshold:
-                            continue  # MMR does not sort DESC — cannot break early
-                        ann = ContractKGBuilder._make_hist_annotation(d)
-                        if ann not in seen_ann:
-                            seen_ann.add(ann)
-                            ordered_ann.append(ann)
-                            break  # unique hit found for this query — move to next query
-                        # duplicate annotation — fall through to try top-2, top-3
-                except Exception:
-                    pass
 
-            inv_texts = ordered_ann  # full list, no cap
+            def _collect_track(track_queries: list, cap: int) -> list:
+                result = []
+                for q in track_queries:
+                    if len(result) >= cap:
+                        break
+                    if not q.strip():
+                        continue
+                    try:
+                        docs = retriever.query(q, n_results=3)
+                        for d in (docs or []):
+                            all_candidates.append({
+                                "query": q[:80],
+                                "title": d['title'][:80],
+                                "score": round(d['score'], 3),
+                                "passed": d['score'] >= score_threshold,
+                            })
+                            if d['score'] < score_threshold:
+                                continue  # MMR does not sort DESC — cannot break early
+                            ann = ContractKGBuilder._make_hist_annotation(d)
+                            if ann not in seen_ann:
+                                seen_ann.add(ann)
+                                result.append(ann)
+                                break  # unique hit — next query
+                            # duplicate annotation — fall through to try top-2, top-3
+                    except Exception:
+                        pass
+                return result
+
+            op_anns = _collect_track(op_queries, ContractKGBuilder._OP_CAP)
+            st_anns = _collect_track(st_queries, ContractKGBuilder._ST_CAP)
+            inv_texts = op_anns + st_anns
 
             best_score = max((c['score'] for c in all_candidates if c['passed']), default=0.0)
             combined = "\n".join(inv_texts)
