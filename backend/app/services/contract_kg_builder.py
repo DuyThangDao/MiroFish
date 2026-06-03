@@ -417,12 +417,13 @@ class ContractKGBuilder:
                 rpm_slot_file="/tmp/mirofish_hist_inv_1.json",
                 rpm_limit=rpm,
             ))
-        # LLM1 (hopeful-frame) — secondary worker, conservative RPM
-        clients.append(LLMClient(
-            rpm_slot_file="/tmp/mirofish_hist_inv_0.json",
-            rpm_limit=max(rpm // 2, 5),
-        ))
-        return clients  # [client_llm2, client_llm1] or [client_llm1] if no LLM2
+        if not clients:
+            # Fallback: LLM1 (hopeful-frame) only if LLM2 not configured
+            clients.append(LLMClient(
+                rpm_slot_file="/tmp/mirofish_hist_inv_0.json",
+                rpm_limit=max(rpm // 4, 3),
+            ))
+        return clients  # [client_llm2] preferred; [client_llm1] fallback only
 
     @staticmethod
     def _generate_rag_query(fn_name: str, ext_markers: set, contract_name: str,
@@ -892,11 +893,15 @@ class ContractKGBuilder:
                 enriched = _enrich(contract_name, ContractKGBuilder._build_call_graph_entries(section, local_fns), section_src=section)
                 if enriched:
                     parts.append(f"[{contract_name}]\n" + "\n".join(enriched))
+                if cache:
+                    cache.save()
             result = ("CALL GRAPH:\n" + "\n\n".join(parts) + "\n") if parts else ""
             _save_detail_log()
             return result
 
         enriched = _enrich("", ContractKGBuilder._build_call_graph_entries(source_code, known_functions), section_src=source_code)
+        if cache:
+            cache.save()
         _save_detail_log()
         return ("CALL GRAPH:\n" + "\n".join(enriched) + "\n") if enriched else ""
 

@@ -267,6 +267,27 @@ class ContractDepGraph:
         if pragma_ver:
             self._set_solc_version(pragma_ver)
 
+        # Pre-compile with hardhat so the solc compiler binary is already cached
+        # before Slither spawns its own `npx hardhat compile` subprocess.
+        # Without this, Hardhat raises HH11 ("Trying to get a compiler before it
+        # was downloaded") when Slither triggers compilation concurrently.
+        target_path = Path(target)
+        if target_path.is_dir() and (target_path / "hardhat.config.js").exists() or \
+                target_path.is_dir() and (target_path / "hardhat.config.ts").exists():
+            try:
+                pre = subprocess.run(
+                    ["npx", "hardhat", "compile", "--force"],
+                    cwd=str(target_path),
+                    capture_output=True, timeout=120,
+                    env=dict(os.environ),
+                )
+                if pre.returncode != 0:
+                    logger.debug(
+                        f"Pre-compile warning: {pre.stderr.decode(errors='replace')[:200]}"
+                    )
+            except Exception as _pre_err:
+                logger.debug(f"Pre-compile skipped: {_pre_err}")
+
         try:
             sl = Slither(target)
         except Exception as e:

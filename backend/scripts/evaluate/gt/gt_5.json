@@ -1,0 +1,170 @@
+[
+  {
+    "h_id": "H-01",
+    "title": "Unhandled return value of transfer in `transferOut()` of Pools.sol",
+    "description": "ERC20 implementations are not always consistent. Some implementations of transfer and transferFrom could return 'false' on failure instead of reverting. The transfer call of transferOut() could be made on a user-supplied untrusted token address whose implementation can be malicious. Recommend using require() statements to handle these failures.",
+    "function_name": "transferOut",
+    "contract_name": "Pools"
+  },
+  {
+    "h_id": "H-02",
+    "title": "Flash attack mitigation does not work as intended in USDV.sol",
+    "description": "USDV contract aims to protect against flash attacks using flashProof() modifier which uses isMature() to check blockDelay. However, blockDelay state variable is not initialized (default uint value of 0). So unless it is set to >= 1 by setParams() which can be called only by the DAO (which currently does not have the capability), blockDelay will be 0, which allows multiple calls in the same transaction enabling flash attacks.",
+    "function_name": "isMature",
+    "contract_name": "USDV"
+  },
+  {
+    "h_id": "H-03",
+    "title": "Missing DAO functionality to call `changeDAO()` function in Vader.sol",
+    "description": "changeDAO() is authorized to be called only from the DAO (per modifier) but DAO contract has no corresponding functionality to call changeDAO() function. As a result, DAO address cannot be changed.",
+    "function_name": "changeDAO",
+    "contract_name": "Vader"
+  },
+  {
+    "h_id": "H-04",
+    "title": "Proposals can be cancelled by anyone",
+    "description": "Anyone can cancel any proposals by calling DAO.cancelProposal(id, id) with oldProposalID == newProposalID. This always passes the minority check as the proposal was approved. An attacker can launch a denial of service attack on the DAO governance and prevent any proposals from being executed.",
+    "function_name": "cancelProposal",
+    "contract_name": "DAO"
+  },
+  {
+    "h_id": "H-05",
+    "title": "Flash loans can affect governance voting in DAO.sol",
+    "description": "Flash loans can significantly increase a single voter's weight and be used to impact the voting outcome. A voter can borrow a significant quantity of tokens to increase their voting weight in a transaction within which they also deterministically influence the voting outcome. The countMemberVotes() function does not account for flash loans.",
+    "function_name": "countMemberVotes",
+    "contract_name": "DAO"
+  },
+  {
+    "h_id": "H-06",
+    "title": "Incorrect burn address in Vader.sol",
+    "description": "The internal _transfer() function is called from external facing transfer(), transferFrom(), and transferTo() functions. While sender parameter is correctly used for transfer of tokens, the call to _burn() on L129 incorrectly uses msg.sender as the burn address instead of the sender parameter. This incorrectly burns fees from a different account for transferFrom() and transferTo() callers.",
+    "function_name": "_transfer",
+    "contract_name": "Vader"
+  },
+  {
+    "h_id": "H-07",
+    "title": "Wrong `calcAsymmetricShare` calculation in Utils",
+    "description": "The inline-comment defines the number of asymmetric shares as (u * U * (2 * A^2 - 2 * U * u + U^2))/U^3 but the Utils.calcAsymmetricShare function computes a different formula. The associativity on P * part1 is wrong, and part2 is not multiplied by P. The math from the spec is not correctly implemented and could lead to the protocol being economically exploited.",
+    "function_name": "calcAsymmetricShare",
+    "contract_name": "Utils"
+  },
+  {
+    "h_id": "H-08",
+    "title": "Wrong liquidity units calculation in Utils",
+    "description": "The spec defines LP units as units = (P (a B + A b))/(2 A B) * slipAdjustment but the Utils.calcLiquidityUnits function computes ((P * part1) + part2) / part3 * slipAdjustments. The associativity on P * part1 is wrong, and part2 is not multiplied by P. The math is not correctly implemented and could lead to the protocol being economically exploited.",
+    "function_name": "calcLiquidityUnits",
+    "contract_name": "Utils"
+  },
+  {
+    "h_id": "H-09",
+    "title": "Incorrect initialization gives IL protection of only 1 second instead of 100 days in Router.sol",
+    "description": "Incorrect initialization of timeForFullProtection to 1 sec instead of 8640000 secs (100 days) as indicated in code comments. Unless timeForFullProtection is reset to 100 days by setParams() (which is missing functionality in the DAO), the IL protection rule of 100 days will not apply in Utils.getProtection(). This breaks a key value proposition of the protocol.",
+    "function_name": "init",
+    "contract_name": "Router"
+  },
+  {
+    "h_id": "H-10",
+    "title": "Anyone can list anchors / curate tokens in Router",
+    "description": "The Router.listAnchor function can be called by anyone and tokens can be added. The only check is that the pool is an anchor, but this can easily be set by calling Pools.addLiquidity once without actually sending tokens. Additionally, replaceAnchor can be used with flash loans to push another anchor token out of the price range.",
+    "function_name": "listAnchor",
+    "contract_name": "Router"
+  },
+  {
+    "h_id": "H-11",
+    "title": "Swap token can be traded as fake base token in Pools",
+    "description": "The Pools.swap function does not check if base is one of the base tokens (VADER or USDV). One can transfer tokens to the pool and set base=token and call swap(token, token, member, toBase=false). The actualInput uses the wrong reserve comparison, breaking pool accounting. LPs cannot correctly withdraw, and the token pool amount can be stolen.",
+    "function_name": "swap",
+    "contract_name": "Pools"
+  },
+  {
+    "h_id": "H-12",
+    "title": "`getAddedAmount` can return wrong results in Pools",
+    "description": "The getAddedAmount function only works correctly when called with (VADER/USDV, pool) or (pool, pool). When called with (token, pool) where token is neither VADER/USDV/pool, it returns wrong results by subtracting the token balance from the stored amount of a completely different token. This can be used to break pairs or swap tokens without paying anything.",
+    "function_name": "getAddedAmount",
+    "contract_name": "Pools"
+  },
+  {
+    "h_id": "H-13",
+    "title": "Synths can be minted with fake base token in Pools",
+    "description": "The Pools.mintSynth function does not check if base is one of the base tokens (VADER or USDV). One can transfer tokens to the pool and set base=token and call mintSynth(token, token, member). The actualInput uses the wrong reserve ratio, yielding a wrong swap result and breaking pool accounting.",
+    "function_name": "mintSynth",
+    "contract_name": "Pools"
+  },
+  {
+    "h_id": "H-14",
+    "title": "Missing access restriction on `lockUnits/unlockUnits` in Pools",
+    "description": "The Pool.lockUnits allows anyone to steal pool tokens from a member and assign them to msg.sender. Anyone can steal pool tokens from any other user. Access control should be added requiring msg.sender to be the router or another authorized party.",
+    "function_name": "lockUnits",
+    "contract_name": "Pools"
+  },
+  {
+    "h_id": "H-15",
+    "title": "Wrong slippage protection on Token to Token trades in Router",
+    "description": "The Router.swapWithSynthsWithLimit allows trading token to token with slippage protection. The slippage protection of the second trade (base to token) is computed wrong: it compares the token input amount of the first trade to the base reserve of the second pair instead of using the base output from the first trade.",
+    "function_name": "swapWithSynthsWithLimit",
+    "contract_name": "Router"
+  },
+  {
+    "h_id": "H-16",
+    "title": "Tokens can be stolen through `transferTo`",
+    "description": "VADER, USDV, SYNTHS all employ the transferTo() function which interrogates tx.origin and skips approvals. An attacker can create a custom ERC20 token with a hook in _transfer that calls transferTo to steal funds. By setting up a honeypot pool and targeting high-profile accounts, all token holders risk having their funds stolen if they interact with an unvetted contract.",
+    "function_name": "transferTo",
+    "contract_name": "Vader"
+  },
+  {
+    "h_id": "H-17",
+    "title": "Transfer fee is burned on wrong accounts in Vader",
+    "description": "The Vader._transfer function burns the transfer fee on msg.sender but this address might not be involved in the transfer at all due to transferFrom. Smart contracts that relay transfers like aggregators have their Vader balance burned or the transaction fails because these accounts don't have balance to burn.",
+    "function_name": "_transfer",
+    "contract_name": "Vader"
+  },
+  {
+    "h_id": "H-18",
+    "title": "Vault rewards can be gamed through custom synths",
+    "description": "The _deposit function increases the member's weight by the swap output amount. Anyone can create synths of custom tokens by calling Pools.deploySynth(customToken). An attacker can create a custom token, add minimal liquidity to make the price very high, mint synths, deposit them to inflate their weight, then call harvest(realSynth) to claim almost all vault rewards.",
+    "function_name": "_deposit",
+    "contract_name": "Vault"
+  },
+  {
+    "h_id": "H-19",
+    "title": "Vault rewards last claim time not always initialized",
+    "description": "The harvest function calls calcCurrentReward which computes _secondsSinceClaim = block.timestamp - mapMemberSynth_lastTime[member][synth]. As users can claim different synths than the synths they deposited, mapMemberSynth_lastTime[member][synth] might be uninitialized, making _secondsSinceClaim equal to the current block timestamp and allowing claiming a huge chunk of rewards.",
+    "function_name": "harvest",
+    "contract_name": "Vault"
+  },
+  {
+    "h_id": "H-20",
+    "title": "Vault Weight accounting is wrong for withdrawals",
+    "description": "When depositing two different synths, their weight is added to the same mapMember_weight[_member] storage variable. When withdrawing the full amount of one synth with _processWithdraw the full weight is decreased. The second deposited synth is now essentially weightless and users cannot claim their fair share of rewards.",
+    "function_name": "_processWithdraw",
+    "contract_name": "Vault"
+  },
+  {
+    "h_id": "H-21",
+    "title": "Anyone Can Avoid All Vether Transfer Fees By Adding Their Address to ExcludedAddresses",
+    "description": "Vether.sol implements a fee on every token transfer, unless the sender or recipient exists on a list of excluded addresses (mapAddress_Excluded). However, the addExcluded() function in Vether.sol has no restrictions on who can call it. Any user can call addExcluded with their own address to bypass all transfer fees.",
+    "function_name": "addExcluded",
+    "contract_name": "Vether"
+  },
+  {
+    "h_id": "H-22",
+    "title": "Users may unintentionally remove liquidity under a phishing attack",
+    "description": "The removeLiquidity function in Pools.sol uses tx.origin to determine the person who wants to remove liquidity. This is dangerous since the pool assumes this function is called from the router, but if the user is under a phishing attack, they could unintentionally remove liquidity by interacting with a malicious contract.",
+    "function_name": "removeLiquidity",
+    "contract_name": "Pools"
+  },
+  {
+    "h_id": "H-23",
+    "title": "Anyone can curate pools and steal rewards in Router",
+    "description": "The Router.curatePool and replacePool functions don't have any access restriction. An attacker can get a flash loan of base tokens and replace existing curated pools with their own curated pools. They can then game the reward system by repeatedly swapping in their custom pool, withdraw liquidity, and pay back the flashloan.",
+    "function_name": "curatePool",
+    "contract_name": "Router"
+  },
+  {
+    "h_id": "H-25",
+    "title": "Incorrect initialization causes VADER emission rate of 1 second instead of 1 day in Vader.sol",
+    "description": "Incorrect initialization of secondsPerEra to 1 sec instead of 86400 secs (1 day) causes what should be the daily emission rate to be a secondly emission rate. This causes inflation of VADER token and likely breaks VADER/USDV peg and other protocol invariants. Protocol will break and funds will be lost.",
+    "function_name": "init",
+    "contract_name": "Vader"
+  }
+]

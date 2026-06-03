@@ -455,11 +455,7 @@ def _classify_files(
         if _pk_parts[_i] == "contracts":
             _ci = _i
             break
-    _project_prefix = "/".join(_pk_parts[:_ci]) if (_ci is not None and _ci > 0) else ""
-    _scoped_impl_keys = [
-        k for k in all_impl_keys
-        if not _project_prefix or k.startswith(_project_prefix)
-    ]
+    _scoped_impl_keys = all_impl_keys  # include all packages; 200KB limit is the real safety net
 
     _FULL_AUDIT_LIMIT = int(os.getenv("FULL_AUDIT_CHAR_LIMIT", "200000"))
     _total_impl_chars = sum(len(sources.get(k, "")) for k in _scoped_impl_keys)
@@ -467,8 +463,7 @@ def _classify_files(
         _scoped_set = set(_scoped_impl_keys)
         print(
             f"[flatten] Size gate: {_total_impl_chars:,} chars ≤ {_FULL_AUDIT_LIMIT:,} "
-            f"— full audit ({len(_scoped_impl_keys)} impl contracts"
-            + (f" from '{_project_prefix}'" if _project_prefix else "") + ")"
+            f"— full audit ({len(_scoped_impl_keys)} impl contracts)"
         )
         return {
             "in_scope":  _scoped_impl_keys,

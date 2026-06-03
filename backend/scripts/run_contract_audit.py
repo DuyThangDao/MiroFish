@@ -404,7 +404,7 @@ def run_audit(
             graph_name=graph_name,
             contract_name=contract_name,
         )
-        kg_result = _poll_task(task_manager, kg_task_id, "KG Build", timeout=7200)
+        kg_result = _poll_task(task_manager, kg_task_id, "KG Build", timeout=21600)
 
         graph_id        = kg_result["graph_id"]
         contract_id     = kg_result["contract_id"]
