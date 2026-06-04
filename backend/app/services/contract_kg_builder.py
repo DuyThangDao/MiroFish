@@ -619,6 +619,26 @@ class ContractKGBuilder:
         """V5: structural vulnerability property queries. Returns [] if NONE or empty."""
         if not fn_body or not fn_body.strip() or not llm_client:
             return []
+        # # V5b: auditor-vocabulary free-form (worse in practice — replaced by V5)
+        # prompt = (
+        #     "You are a smart contract security auditor.\n\n"
+        #     f"Function: {fn_name}()\n"
+        #     f"Body:\n{fn_body.strip()[:2000]}\n\n"
+        #     "Generate search queries to find historical audit findings for code with similar patterns.\n"
+        #     "Write each query in the language of audit finding titles — "
+        #     "describing what goes wrong, not what the code does mechanically.\n\n"
+        #     "Good examples:\n"
+        #     "  \"spot price manipulation inflates vault deposit weight\"\n"
+        #     "  \"reserve not updated after liquidity removal causes accounting error\"\n"
+        #     "  \"oracle precision loss allows undercollateralized borrow\"\n"
+        #     "  \"reward weight diluted via custom synth flash loan\"\n\n"
+        #     "Bad examples (too mechanical — OP track already covers these):\n"
+        #     "  \"uint256 arithmetic overflow in unchecked block\"\n"
+        #     "  \"external call before state update\"\n\n"
+        #     "Format: one query per line, max 12 words each, max 4 queries.\n"
+        #     "If nothing notable beyond mechanical operations, output EXACTLY NONE.\n"
+        #     "Output ONLY queries or NONE."
+        # )
         prompt = (
             "You are a smart contract security auditor.\n\n"
             f"Function: {fn_name}()\n"
