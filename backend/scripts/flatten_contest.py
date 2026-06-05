@@ -616,7 +616,7 @@ def _find_clusters(impl_keys: List[str], graph: Dict[str, List[str]]) -> List[Li
                 continue
             visited.add(node)
             cluster.append(node)
-            for nb in undirected.get(node, set()):
+            for nb in sorted(undirected.get(node, set())):
                 if nb not in visited:
                     queue.append(nb)
         clusters.append(cluster)
@@ -799,6 +799,7 @@ def _compute_manifest(
         "primary_names":      primary_names,
         "clusters":           {pk: cluster_map[pk] for pk in cluster_primary_keys},
         # Shared metadata
+        "contract_scores":    scores,
         "contract_names_map": contract_names,
         "total_contracts":    len(scores),
         "total_chars":        sum(len(sources.get(k, "")) for k in order),
@@ -968,8 +969,9 @@ def flatten_contest_dir(
     primary        = manifest.get("primary", "unknown")
     secondary      = [s for s in manifest.get("secondary", []) if s]
     primary_names_list = manifest.get("primary_names", [primary])
-    clusters_info  = manifest.get("clusters", {})
-    cnames_map_hdr = manifest.get("contract_names_map", {})
+    clusters_info    = manifest.get("clusters", {})
+    cnames_map_hdr   = manifest.get("contract_names_map", {})
+    contract_scores  = manifest.get("contract_scores", {})
 
     if len(primary_names_list) > 1:
         # Multi-primary: generate Table of Contents to anchor LLM attention
@@ -983,13 +985,21 @@ def flatten_contest_dir(
         pk_list = manifest.get("primary_keys", [])
         for i, (pk, pname) in enumerate(zip(pk_list, primary_names_list), 1):
             members = clusters_info.get(pk, [pk])
-            member_names = [
-                cnames_map_hdr.get(m, Path(m).stem) for m in members
-                if m != pk and not _is_interface_only(sources.get(m, ""))
-            ]
+            # Filter: exclude primary itself, interfaces, mocks/tests
+            # Sort by score desc to prioritize core protocol contracts over test tokens
+            filtered = sorted(
+                [m for m in members
+                 if m != pk
+                 and not _is_interface_only(sources.get(m, ""))
+                 and not _is_mock_or_test(m)],
+                key=lambda m: contract_scores.get(m, 0),
+                reverse=True,
+            )
+            # Cap at 10 (alphabetical within the top-10 for stable display)
+            member_names = sorted([cnames_map_hdr.get(m, Path(m).stem) for m in filtered[:10]])
             scope_header_lines.append(f"// TARGET {i} — {pname} (primary)")
             if member_names:
-                scope_header_lines.append(f"//   Related contracts: {', '.join(member_names[:6])}")
+                scope_header_lines.append(f"//   Related contracts: {', '.join(member_names)}")
         if skeleton_cnames:
             scope_header_lines.append(
                 f"// SKELETON DEPS: {', '.join(skeleton_cnames[:6])}"
