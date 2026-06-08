@@ -238,6 +238,150 @@ Metric tính theo H bug (không phân label L/S). Mỗi contest = 1 file JSON.
 Lưu ý: root_config vẫn có thể fail nếu config cũ dùng syntax không tương thích
 (e.g. `forking.blockNumber: null` gây HH8 error với hardhat v2 hiện tại).
 
+## RAG Migration — 4-Section Architecture
+
+### Tổng quan
+
+Đang migration `solodit_findings` (ChromaDB blob) → 4 collections riêng biệt để cải thiện retrieval precision.
+Tài liệu đầy đủ: `docs/good-techniques/rag-4section-architecture.md` và `docs/good-techniques/rag-migration-plan.md`.
+
+### 4 Collections mới
+
+| Collection | Query track | Nội dung |
+|-----------|------------|---------|
+| `solodit_vul` | ST queries | Vulnerability description (prose mô tả lỗi) |
+| `solodit_code` | CODE queries | Normalized Solidity code (`_VAR` thay identifiers) |
+| `solodit_op` | OP queries | Mechanical operations description (LLM-generated, Phase 3) |
+| `solodit_inv` | — | Invariant description (LLM-generated, Phase 3) |
+
+Collection cũ `solodit_findings` **giữ nguyên** — OP track vẫn dùng blob trong khi chờ `solodit_op`.
+
+### Quy trình Migration (Claude trực tiếp xử lý)
+
+**Claude** (người đang chat) đọc từng finding từ `parents.json` và extract/generate 4 sections — không cần script LLM API riêng. Kết quả ghi vào `rag_sections_cache.json` theo batch (checkpoint để resume qua nhiều session).
+
+```
+parents.json → Claude đọc + extract → rag_sections_cache.json → embed script → 4 collections
+```
+
+### Output JSON format
+
+File: `backend/scripts/rag/rag_sections_cache.json`
+Template tham khảo: `backend/scripts/rag/rag_sections_template.json`
+
+**QUAN TRỌNG: KHÔNG lưu `content` hay `full_text`** — `parents.json` là source of truth, tra theo slug khi cần.
+
+```json
+{
+  "_meta": {
+    "total_findings": 3366,
+    "processed_count": 0,
+    "last_processed_slug": null
+  },
+  "fetch_errors": {
+    "some-slug": { "url": "https://github.com/...", "reason": "404", "attempted_at": "2026-06-08" }
+  },
+  "findings": [
+    {
+      "slug": "h-01-...",
+      "status": "done",
+      "title": "...",
+      "firm": "Sherlock",
+      "protocol": "...",
+      "impact": "HIGH",
+      "source_link": "https://...",
+      "content_source": "api_excerpt",
+      "code_source": "code_block",
+      "sections": {
+        "vul":  "prose mô tả lỗi...",
+        "code": "_VAR -= uint128(_VAR);",
+        "op":   "cast uint256 to uint128; subtract from reserve slot...",
+        "inv":  "function X must ensure Y before Z"
+      }
+    }
+  ]
+}
+```
+
+**`status`** ∈ `["done", "done_no_code", "failed"]`:
+- `done` — tất cả sections extract thành công
+- `done_no_code` — sections.code = null (prose_only hoặc GitHub fetch fail)
+- `failed` — exception không recover được
+
+`sections.code` = `null` khi không có code (prose_only hoặc fetch fail).
+`code_source` ∈ `["code_block", "audit_marker", "inline_linenum", "github_url", "rel_path", null]`.
+
+### Phân loại findings theo code availability
+
+| Category | Count | Cách xử lý |
+|----------|-------|-----------|
+| ` ```solidity``` ` block inline | 1706 (50%) | Extract trực tiếp |
+| GitHub URL permalink | 1116 (33%) | **WebFetch** blob URL → extract lines từ `#L42-L58` |
+| Relative path (`File.sol#L123`) | 133 (4%) | Reconstruct URL từ `source_link` metadata → WebFetch |
+| Inline marker (`//@audit`, `@>`) | 49 (1%) | Extract ± 3 dòng, detokenize |
+| Prose only | 306 (9%) | `sections.code = null` |
+
+**Fetch GitHub code**: dùng `WebFetch(github_blob_url, "extract Solidity code at lines L42-L58")` — không cần GITHUB_TOKEN. Fallback: `sections.code = null` nếu repo xóa/private.
+
+**Relative path reconstruct**:
+```
+source_link: https://code4rena.com/reports/2022-09-biconomy
+→ repo:       https://github.com/code-423n4/2022-09-biconomy
+→ full URL:   https://github.com/code-423n4/2022-09-biconomy/blob/main/{rel_path}
+```
+Thử branch `main` → fallback `master` → skip nếu cả 2 fail.
+
+### Normalize code
+
+Trước khi ghi vào `sections.code`, normalize để code-to-code matching độc lập với variable names:
+```python
+# Thay tất cả user-defined identifiers bằng _VAR, giữ Solidity keywords/types
+re.sub(r"\b[a-zA-Z_][a-zA-Z0-9_]*\b",
+       lambda m: m.group(0) if m.group(0) in SOLIDITY_KEYWORDS else "_VAR", code)
+```
+
+### Checkpoint & Resume
+
+`rag_sections_cache.json` ghi sau mỗi batch. Resume logic:
+
+```python
+done_slugs     = {f["slug"] for f in cache.get("findings", [])}   # đã xử lý (kể cả failed)
+failed_fetches = set(cache.get("fetch_errors", {}).keys())        # GitHub fetch fail → KHÔNG retry
+remaining      = [m for m in all_metas if m["slug"] not in done_slugs]
+```
+
+**Nguyên tắc**: slug trong `done_slugs` → skip hoàn toàn. URL trong `fetch_errors` → skip GitHub fetch, `sections.code = null`. Không bao giờ re-fetch URL đã fail.
+
+Sau mỗi batch ghi vào cache: tăng `_meta.processed_count`, cập nhật `_meta.last_processed_slug`.
+
+### Trạng thái hiện tại
+
+- **Phase 1 (vul)**: Chưa bắt đầu
+- **Phase 2 (code)**: Chưa bắt đầu
+- **Phase 3 (op + inv)**: Để sau Phase 1+2 validate xong
+- **Sample files**: `backend/scripts/rag/samples/` — 7 files × 10 findings mỗi firm để kiểm tra
+
+### Key files RAG
+
+```
+backend/
+  data/rag_db/
+    chroma/                     ← ChromaDB (collection solodit_findings hiện tại)
+    parents.json                ← 3366 full-text findings (key: slug)
+  scripts/rag/
+    samples/                    ← 7 sample files (10 findings/firm) để phân tích
+    rag_sections_template.json  ← Template output format
+    rag_sections_cache.json     ← Output của migration (tạo dần)
+    inject_custom_findings.py   ← Inject self-crafted entries vào ChromaDB
+    self_crafted_35.json        ← 4 self-crafted entries cho contest 35 GT functions
+docs/good-techniques/
+  rag-4section-architecture.md  ← Thiết kế kiến trúc
+  rag-migration-plan.md         ← Kế hoạch migration chi tiết
+  code-normalize-rag.md         ← CODE normalize track design
+```
+
+---
+
 ## Key Patterns
 
 - **Task tracking**: Long-running operations create a `Task` object with progress state. Frontend polls the task endpoint.

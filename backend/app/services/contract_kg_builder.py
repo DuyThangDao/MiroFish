@@ -616,53 +616,32 @@ class ContractKGBuilder:
     @staticmethod
     def _generate_structural_queries(fn_name: str, fn_body: str,
                                       llm_client: Optional[Any] = None) -> list:
-        """V5: structural vulnerability property queries. Returns [] if NONE or empty."""
+        """V5b: auditor-vocabulary free-form ST queries. Returns [] if NONE or empty."""
         if not fn_body or not fn_body.strip() or not llm_client:
             return []
-        # # V5b: auditor-vocabulary free-form (worse in practice — replaced by V5)
-        # prompt = (
-        #     "You are a smart contract security auditor.\n\n"
-        #     f"Function: {fn_name}()\n"
-        #     f"Body:\n{fn_body.strip()[:2000]}\n\n"
-        #     "Generate search queries to find historical audit findings for code with similar patterns.\n"
-        #     "Write each query in the language of audit finding titles — "
-        #     "describing what goes wrong, not what the code does mechanically.\n\n"
-        #     "Good examples:\n"
-        #     "  \"spot price manipulation inflates vault deposit weight\"\n"
-        #     "  \"reserve not updated after liquidity removal causes accounting error\"\n"
-        #     "  \"oracle precision loss allows undercollateralized borrow\"\n"
-        #     "  \"reward weight diluted via custom synth flash loan\"\n\n"
-        #     "Bad examples (too mechanical — OP track already covers these):\n"
-        #     "  \"uint256 arithmetic overflow in unchecked block\"\n"
-        #     "  \"external call before state update\"\n\n"
-        #     "Format: one query per line, max 12 words each, max 4 queries.\n"
-        #     "If nothing notable beyond mechanical operations, output EXACTLY NONE.\n"
-        #     "Output ONLY queries or NONE."
-        # )
         prompt = (
             "You are a smart contract security auditor.\n\n"
             f"Function: {fn_name}()\n"
             f"Body:\n{fn_body.strip()[:2000]}\n\n"
-            "Analyze this function for structural vulnerability properties.\n"
-            "For each property present, write ONE search query describing what goes wrong —\n"
-            "using the language of audit report finding titles.\n\n"
-            "Check ONLY for properties actually visible in this code:\n"
-            "- State written to mapping/storage WITHOUT reading/checking existing value first\n"
-            "- State mutation that executes unconditionally regardless of input amount (zero, max)\n"
-            "- Arithmetic where intermediate result can underflow/overflow for specific input range\n"
-            "- External call without slippage/deadline/minOutput protection\n"
-            "- Missing access control: state-changing function callable by anyone\n"
-            "- Token balance assumption that breaks with fee-on-transfer tokens\n"
-            "- Array/index access that can exceed bounds\n\n"
-            "Format: one query per line, max 15 words each.\n"
-            "Use phrasing like audit finding titles: \"X causes Y\", \"missing Z allows W\".\n"
-            "If NO structural vulnerability properties are found, output EXACTLY the word NONE and nothing else.\n"
+            "Generate search queries to find historical audit findings for code with similar patterns.\n"
+            "Write each query in the language of audit finding titles — "
+            "describing what goes wrong, not what the code does mechanically.\n\n"
+            "Good examples:\n"
+            "  \"spot price manipulation inflates vault deposit weight\"\n"
+            "  \"reserve not updated after liquidity removal causes accounting error\"\n"
+            "  \"oracle precision loss allows undercollateralized borrow\"\n"
+            "  \"reward weight diluted via custom synth flash loan\"\n\n"
+            "Bad examples (too mechanical — OP track already covers these):\n"
+            "  \"uint256 arithmetic overflow in unchecked block\"\n"
+            "  \"external call before state update\"\n\n"
+            "Format: one query per line, max 12 words each, max 4 queries.\n"
+            "If nothing notable beyond mechanical operations, output EXACTLY NONE.\n"
             "Output ONLY queries or NONE."
         )
         try:
             raw = llm_client.chat(
                 [{"role": "user", "content": prompt}],
-                temperature=0, max_tokens=1024,
+                temperature=0, max_tokens=2048,
             ).strip()
             if not raw or raw.upper() == "NONE":
                 return []
@@ -670,6 +649,59 @@ class ContractKGBuilder:
                     for ln in raw.split('\n') if ln.strip()]
         except Exception:
             return []
+
+    @staticmethod
+    def _generate_hist_inv(fn_name: str, fn_body: str,
+                           inv_text: str,
+                           llm_client: Optional[Any] = None) -> str:
+        """
+        Synthesize 1 real invariant statement for fn_name from fn_body + ALL HIST titles.
+
+        inv_text: multi-line string of "[Title] [IMPACT]" entries.
+        Returns empty string on failure or if no patterns apply.
+        Uses max_tokens=4096 (required for thinking models).
+        """
+        if not fn_body or not fn_body.strip() or not inv_text.strip() or not llm_client:
+            return ""
+        prompt = (
+            "You are a senior smart contract security auditor.\n\n"
+            "TASK: Given the function code and historical vulnerability patterns from similar DeFi "
+            "functions, synthesize ONE security invariant that must hold for this function.\n\n"
+            f"Function: {fn_name}()\n"
+            f"Code:\n```solidity\n{fn_body.strip()[:2000]}\n```\n\n"
+            "Historical HIGH-severity findings from similar DeFi functions "
+            "(same concept, any language/protocol):\n"
+            f"{inv_text.strip()}\n\n"
+            "Instructions:\n"
+            "- FIRST, scan the function body for these specific vulnerability patterns:\n"
+            "    * Explicit narrowing casts: uint128(x), uint64(x), uint32(x) where x comes from\n"
+            "      an external call or computation returning a larger type (uint256) — if found,\n"
+            "      the invariant must reference the exact cast expression and the source function\n"
+            "    * Subtraction of two fee/growth/accumulator uint256 values outside an unchecked\n"
+            "      block — if found, the invariant must state it must be unchecked\n"
+            "    * State variable written without first reading/validating the prior value\n"
+            "    * External call result stored in a smaller integer type without bounds check\n"
+            "- If a specific pattern is found, write the invariant about THAT OPERATION —\n"
+            "  reference the exact variable names and function calls involved\n"
+            "- Use the historical findings as hints for what class of bug to look for\n"
+            "- Write an invariant that, if violated, would lead to fund loss or DoS\n\n"
+            f"Output format: ONE invariant starting with \"{fn_name}() must ...\"\n"
+            "  - Reference actual variable names and specific function calls from the code\n"
+            "  - Max 2 sentences\n"
+            "  - Be specific — name the exact cast/subtraction/call, not just 'must not overflow'\n"
+            "  - DO NOT say 'based on historical findings'\n\n"
+            "Output ONLY the invariant text. Do not output NONE."
+        )
+        try:
+            raw = llm_client.chat(
+                [{"role": "user", "content": prompt}],
+                temperature=0, max_tokens=4096, strip_think=True,
+            ).strip()
+            if not raw or raw.upper().startswith("NONE"):
+                return ""
+            return raw if "must" in raw.lower() else ""
+        except Exception:
+            return ""
 
     @staticmethod
     def _extract_invariant_from_finding(title: str, content: str,
@@ -720,7 +752,7 @@ class ContractKGBuilder:
         Filter: skip chỉ khi fn_name là trivial exact getter {'get','set','is','has'}
         VÀ không có external calls. Có ext_markers → luôn process.
         """
-        from app.services.contract_hist_inv_cache import HistInvCache as _Cache
+        from app.services.contract_hist_inv_cache import HistInvCache as _Cache, HistInvStmtsCache as _StmtsCache
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
         _TRIVIAL_EXACT = frozenset({'get', 'set', 'is', 'has'})
@@ -728,6 +760,12 @@ class ContractKGBuilder:
 
         # Resolve client list: llm_clients preferred, fallback to wrapped llm_client
         _clients: list = llm_clients or ([llm_client] if llm_client else [])
+
+        # HIST-INV stmts cache — separate file, same dir as hist_inv_cache.json
+        stmts_cache: Optional[Any] = None
+        if cache is not None:
+            _stmts_path = _StmtsCache.stmts_path_from_hist_cache_path(str(cache.path))
+            stmts_cache = _StmtsCache(_stmts_path)
 
         try:
             from app.services.cyber_session_orchestrator import _get_rag_retriever
@@ -764,7 +802,7 @@ class ContractKGBuilder:
             if fn_name.lower() in _TRIVIAL_EXACT and not ext_markers:
                 return entry, ""
 
-            cache_key = _Cache.entry_key(contract_name, entry.strip()) if cache else None
+            cache_key = _Cache.entry_key(contract_name, fn_name) if cache else None
             if cache and cache_key:
                 cached = cache.get(cache_key)
                 if cached is not None:
@@ -827,7 +865,18 @@ class ContractKGBuilder:
             combined = "\n".join(inv_texts)
             queries_str = "; ".join(queries[:5])
             if cache and cache_key:
-                cache.set(cache_key, queries_str, combined, "", best_score, entry.strip())
+                cache.set(cache_key, contract_name, fn_name, queries_str, combined, "", best_score,
+                          entry.strip())
+                # Generate hist_inv → save to separate HistInvStmtsCache
+                if combined.strip() and stmts_cache is not None:
+                    hist_inv = ContractKGBuilder._generate_hist_inv(
+                        fn_name=fn_name,
+                        fn_body=fn_body,
+                        inv_text=combined,
+                        llm_client=client,
+                    )
+                    if hist_inv:
+                        stmts_cache.set(cache_key, contract_name, fn_name, hist_inv)
 
             _log_entry({"fn": fn_name, "contract": contract_name,
                         "cg_entry": entry.strip(), "queries": queries,
@@ -915,6 +964,8 @@ class ContractKGBuilder:
                     parts.append(f"[{contract_name}]\n" + "\n".join(enriched))
                 if cache:
                     cache.save()
+                if stmts_cache is not None:
+                    stmts_cache.save()
             result = ("CALL GRAPH:\n" + "\n\n".join(parts) + "\n") if parts else ""
             _save_detail_log()
             return result
@@ -922,6 +973,8 @@ class ContractKGBuilder:
         enriched = _enrich("", ContractKGBuilder._build_call_graph_entries(source_code, known_functions), section_src=source_code)
         if cache:
             cache.save()
+        if stmts_cache is not None:
+            stmts_cache.save()
         _save_detail_log()
         return ("CALL GRAPH:\n" + "\n".join(enriched) + "\n") if enriched else ""
 
@@ -1041,15 +1094,33 @@ class ContractKGBuilder:
         lines.append(f"Type: {entity.contract_type} | Compiler: {entity.compiler_version}")
         lines.append("")
 
-        # Inject full flattened source — no truncation, no snippets.
-        # DeFi contracts are small (typically 10-50k tokens); modern models support 128k-1M+ tokens.
-        # Agents must see complete function bodies to detect CEI violations, tail-of-function bugs, etc.
+        # Build call graph first (before source) so agents read the structural map +
+        # HIST annotations before diving into thousands of lines of source code.
+        call_graph = ""
+        events_and_rules = ""
         if entity.source_code:
-            lines.append("=== CONTRACT SOURCE ===")
-            lines.append(entity.source_code)
+            all_fn_names = [f.name for f in entity.functions]
+            events_and_rules = ContractKGBuilder._extract_events_and_rules(entity.source_code)
+            if self._hist_inv_cache_path:
+                from app.services.contract_hist_inv_cache import HistInvCache
+                _cache = HistInvCache(self._hist_inv_cache_path)
+                call_graph = ContractKGBuilder._build_call_graph_with_hist_inv(
+                    entity.source_code, all_fn_names, cache=_cache,
+                    score_threshold=float(os.getenv("HIST_INV_SCORE_THRESHOLD", "0.65")),
+                    llm_clients=self._llm_clients,
+                )
+                _cache.save()
+            else:
+                call_graph = ContractKGBuilder._build_call_graph_summary(
+                    entity.source_code, all_fn_names
+                )
+
+        # 1. Call graph + HIST — structural map agents read first to orient themselves
+        if call_graph:
+            lines.append(call_graph)
             lines.append("")
 
-        # Critical state variables
+        # 2. Critical state variables
         critical_vars = [v for v in entity.state_vars if v.is_critical]
         if critical_vars:
             lines.append("CRITICAL STATE VARIABLES:")
@@ -1058,7 +1129,7 @@ class ContractKGBuilder:
                 lines.append(f"  - {v.name}: {v.var_type}{modified}")
             lines.append("")
 
-        # Risk signals section
+        # 3. Risk signals
         risk = entity.risk_summary()
         lines.append("RISK SIGNALS:")
 
@@ -1110,7 +1181,7 @@ class ContractKGBuilder:
         if entity.external_dependencies:
             lines.append(f"EXTERNAL DEPENDENCIES: {', '.join(entity.external_dependencies[:10])}")
 
-        # Tầng 3: safety patterns — explicit ground-truth about protections present
+        # Safety patterns
         if entity.source_code:
             safety = ContractKGBuilder._detect_safety_patterns(entity.source_code)
             if safety:
@@ -1119,31 +1190,20 @@ class ContractKGBuilder:
                     lines.append(f"  • {s}")
                 lines.append("")
 
+        # Events and business rules
+        if entity.source_code and events_and_rules:
+            lines.append(events_and_rules)
+
+        lines.append("")
         lines.append("NOTE: All agents must reference function names and state variables above when reporting findings.")
         lines.append("      Cite specific evidence from this context or contract source code.")
 
-        # Inject events + business rules + call graph from source (after parse — no contamination)
+        # 4. Full source code — agents read after seeing the structural map above
         if entity.source_code:
-            all_fn_names = [f.name for f in entity.functions]
-            events_and_rules = ContractKGBuilder._extract_events_and_rules(entity.source_code)
-            if events_and_rules:
-                lines.append("")
-                lines.append(events_and_rules)
-            if self._hist_inv_cache_path:
-                from app.services.contract_hist_inv_cache import HistInvCache
-                _cache = HistInvCache(self._hist_inv_cache_path)
-                call_graph = ContractKGBuilder._build_call_graph_with_hist_inv(
-                    entity.source_code, all_fn_names, cache=_cache,
-                    score_threshold=float(os.getenv("HIST_INV_SCORE_THRESHOLD", "0.65")),
-                    llm_clients=self._llm_clients,
-                )
-                _cache.save()
-            else:
-                call_graph = ContractKGBuilder._build_call_graph_summary(
-                    entity.source_code, all_fn_names
-                )
-            if call_graph:
-                lines.append(call_graph)
+            lines.append("")
+            lines.append("=== CONTRACT SOURCE ===")
+            lines.append(entity.source_code)
+            lines.append("")
 
         return "\n".join(lines)
 

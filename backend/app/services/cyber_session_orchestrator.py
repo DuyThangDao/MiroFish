@@ -631,6 +631,61 @@ def _filter_source_to_primary(
     return filtered
 
 
+def _annotate_source_with_hist_inv(source: str, inv_map: dict) -> str:
+    """
+    Inject `// [HIST-INV]: ...` comment directly above each function definition
+    that has a hist_inv entry in inv_map.
+
+    inv_map: (contract_name, fn_name) -> hist_inv string
+             (from HistInvCache.get_hist_inv_map())
+
+    Uses file section headers in network_summary format to detect current contract:
+      "// ─── ContractName.sol ─── "
+    Falls back to matching by fn_name only across all contracts if no header found.
+    """
+    if not inv_map:
+        return source
+
+    import textwrap as _tw
+
+    fn_pattern = re.compile(r'^([ \t]*)function\s+(\w+)\s*[\(\{]')
+    section_pattern = re.compile(r'^// ─── ([\w]+)\.sol', re.MULTILINE)
+
+    lines = source.split('\n')
+    result = []
+    current_contract = ""
+    injected_count = 0
+
+    for line in lines:
+        sec_m = section_pattern.match(line)
+        if sec_m:
+            current_contract = sec_m.group(1)
+
+        fn_m = fn_pattern.match(line)
+        if fn_m:
+            indent = fn_m.group(1)
+            fn_name = fn_m.group(2)
+            inv = inv_map.get((current_contract, fn_name), "")
+            if not inv and not current_contract:
+                inv = next((v for (c, f), v in inv_map.items() if f == fn_name), "")
+            if inv:
+                prefix1 = f"{indent}// [HIST-INV]: "
+                prefixN = f"{indent}//             "
+                wrapped = _tw.wrap(
+                    inv, width=96,
+                    initial_indent=prefix1,
+                    subsequent_indent=prefixN,
+                )
+                result.extend(wrapped)
+                injected_count += 1
+
+        result.append(line)
+
+    if injected_count:
+        logger.info(f"[hist_inv] Injected {injected_count} [HIST-INV] comments into source")
+    return '\n'.join(result)
+
+
 # Agents in the standard flow that should receive filtered source (not full network_summary)
 _FILTERED_SOURCE_AGENTS: set[str] = {"clmm_specialist"}
 
@@ -1652,6 +1707,11 @@ class CyberSessionOrchestrator:
         extra_body = None
         if stage == 2 and os.environ.get("STAGE2_DISABLE_THINKING", "").lower() in ("1", "true", "yes"):
             extra_body = {"thinking_config": {"thinking_budget": 0}}
+        elif stage == 1:
+            _tl = os.environ.get("V2_R1_THINKING_LEVEL", "").upper()
+            if _tl in ("MINIMAL", "LOW", "MEDIUM", "HIGH"):
+                extra_body = {"google": {"thinking_config": {"thinking_level": _tl}}}
+                max_tok = max(max_tok, 16384)
 
         return llm.chat(messages, temperature=0.7, max_tokens=max_tok, strip_think=strip_think,
                         extra_body=extra_body)

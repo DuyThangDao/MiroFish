@@ -528,6 +528,31 @@ def run_audit(
             _v2_session_summary = contract_summary
             logger.info("\n[STEP 3/4] Running 10-round audit session (Phase A → B → C)...")
 
+        # ── Step 3.5: Inject HIST-INV inline annotations into session summary ────
+        _hist_cache_path = os.path.join(
+            os.path.dirname(os.path.dirname(output_dir)), "hist_inv_cache.json"
+        )
+        if os.path.exists(_hist_cache_path):
+            try:
+                from app.services.contract_hist_inv_cache import HistInvStmtsCache as _HISC
+                from app.services.cyber_session_orchestrator import _annotate_source_with_hist_inv
+                _stmts_path = _HISC.stmts_path_from_hist_cache_path(_hist_cache_path)
+                _hc = _HISC(_stmts_path)
+                _inv_map = _hc.get_hist_inv_map()
+                if _inv_map:
+                    _annotated = _annotate_source_with_hist_inv(_v2_session_summary, _inv_map)
+                    if len(_annotated) > len(_v2_session_summary):
+                        _v2_session_summary = _annotated
+                        logger.info(
+                            f"[hist_inv] Annotated session summary: "
+                            f"{len(_annotated):,} chars "
+                            f"({len(_inv_map)} [HIST-INV] injected)"
+                        )
+                else:
+                    logger.info("[hist_inv] hist_inv_map empty — no hist_inv entries in cache yet")
+            except Exception as _he:
+                logger.warning(f"[hist_inv] Annotation failed (non-fatal): {_he}")
+
         task_id = orchestrator.run_session_async(
             graph_id=graph_id,
             network_summary=_v2_session_summary,

@@ -1,0 +1,145 @@
+{
+  "_meta": {
+    "version": "1.0",
+    "description": "RAG 4-section structured findings. Each entry maps to one parent finding.",
+    "total_findings": 3366,
+    "processed_count": 0,
+    "last_processed_slug": null,
+    "collections": {
+      "sections.vul":  "solodit_vul  — ST queries (vulnerability semantic)",
+      "sections.code": "solodit_code — CODE queries (normalized Solidity pattern)",
+      "sections.op":   "solodit_op   — OP queries (mechanical operations)",
+      "sections.inv":  "solodit_inv  — invariant synthesis"
+    },
+    "status_values": {
+      "done":         "Tất cả sections đã extract/generate thành công",
+      "done_no_code": "Xong nhưng sections.code = null (prose_only hoặc fetch fail)",
+      "failed":       "Lỗi không recover được (exception, timeout)"
+    },
+    "code_source_values": ["code_block", "audit_marker", "inline_linenum", "github_url", "rel_path", null],
+    "notes": [
+      "sections.code luôn là normalized form (_VAR thay identifiers)",
+      "full_text KHÔNG lưu ở đây — đọc từ parents.json theo slug khi cần",
+      "github fetch dùng WebFetch(blob_url) — không cần GITHUB_TOKEN",
+      "rel_path reconstruct: source_link → github.com/code-423n4/{contest} → try main, fallback master"
+    ]
+  },
+  "fetch_errors": {
+    "_comment": "Slugs mà GitHub fetch thất bại — để skip lần sau, không retry vô ích",
+    "h-06-bringunusedethbackintogiantpool-example": {
+      "url": "https://github.com/code-423n4/2022-11-stakehouse/blob/main/contracts/...",
+      "reason": "404 — repo deleted",
+      "attempted_at": "2026-06-08"
+    }
+  },
+  "findings": [
+    {
+      "_comment": "Case 1: api_excerpt với code block đầy đủ (Sherlock/Cyfrin/C4 api)",
+      "slug": "h-1-pool-managers-can-steal-all-other-pools-pending-deposits-from-glob",
+      "status": "done",
+      "title": "Pool managers can steal all other pools' pending deposits from globalEscrow",
+      "firm": "Sherlock",
+      "protocol": "Centrifuge Protocol V3",
+      "impact": "HIGH",
+      "source_link": "https://github.com/sherlock-audit/2025-10-centrifuge-protocol-v3-1-audit-judging/issues/641",
+      "content_source": "api_excerpt",
+      "code_source": "code_block",
+      "sections": {
+        "vul": "The request manager system allows attackers to steal all pending user deposits from globalEscrow. An attacker can create fraudulent deposit requests with a malicious request manager, then swap to AsyncRequestManager before triggering approvedDeposits callbacks.",
+        "code": "function _VAR(_VAR _VAR, _VAR _VAR, _VAR _VAR, bytes memory _VAR, address _VAR, bool _VAR) external payable {\n    _VAR _VAR = _VAR[_VAR];\n    require(address(_VAR) != address(0));\n    _VAR(_VAR, _VAR, _VAR, _VAR, _VAR, _VAR);\n}",
+        "op": "read requestManager[poolId] storage slot; require address not zero; delegate external call to manager with poolId scId assetId payload refund unpaid args",
+        "inv": "requestCallback() must record the requestManager address at request time and verify the same address handles the callback, preventing manager swap attacks between request creation and fulfillment"
+      }
+    },
+    {
+      "_comment": "Case 2: scraped với //@audit marker",
+      "slug": "h-01-avax-assigned-high-water-is-updated-incorrectly-code4rena-gogopool",
+      "status": "done",
+      "title": "[H-01] AVAX Assigned High Water is updated incorrectly",
+      "firm": "Code4rena",
+      "protocol": "GoGoPool",
+      "impact": "HIGH",
+      "source_link": "https://code4rena.com/reports/2022-12-gogopool",
+      "content_source": "scraped",
+      "code_source": "audit_marker",
+      "sections": {
+        "vul": "Node operators can manipulate the assigned high water to be higher than the actual maximum. In recordStakingStart(), AVAXAssignedHighWater is increased by avaxLiquidStakerAmt instead of being set to getAVAXAssigned(owner). This allows an operator to inflate their reported high water mark beyond their true peak assignment.",
+        "code": "if (_VAR._VAR(_VAR) < _VAR._VAR(_VAR)) {\n    _VAR._VAR(_VAR, _VAR);\n}",
+        "op": "read AVAXAssignedHighWater via getAVAXAssignedHighWater(owner); compare with getAVAXAssigned(owner); if less: call increaseAVAXAssignedHighWater(owner, avaxLiquidStakerAmt)",
+        "inv": "recordStakingStart() must set AVAXAssignedHighWater to getAVAXAssigned(owner) when the current assigned value exceeds the high water mark, not increment it by the per-minipool amount"
+      }
+    },
+    {
+      "_comment": "Case 3: github_url_only — fetch thành công",
+      "slug": "h-06-bringunusedethbackintogiantpool-can-cause-stuck-ether-funds",
+      "status": "done_no_code",
+      "title": "[H-06] BringUnusedETHBackIntoGiantPool can cause stuck ether funds in Giant Pool",
+      "firm": "Code4rena",
+      "protocol": "Stakehouse Protocol",
+      "impact": "HIGH",
+      "source_link": "https://code4rena.com/reports/2022-11-stakehouse",
+      "content_source": "scraped",
+      "code_source": "github_url",
+      "sections": {
+        "vul": "withdrawUnusedETHToGiantPool withdraws ETH from the vault when staking has not commenced, but does not update the idleETH variable. Since idleETH is only updated on deposit/withdrawal, the recovered ETH becomes permanently inaccessible.",
+        "code": null,
+        "op": "call vault.withdrawUnusedETHToGiantPool(); transfer ETH to giant pool balance; skip idleETH state update",
+        "inv": "bringUnusedETHBackIntoGiantPool() must increment idleETH by the amount recovered from the vault to keep accounting consistent with actual ETH balance"
+      }
+    },
+    {
+      "_comment": "Case 4: prose_only — không có code, không có link",
+      "slug": "vault-price-manipulation-allows-yield-manager-to-mint-tokens-spearbit",
+      "status": "done_no_code",
+      "title": "Vault price manipulation allows yield manager to mint tokens",
+      "firm": "Spearbit",
+      "protocol": "Aragon Generic Money",
+      "impact": "HIGH",
+      "source_link": "",
+      "content_source": "api_excerpt",
+      "code_source": null,
+      "sections": {
+        "vul": "The yield manager mints additional tokens when backing asset value exceeds total shares. The value calculation relies on vault_additionalOwnedAssets() which is manipulable. An attacker can inflate perceived vault value, causing the protocol to erroneously mint shares during distributeYield calls.",
+        "code": null,
+        "op": "call vault_additionalOwnedAssets() to read backing value; compare with total shares; if surplus: mint new shares via distributeYield",
+        "inv": "distributeYield() must source backing asset value from a manipulation-resistant oracle rather than a spot price function before authorizing token minting"
+      }
+    },
+    {
+      "_comment": "Case 5: self-crafted với @> markers",
+      "slug": "custom_35_h01_clp_burn_liquidity_cast_theft",
+      "status": "done",
+      "title": "Unsafe narrowing cast in concentrated liquidity AMM burn() silently truncates liquidity delta",
+      "firm": "self-crafted",
+      "protocol": "Concentrated Liquidity AMM",
+      "impact": "HIGH",
+      "source_link": "",
+      "content_source": "self-crafted",
+      "code_source": "audit_marker",
+      "sections": {
+        "vul": "The burn() function casts uint256 fee values to uint128 without overflow check inside an unchecked block. When feesAmount0 or feesAmount1 exceeds type(uint128).max, the cast silently truncates the value. The reserve is decremented by the truncated amount while the full amount is transferred out.",
+        "code": "_VAR -= uint128(_VAR);\n_VAR -= uint128(_VAR);",
+        "op": "cast uint256 feesAmount0 to uint128; subtract from reserveBalance0 storage slot; cast uint256 feesAmount1 to uint128; subtract from reserveBalance1; transfer full amount0 amount1 to recipient",
+        "inv": "burn() must verify feesAmount0 <= type(uint128).max and feesAmount1 <= type(uint128).max before casting, or use SafeCast.toUint128() to revert on overflow"
+      }
+    },
+    {
+      "_comment": "Case 6: github_url_only — fetch thất bại, sections.code = null",
+      "slug": "h-06-some-finding-repo-deleted",
+      "status": "done_no_code",
+      "title": "[H-06] Some finding where GitHub repo was deleted",
+      "firm": "Code4rena",
+      "protocol": "SomeProtocol",
+      "impact": "HIGH",
+      "source_link": "https://code4rena.com/reports/2022-05-someprotocol",
+      "content_source": "scraped",
+      "code_source": "github_url",
+      "sections": {
+        "vul": "...",
+        "code": null,
+        "op": "...",
+        "inv": "..."
+      }
+    }
+  ]
+}

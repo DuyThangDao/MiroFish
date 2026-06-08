@@ -1375,6 +1375,12 @@ STEP 1 — LIST INVARIANTS:
   Read the full contract source and list 3–6 PROTOCOL-SPECIFIC invariants.
   Format: INV-1: <invariant statement>, INV-2: ..., ...
 
+  ⚠ PRIORITY — Functions annotated with `// [HIST-INV]:` in the source have been
+  flagged by historical audit analysis as matching past HIGH-severity vulnerability patterns.
+  For EACH function with a `[HIST-INV]` comment:
+    - Include that invariant (or a restatement in your own words) as one of your INV-N entries
+    - In STEP 2, explicitly check whether this contract's code violates it
+
   Invariants MUST be strictly derived from the code, require() statements, or NatSpec.
   Do NOT invent business rules or assume features not explicitly present in the code.
   (Wrong example: "contract must have a pause() function" if no pause mechanism exists.)
