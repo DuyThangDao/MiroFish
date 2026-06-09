@@ -309,7 +309,8 @@ Template tham khảo: `backend/scripts/rag/rag_sections_template.json`
 - `failed` — exception không recover được
 
 `sections.code` = `null` khi không có code (prose_only hoặc fetch fail).
-`code_source` ∈ `["code_block", "audit_marker", "inline_linenum", "github_url", "rel_path", null]`.
+`code_source` ∈ `["code_block", "audit_marker", "inline_linenum", "inline_sol", "github_url", "rel_path", null]`.
+- `inline_sol` — Solidity type declaration/assignment embedded in prose (no fences, no line numbers)
 
 ### Phân loại findings theo code availability
 
