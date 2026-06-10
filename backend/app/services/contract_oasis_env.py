@@ -1375,12 +1375,6 @@ STEP 1 — LIST INVARIANTS:
   Read the full contract source and list 3–6 PROTOCOL-SPECIFIC invariants.
   Format: INV-1: <invariant statement>, INV-2: ..., ...
 
-  ⚠ PRIORITY — Functions annotated with `// [HIST-INV]:` in the source have been
-  flagged by historical audit analysis as matching past HIGH-severity vulnerability patterns.
-  For EACH function with a `[HIST-INV]` comment:
-    - Include that invariant (or a restatement in your own words) as one of your INV-N entries
-    - In STEP 2, explicitly check whether this contract's code violates it
-
   Invariants MUST be strictly derived from the code, require() statements, or NatSpec.
   Do NOT invent business rules or assume features not explicitly present in the code.
   (Wrong example: "contract must have a pause() function" if no pause mechanism exists.)
@@ -1397,6 +1391,24 @@ STEP 1 — LIST INVARIANTS:
   - Read require() messages — each require is an invariant candidate
   - Look for state variables named "total", "global", "cumulative" — they usually must equal sum of sub-values
   - Look for functions named "distribute", "reward", "migrate", "sync" — they often have ordering invariants"""
+
+_INDEPENDENT_TRACKS_BLOCK = (
+    "\nINDEPENDENT REASONING TRACKS — run these regardless of HIST-INV annotations:\n\n"
+    "TRACK A — ADVERSARIAL INPUTS:\n"
+    "  For the 2-3 most complex functions: test numeric bounds (0, max_uint),\n"
+    "  address(0), empty arrays, and cross-function call sequences.\n"
+    "  Any input that corrupts state without reverting = FINDING candidate.\n\n"
+    "TRACK B/C/D: applied per your domain expertise (see your system prompt).\n"
+)
+
+_HIST_INV_CHECK_BLOCK = """\
+HIST-INV CHECK — run this BEFORE writing any FINDING:
+  Scan the source for `// [HIST-INV]:` comments (historical HIGH-severity pattern matches).
+  For EACH annotated function, output one verdict line:
+    HIST-CHECK [<FunctionName>]: MATCH | MITIGATED | UNCLEAR — <one sentence citing exact code>
+  If MATCH → this is a confirmed vulnerability; write a FINDING below.
+  If no annotations exist → write: HIST-CHECK: none
+"""
 
 
 def build_round1_prompt(
@@ -1491,7 +1503,9 @@ PROTOCOL INVARIANT ANALYSIS — mandatory before writing any FINDING:
 
 {step1_section}
 
-{cq_section2}{hint_section}STEP 2 — FIND VIOLATIONS:
+{cq_section2}{hint_section}{_INDEPENDENT_TRACKS_BLOCK}
+STEP 2 — FIND VIOLATIONS:
+{_HIST_INV_CHECK_BLOCK}
   For each invariant listed above, ask:
   Q1: Is there any execution path (sequence of function calls) that can make this invariant false?
   Q2: If yes — can an attacker control that path? Or does it only occur due to a logic bug?

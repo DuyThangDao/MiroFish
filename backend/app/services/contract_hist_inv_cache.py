@@ -57,7 +57,8 @@ class HistInvCache:
         return self._data.get(key)
 
     def set(self, key: str, contract_name: str, fn_name: str, rag_query: str,
-            inv_text: str, rag_title: str, rag_score: float, cg_entry: str) -> None:
+            inv_text: str, rag_title: str, rag_score: float, cg_entry: str,
+            slugs: list = None) -> None:
         self._data[key] = {
             "contract_name": contract_name,
             "fn_name": fn_name,
@@ -66,8 +67,18 @@ class HistInvCache:
             "rag_title": rag_title,
             "rag_score": rag_score,
             "cg_entry": cg_entry,
+            "slugs": slugs or [],
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
         }
+
+    def get_matched_slugs(self) -> dict:
+        """Returns {(contract_name, fn_name): [slug, ...]}. Only entries with slugs."""
+        result = {}
+        for v in self._data.values():
+            slugs = v.get("slugs") or []
+            if slugs:
+                result[(v.get("contract_name", ""), v.get("fn_name", ""))] = slugs
+        return result
 
     def delete_by_fn(self, fn_name: str) -> int:
         to_delete = [k for k, v in self._data.items()

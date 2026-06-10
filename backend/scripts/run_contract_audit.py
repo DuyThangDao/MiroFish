@@ -529,16 +529,43 @@ def run_audit(
             logger.info("\n[STEP 3/4] Running 10-round audit session (Phase A → B → C)...")
 
         # ── Step 3.5: Inject HIST-INV inline annotations into session summary ────
+        # Phase 1: slug-based lookup from rag_sections_cache.json (replaces HistInvStmtsCache)
         _hist_cache_path = os.path.join(
             os.path.dirname(os.path.dirname(output_dir)), "hist_inv_cache.json"
         )
         if os.path.exists(_hist_cache_path):
             try:
-                from app.services.contract_hist_inv_cache import HistInvStmtsCache as _HISC
+                import json as _json
+                from app.services.contract_hist_inv_cache import HistInvCache as _HIC
                 from app.services.cyber_session_orchestrator import _annotate_source_with_hist_inv
-                _stmts_path = _HISC.stmts_path_from_hist_cache_path(_hist_cache_path)
-                _hc = _HISC(_stmts_path)
-                _inv_map = _hc.get_hist_inv_map()
+
+                _RAG_CACHE_PATH = os.path.join(
+                    os.path.dirname(__file__), "rag", "rag_sections_cache.json"
+                )
+
+                def _build_inv_map_from_slugs(hist_cache, inv_lookup: dict) -> dict:
+                    inv_map = {}
+                    for (contract, fn), slugs in hist_cache.get_matched_slugs().items():
+                        inv_lines = []
+                        for slug in slugs[:2]:
+                            lines = inv_lookup.get(slug) or []
+                            inv_lines.extend(lines[:2])
+                        if inv_lines:
+                            inv_map[(contract, fn)] = "\n".join(inv_lines[:3])
+                    return inv_map
+
+                _inv_lookup = {}
+                try:
+                    _rc = _json.load(open(_RAG_CACHE_PATH, encoding="utf-8"))
+                    _inv_lookup = {
+                        f["slug"]: (f.get("sections") or {}).get("inv") or []
+                        for f in _rc.get("findings", [])
+                    }
+                except Exception as _rle:
+                    logger.warning(f"[hist_inv] Could not load rag_sections_cache: {_rle}")
+
+                _hc = _HIC(_hist_cache_path)
+                _inv_map = _build_inv_map_from_slugs(_hc, _inv_lookup) if _inv_lookup else {}
                 if _inv_map:
                     _annotated = _annotate_source_with_hist_inv(_v2_session_summary, _inv_map)
                     if len(_annotated) > len(_v2_session_summary):
@@ -549,7 +576,7 @@ def run_audit(
                             f"({len(_inv_map)} [HIST-INV] injected)"
                         )
                 else:
-                    logger.info("[hist_inv] hist_inv_map empty — no hist_inv entries in cache yet")
+                    logger.info("[hist_inv] hist_inv_map empty — no matched slugs in hist_inv_cache yet")
             except Exception as _he:
                 logger.warning(f"[hist_inv] Annotation failed (non-fatal): {_he}")
 

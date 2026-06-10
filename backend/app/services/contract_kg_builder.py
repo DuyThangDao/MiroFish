@@ -407,6 +407,18 @@ class ContractKGBuilder:
         rpm = int(os.getenv("HIST_INV_RPM_LIMIT",
                             str(getattr(_Config, "LLM2_GLOBAL_RPM_LIMIT", 18))))
         clients = []
+        # Worker 0: LLM1 (vertex-ai-1)
+        key1 = getattr(_Config, "LLM_VERTEX_AI_KEY_FILE", None)
+        url1 = getattr(_Config, "LLM_BASE_URL", None)
+        if key1 and url1:
+            clients.append(LLMClient(
+                vertex_key_file=key1,
+                base_url=url1,
+                model=getattr(_Config, "LLM_MODEL_NAME", None),
+                rpm_slot_file="/tmp/mirofish_hist_inv_0.json",
+                rpm_limit=rpm,
+            ))
+        # Worker 1: LLM2 (vertex-ai-2)
         key2 = getattr(_Config, "LLM2_VERTEX_AI_KEY_FILE", None)
         url2 = getattr(_Config, "LLM2_BASE_URL", None)
         if key2 and url2:
@@ -418,12 +430,12 @@ class ContractKGBuilder:
                 rpm_limit=rpm,
             ))
         if not clients:
-            # Fallback: LLM1 (hopeful-frame) only if LLM2 not configured
+            # Fallback: default LLM client
             clients.append(LLMClient(
                 rpm_slot_file="/tmp/mirofish_hist_inv_0.json",
                 rpm_limit=max(rpm // 4, 3),
             ))
-        return clients  # [client_llm2] preferred; [client_llm1] fallback only
+        return clients  # [client_llm1, client_llm2] or subset
 
     @staticmethod
     def _generate_rag_query(fn_name: str, ext_markers: set, contract_name: str,
@@ -655,11 +667,8 @@ class ContractKGBuilder:
                            inv_text: str,
                            llm_client: Optional[Any] = None) -> str:
         """
-        Synthesize 1 real invariant statement for fn_name from fn_body + ALL HIST titles.
-
-        inv_text: multi-line string of "[Title] [IMPACT]" entries.
-        Returns empty string on failure or if no patterns apply.
-        Uses max_tokens=4096 (required for thinking models).
+        DEPRECATED (Phase 1): replaced by pre-built sections.inv lookup.
+        Kept for backward compat; callers should not call this.
         """
         if not fn_body or not fn_body.strip() or not inv_text.strip() or not llm_client:
             return ""
@@ -816,67 +825,54 @@ class ContractKGBuilder:
             if not retriever:
                 return entry, []
 
-            # V5: dual-track (operation + structural) → per-track cap → merge annotations
+            # Phase 1: OP-only track → solodit_op collection (ST track reserved for solodit_vul)
             fn_body = ContractKGBuilder._extract_fn_body(section_src, fn_name)
             op_queries = ContractKGBuilder._generate_operation_queries(
                 fn_name, fn_body, llm_client=client
             )
-            st_queries = ContractKGBuilder._generate_structural_queries(
-                fn_name, fn_body, llm_client=client
-            )
-            queries = op_queries + st_queries  # for cache/logging
+            queries = op_queries  # for cache/logging
 
-            seen_ann: set = set()
+            seen_slug: set = set()
             all_candidates: list = []
 
-            def _collect_track(track_queries: list, cap: int) -> list:
-                result = []
+            def _collect_track(track_queries: list, cap: int) -> tuple:
+                """Returns (ann_list, slug_list) using query_op() on solodit_op collection."""
+                result_anns, result_slugs = [], []
                 for q in track_queries:
-                    if len(result) >= cap:
+                    if len(result_slugs) >= cap:
                         break
                     if not q.strip():
                         continue
                     try:
-                        docs = retriever.query(q, n_results=3)
+                        docs = retriever.query_op(q, n_results=3)
                         for d in (docs or []):
                             all_candidates.append({
                                 "query": q[:80],
-                                "title": d['title'][:80],
-                                "score": round(d['score'], 3),
-                                "passed": d['score'] >= score_threshold,
+                                "slug":  d["slug"][:80],
+                                "score": round(d["score"], 3),
+                                "passed": d["score"] >= score_threshold,
                             })
-                            if d['score'] < score_threshold:
-                                continue  # MMR does not sort DESC — cannot break early
-                            ann = ContractKGBuilder._make_hist_annotation(d)
-                            if ann not in seen_ann:
-                                seen_ann.add(ann)
-                                result.append(ann)
-                                break  # unique hit — next query
-                            # duplicate annotation — fall through to try top-2, top-3
+                            if d["score"] < score_threshold:
+                                continue
+                            slug = d["slug"]
+                            if slug not in seen_slug:
+                                seen_slug.add(slug)
+                                result_slugs.append(slug)
+                                result_anns.append(d["op_line"][:120])
+                                break
                     except Exception:
                         pass
-                return result
+                return result_anns, result_slugs
 
-            op_anns = _collect_track(op_queries, ContractKGBuilder._OP_CAP)
-            st_anns = _collect_track(st_queries, ContractKGBuilder._ST_CAP)
-            inv_texts = op_anns + st_anns
+            op_anns, op_slugs = _collect_track(op_queries, ContractKGBuilder._OP_CAP)
+            inv_texts = op_anns  # op_line previews for logging only
 
             best_score = max((c['score'] for c in all_candidates if c['passed']), default=0.0)
             combined = "\n".join(inv_texts)
             queries_str = "; ".join(queries[:5])
             if cache and cache_key:
                 cache.set(cache_key, contract_name, fn_name, queries_str, combined, "", best_score,
-                          entry.strip())
-                # Generate hist_inv → save to separate HistInvStmtsCache
-                if combined.strip() and stmts_cache is not None:
-                    hist_inv = ContractKGBuilder._generate_hist_inv(
-                        fn_name=fn_name,
-                        fn_body=fn_body,
-                        inv_text=combined,
-                        llm_client=client,
-                    )
-                    if hist_inv:
-                        stmts_cache.set(cache_key, contract_name, fn_name, hist_inv)
+                          entry.strip(), slugs=op_slugs)
 
             _log_entry({"fn": fn_name, "contract": contract_name,
                         "cg_entry": entry.strip(), "queries": queries,
@@ -900,14 +896,6 @@ class ContractKGBuilder:
                     ext_markers = {m.strip() for m in ext_match.group(1).split(',')} if ext_match else set()
                     if fn_name.lower() in _TRIVIAL_EXACT and not ext_markers:
                         continue
-                    cache_key = _Cache.entry_key(contract_name, entry.strip()) if cache else None
-                    if cache and cache_key:
-                        cached = cache.get(cache_key)
-                        if cached:
-                            raw = cached.get("inv_text", "")
-                            for inv in (raw.split("\n") if raw else []):
-                                if inv.strip():
-                                    result.append(f"    ↳ HIST: {inv.strip()}")
                 return result
 
             # Parallel processing: submit all, preserve order via index
@@ -932,11 +920,8 @@ class ContractKGBuilder:
 
             result: List[str] = []
             for idx in sorted(ordered):
-                entry, inv_texts = ordered[idx]
+                entry, _inv_texts = ordered[idx]
                 result.append(entry)
-                for inv in (inv_texts if isinstance(inv_texts, list) else []):
-                    if inv:
-                        result.append(f"    ↳ HIST: {inv}")
             return result
 
         def _save_detail_log() -> None:

@@ -113,90 +113,57 @@ _MAX_RAG_INJECT_PER_AGENT   = 4     # raised: after FIX-1/2 loại noise, không
 _inv_cache: dict[str, tuple] = {}   # key → (score, hint_block); session-level semantic dedup
 _inv_cache_lock = threading.Lock()
 
-_MECHANICS_TURN1_PROMPT_TEMPLATE = """\
-You are a code mechanics analyst for smart contract security.
+# ─── HIST-INV Verifier prompts ────────────────────────────────────────────────
 
-PRIMARY TARGET CONTRACT: {primary_contract}
+_HIST_CHECK_RE = re.compile(
+    r'HIST-CHECK\s*\[([^\]]+)\][^\n]*\n.*?VERDICT:\s*(MATCH|MITIGATED|UNCLEAR)',
+    re.DOTALL | re.IGNORECASE,
+)
 
-Task: Analyze functions from {primary_contract} ONLY. Describe MECHANICALLY what each
-function physically does — focusing on arithmetic, type casts, comparisons, and state
-variable updates. Do NOT describe protocol intent or what the code should do.
-Do NOT analyze functions from other contracts (helper pools, libraries, etc.).
+_CONFIRMED_LINE_RE = re.compile(
+    r'\[(\d+)\]\s*CONFIRMED\s*\|\s*(\w+)\(\)[^:]*:\s*`([^`]+)`\s*[—\-]\s*(.+)',
+    re.IGNORECASE,
+)
 
-Prioritize functions that contain ANY of these high-risk mechanics:
-1. Narrowing type casts: uint128 → int128, uint256 → uint128, int256 → int128
-2. Arithmetic inside unchecked {{ }} blocks that could wrap/overflow
-3. Comparisons using < vs <= at boundary values (tick boundaries, price limits)
-4. State variables (reserves, accumulators) that are NOT updated after a token transfer
-5. Update ordering: which state variable is updated BEFORE vs AFTER a key operation
+_HIST_INV_VERIFIER_TURN1_PROMPT = """\
+You are a HIST-INV Verifier for smart contract security.
 
-Rules:
-- Write 3–5 continuous sentences per function (NOT bullet points, NOT terse labels)
-- For type casts: name the source and destination types and whether overflow is checked
-- For arithmetic: state whether inside unchecked block, what happens on overflow/underflow
-- For comparisons: state exactly whether < or <= is used and the impact on boundary values
-- For state variables: name which are UPDATED and which are NOT UPDATED after key operations
-- For ordering: describe what is updated before vs after the critical operation
+The source code below contains `// [HIST-INV]:` comments — each derived from historical
+audit findings that matched this contract's code patterns. Your task:
 
-Output format (EXACTLY — use plain function name, no contract prefix):
-FUNC burn():
-  <3–5 sentences describing mechanics of {primary_contract}.burn>
+1. Find every `// [HIST-INV]:` annotation in the source.
+2. For each annotation: read the invariant stated, then examine the annotated function's
+   actual code to determine if the invariant is violated.
+3. Give a preliminary verdict: MATCH (likely violated), MITIGATED (clearly safe), or
+   UNCLEAR (needs deeper verification).
 
-FUNC mint():
-  <3–5 sentences describing mechanics of {primary_contract}.mint>
+Output format — one block per annotation found:
+HIST-CHECK [{FunctionName}]:
+  ANN: <quote the [HIST-INV] annotation text>
+  CODE: <1-2 sentences describing what the function actually does at the relevant lines>
+  VERDICT: MATCH | MITIGATED | UNCLEAR
+  REASON: <one sentence>
 
-FUNC <next_function>():
-  <3–5 sentences>
-
-Output ONLY the FUNC blocks for {primary_contract} functions.
-Do NOT write protocol intent, invariants, or findings.
+If no [HIST-INV] annotations are found in the source, output exactly: NO_ANNOTATIONS_FOUND
 
 CONTRACT SOURCE:
 {source}
 """
 
-# Turn 1.5: convert FUNC mechanics blocks → testable INV-Mx vulnerability hypotheses.
-# These INV-Mx lines are fed into the standard Turn 2 prompt as `injected_invariants`,
-# enabling the Q1/Q2/Q3 violation reasoning chain to work correctly on specific patterns.
-_MECHANICS_TO_INV_PROMPT_TEMPLATE = """\
-You are a vulnerability hypothesis extractor for smart contract auditing.
+_HIST_INV_VERIFIER_BATCH_PROMPT = """\
+You are verifying HIST-INV annotations against smart contract source code.
 
-INPUT: Mechanical descriptions of smart contract functions (FUNC blocks).
-TASK: Convert notable mechanics into testable vulnerability hypotheses (INV-Mx lines).
+For each annotation below, determine if the source code actually violates the invariant.
+Require EXACT code evidence. If no exact violation found → output MITIGATED.
 
-Target exactly these 5 pattern classes — skip everything else:
-  PATTERN-A (sign-flip cast): A narrowing cast (uint128→int128, uint256→int128) where
-    input can exceed destination type max — causing the negated value to flip sign
-    (e.g., -int128(amount) becomes positive), adding liquidity instead of removing it.
-  PATTERN-B (unchecked-missing underflow): A subtraction OUTSIDE any unchecked block that
-    naturally underflows in correct usage — reverts under Solidity 0.8+ and permanently
-    blocks callers (DoS).
-  PATTERN-C (wrong boundary comparison): A strict < or > at a tick/price boundary that
-    wrongly excludes the boundary value, causing incorrect active-liquidity accounting.
-  PATTERN-D (missing reserve/state update): A reserve or unclaimed-reward variable that
-    is NOT decremented/cleared after tokens are transferred out — inflating accounting state.
-  PATTERN-E (wrong accumulator update order): An accumulator (secondsPerLiquidity,
-    rewardPerShare, feeGrowth) reads its denominator (liquidity, totalShares) AFTER that
-    denominator has already been modified in the same function — wrong value accumulated.
+--- ANNOTATION BATCH ---
+{batch_items}
+--- SOURCE CODE ---
+{source}
 
-Output format — EXACTLY one line per hypothesis:
-INV-M1: <fn>() — PATTERN-<X> — exact code: `<expression at fault>` — consequence: <what breaks>
-INV-M2: <fn>() — PATTERN-<X> — exact code: `<expression at fault>` — consequence: <what breaks>
-
-Rules:
-- Output ONLY INV-Mx lines. No headers, no FUNC blocks, no explanations.
-- Quote the EXACT code token or expression (cast, subtraction, comparison, variable name).
-- Skip any function with no clear match to PATTERN-A … PATTERN-E.
-- Maximum 8 INV lines total. Prefer quality over quantity.
-- If the same pattern appears in multiple functions, write one INV per function.
-
-EXAMPLE (copy this format exactly):
-INPUT: withdraw(): Converts uint256 shares to int256 via narrowing cast. Negates result to reduce position.
-OUTPUT:
-INV-M1: withdraw() — PATTERN-A — exact code: `int256(shares)` — consequence: if shares > type(int256).max, cast overflows, sign flips positive, position increased instead of decreased
-
-FUNC MECHANICS:
-{turn1_mechanics}
+Output format — one line per item:
+[N] CONFIRMED | FunctionName() line/code: `<exact code>` — <why it violates the invariant>
+[N] MITIGATED | <reason the invariant is satisfied>
 """
 
 
@@ -219,47 +186,6 @@ def build_rag_query(title: str, description: str) -> str:
     )
     return _re_rag.sub(r'\s+', ' ', text).strip()
 
-
-def _build_rag_observations(response: str, agent_id: str) -> list:
-    matches = list(_FINDING_BLOCK_RE.finditer(response))
-    if not matches:
-        return []
-    retriever = _get_rag_retriever()
-    observations = []
-    for i, m in enumerate(matches):
-        title = m.group(1).strip()
-        block = m.group(2)
-        # Use ATTACK_PATH as primary description; fall back to EVIDENCE
-        attack_path = _extract_field(block, "ATTACK_PATH")
-        evidence = _extract_field(block, "EVIDENCE")
-        description = attack_path or evidence
-        if not description:
-            continue
-        query = build_rag_query(title, description)
-        if not query:
-            continue
-        with _rag_lock:
-            results = retriever.query(query, n_results=3)
-        if not results:
-            continue
-        top_score = results[0]["score"]
-        logger.info(
-            f"[RAG] agent={agent_id} finding={i+1}/{len(matches)} "
-            f"top_score={top_score:.3f} title='{title[:50]}'"
-        )
-        if top_score < _SCORE_INJECT_THRESHOLD:
-            continue
-        lines = [f"--- Historical context for FINDING: '{title}' ---"]
-        for j, r in enumerate(results, 1):
-            if r["score"] < _SCORE_SHOW_THRESHOLD:
-                break
-            preview = r["content"][:400].replace("\n", " ").strip()
-            lines.append(
-                f"[{j}] score={r['score']:.3f} | {r['title']}\n"
-                f"    Protocol: {r['protocol']} | {preview}"
-            )
-        observations.append("\n".join(lines))
-    return observations
 
 
 def _normalize_inv_key(inv: str, target_contracts: list[str]) -> str:
@@ -690,7 +616,6 @@ def _annotate_source_with_hist_inv(source: str, inv_map: dict) -> str:
 _FILTERED_SOURCE_AGENTS: set[str] = {"clmm_specialist"}
 
 # Compiled regex for flexible INV-Mx line extraction (Fix C)
-_INV_LINE_RE = re.compile(r'INV-M\d+\s*:.+')
 
 
 def _build_phase_c_review_list(
@@ -3293,146 +3218,103 @@ class CyberSessionOrchestrator:
             primary_contract = _pc_m.group(1) if _pc_m else ""
 
             try:
-                # ── code_similarity_auditor: mechanics track ──────────────────
+                # ── code_similarity_auditor: HIST-INV Verifier (Phase 4) ─────
                 if profile.agent_id == "code_similarity_auditor":
 
                     primary_source = _filter_source_to_primary(
                         network_summary, primary_contract
                     )
-                    turn1_prompt = (
-                        _MECHANICS_TURN1_PROMPT_TEMPLATE
-                        .replace("{primary_contract}", primary_contract or "the primary target contract")
-                        .replace("{source}", primary_source)
+
+                    # Turn 1: enumerate [HIST-INV] annotations + preliminary verdict
+                    turn1_prompt = _HIST_INV_VERIFIER_TURN1_PROMPT.replace(
+                        "{source}", primary_source
                     )
                     turn1_response = self.llm.chat(
                         [{"role": "user", "content": turn1_prompt}],
-                        temperature=0.7,
-                        max_tokens=self._V2_R1_MAX_TOKENS,
-                        strip_think=False,
-                    )
-                    turn1_mechanics = _re_rag.sub(
-                        r'<think>[\s\S]*?</think>', '', turn1_response
-                    ).strip()
-                    logger.info(
-                        f"[code_sim] Turn1 raw={len(turn1_response)}chars "
-                        f"mechanics={len(turn1_mechanics)}chars primary={primary_contract}"
-                    )
-
-                    # ── Turn 1.5: convert FUNC mechanics → INV-Mx hypotheses ──
-                    # FUNC blocks are mechanics descriptions, not checkable invariants.
-                    # The standard Turn 2 prompt reasons over "invariants" via Q1/Q2/Q3.
-                    # Feeding raw FUNC blocks into injected_invariants causes the model
-                    # to ignore them. Converting to INV-Mx format fixes the mismatch.
-                    turn15_prompt = _MECHANICS_TO_INV_PROMPT_TEMPLATE.replace(
-                        "{turn1_mechanics}", turn1_mechanics
-                    )
-                    turn15_response = self.llm.chat(
-                        [{"role": "user", "content": turn15_prompt}],
                         temperature=0.3,
-                        max_tokens=4000,
+                        max_tokens=self._V2_R1_MAX_TOKENS,
                         strip_think=True,
                         extra_body={"google": {"thinking_config": {"thinking_budget": 0}}},
                     )
-                    # Log first 300 chars of Turn1.5 response for debugging format issues
                     logger.info(
-                        f"[code_sim] Turn1.5 raw ({len(turn15_response)}chars): "
-                        f"{repr(turn15_response[:300])}"
+                        f"[hist_verifier] Turn1 raw={len(turn1_response)}chars "
+                        f"primary={primary_contract}"
                     )
-                    # Extract only INV-Mx lines; fall back to raw mechanics if conversion fails
-                    # Fix C: flexible search instead of startswith — handles bullet/bold/numbered formats
-                    inv_lines = []
-                    for ln in turn15_response.splitlines():
-                        m = _INV_LINE_RE.search(ln)
-                        if m:
-                            inv_lines.append(m.group(0).strip())
-                    if inv_lines:
-                        turn15_invs = "\n".join(inv_lines)
-                        logger.info(
-                            f"[code_sim] Turn1.5: {len(inv_lines)} INV-Mx lines extracted"
-                        )
-                    else:
-                        turn15_invs = turn1_mechanics  # fallback: keep raw mechanics
-                        logger.info(
-                            f"[code_sim] Turn1.5: no INV-Mx found, using raw mechanics fallback"
-                        )
 
-                    step2_hint = ""
-                    if rag_enabled:
-                        # RAG still uses raw mechanics (FUNC blocks) for semantic search
-                        hint_block, rag_calls = _build_code_similarity_rag_hints(
-                            turn1_mechanics, profile.agent_id,
-                            target_contracts=target_contracts,
-                            primary_contract=primary_contract,
-                        )
-                        if hint_block:
-                            step2_hint = (
-                                "\nSIMILAR CODE PATTERNS from audit database:\n\n"
-                                f"{hint_block}\n\n"
-                                "For each code pattern shown above:\n"
-                                "  - BE SKEPTICAL: assume the contract is SAFE first.\n"
-                                "  - Check if THIS contract's mechanics match the historical vulnerability.\n"
-                                "  - Only write a FINDING if you can show the EXACT SAME structural flaw.\n"
-                                "  - If the historical pattern does not apply here, skip it.\n"
-                                "For functions without matching patterns: reason independently.\n"
-                            )
+                    if "NO_ANNOTATIONS_FOUND" in turn1_response:
+                        logger.info("[hist_verifier] No [HIST-INV] annotations — skipping")
+                        return []
 
-                    turn2_prompt = cm["r1_prompt"](
-                        profile, primary_source,          # filtered: primary + math libs only
-                        injected_invariants=turn15_invs,   # INV-Mx lines, not raw FUNC blocks
-                        step2_hint=step2_hint,
+                    # Parse flagged annotations (MATCH or UNCLEAR → needs Turn 2 verify)
+                    flagged = [
+                        (m.group(1).strip(), m.group(0))
+                        for m in _HIST_CHECK_RE.finditer(turn1_response)
+                        if m.group(2).upper() != "MITIGATED"
+                    ]
+                    logger.info(
+                        f"[hist_verifier] Turn1 flagged={len(flagged)} for batch verify"
                     )
-                    response = self.llm.chat(
-                        [{"role": "user", "content": turn2_prompt}],
-                        temperature=0.7,
-                        max_tokens=self._V2_R1_MAX_TOKENS,
-                        strip_think=True,
-                    )
-                    if not response.strip():
-                        response = self.llm.chat(
+                    if not flagged:
+                        return []
+
+                    # Turn 2: batch verify ≤5 annotations per call
+                    _BATCH_SIZE = 5
+                    all_batch_responses = []
+                    for batch_start in range(0, len(flagged), _BATCH_SIZE):
+                        batch = flagged[batch_start:batch_start + _BATCH_SIZE]
+                        batch_items = "\n\n".join(
+                            f"[{i + 1}] Function: {fn}\n{context[:600]}"
+                            for i, (fn, context) in enumerate(batch)
+                        )
+                        turn2_prompt = (
+                            _HIST_INV_VERIFIER_BATCH_PROMPT
+                            .replace("{batch_items}", batch_items)
+                            .replace("{source}", primary_source[:3000])
+                        )
+                        resp = self.llm.chat(
                             [{"role": "user", "content": turn2_prompt}],
-                            temperature=0.7,
-                            max_tokens=self._V2_R1_MAX_TOKENS,
+                            temperature=0.3,
+                            max_tokens=2000,
                             strip_think=True,
+                            extra_body={"google": {"thinking_config": {"thinking_budget": 0}}},
                         )
+                        all_batch_responses.append(resp)
+                        logger.info(
+                            f"[hist_verifier] batch {batch_start // _BATCH_SIZE + 1} "
+                            f"resp={len(resp)}chars"
+                        )
+
+                    # Parse CONFIRMED findings from batch responses
+                    results = []
+                    for resp in all_batch_responses:
+                        for m in _CONFIRMED_LINE_RE.finditer(resp):
+                            fn_name     = m.group(2)
+                            evidence    = m.group(3)
+                            description = m.group(4).strip()
+                            title       = f"[HIST-INV] {fn_name}: {description[:80]}"
+                            results.append((
+                                primary_contract, fn_name, title, description,
+                                f"{fn_name}() violates annotated invariant",
+                                evidence, evidence,
+                            ))
 
                     elapsed = time.time() - t0
                     logger.info(
                         f"[TIMING] Phase=v2 R1 agent={profile.agent_id} latency={elapsed:.1f}s "
-                        f"rag_calls={rag_calls}"
+                        f"confirmed={len(results)}"
                     )
                     if _debug_dir:
                         try:
                             import pathlib
                             pathlib.Path(_debug_dir).mkdir(parents=True, exist_ok=True)
-                            with open(os.path.join(_debug_dir, f"r1_{profile.agent_id}_mech.txt"), "w") as fh:
-                                fh.write(turn1_mechanics)
-                            with open(os.path.join(_debug_dir, f"r1_{profile.agent_id}.txt"), "w") as fh:
-                                fh.write(response)
+                            with open(os.path.join(_debug_dir, f"r1_{profile.agent_id}_t1.txt"), "w") as fh:
+                                fh.write(turn1_response)
+                            with open(os.path.join(_debug_dir, f"r1_{profile.agent_id}_t2.txt"), "w") as fh:
+                                fh.write("\n---\n".join(all_batch_responses))
                         except Exception:
                             pass
 
-                    parsed = cm["parse_all_findings"](
-                        response, profile, 1, known_functions=known_functions
-                    )
-                    parsed = parsed[:5]  # safeguard: max 5 findings
-                    n_findings = len(parsed)
-                    logger.info(
-                        f"[v2 R1] agent={profile.agent_id}: "
-                        f"raw_response={len(response)}chars "
-                        f"parsed={n_findings}findings rag_calls={rag_calls}"
-                    )
-                    results = []
-                    for f in parsed:
-                        fns = f.get("affected_functions") or ["_nofunc"]
-                        contract    = f.get("contract_name", "")
-                        title       = f.get("title", "")
-                        description = f.get("description", "") or ""
-                        attack_path = f.get("attack_path", [])
-                        ev          = (f.get("evidence") or [""])[0]
-                        code_anchor = f.get("code_anchor", "")
-                        for fn in fns:
-                            results.append((contract, fn, title, description, attack_path, ev, code_anchor))
-                    return results
+                    return results[:3]   # safeguard: max 3 findings
                 # ── end code_similarity_auditor branch ───────────────────────
 
                 # Fix B: filter source for agents that should only see primary contract
@@ -3469,24 +3351,9 @@ class CyberSessionOrchestrator:
                         f"falling back to single-turn mode"
                     )
 
-                # System: query RAG per invariant, build hint block
+                # [Phase 2] INV → RAG removed: circular reasoning + semantic mismatch.
+                # HIST-INV build (solodit_op) đã inject knowledge vào source annotations trước R1.
                 step2_hint = ""
-                if rag_enabled:
-                    hint_block, rag_calls = _build_invariant_rag_hints(
-                        turn1_response, profile.agent_id,
-                        target_contracts=target_contracts,
-                    )
-                    if hint_block:
-                        step2_hint = (
-                            "\nHISTORICAL VIOLATION PATTERNS from audit database:\n\n"
-                            f"{hint_block}\n\n"
-                            "For each INV where a historical pattern is shown above:\n"
-                            "  - BE SKEPTICAL: Assume the code is SAFE first. Do not force a match.\n"
-                            "  - Check if THIS contract's code has the EXACT SAME logical flaw.\n"
-                            "  - Only write a FINDING if you can extract the SPECIFIC CODE LINES proving it.\n"
-                            "  - If the historical exploit path is blocked or mitigated, EXPLICITLY state 'Mitigated' and skip.\n"
-                            "For INVs without historical patterns: reason independently.\n"
-                        )
 
                 # Strip think block before injecting into Turn 2 (clean display, save context)
                 turn1_clean = _re_rag.sub(r'<think>[\s\S]*?</think>', '', turn1_response).strip()
@@ -3523,8 +3390,7 @@ class CyberSessionOrchestrator:
 
             elapsed = time.time() - t0
             logger.info(
-                f"[TIMING] Phase=v2 R1 agent={profile.agent_id} latency={elapsed:.1f}s "
-                f"rag_calls={rag_calls}"
+                f"[TIMING] Phase=v2 R1 agent={profile.agent_id} latency={elapsed:.1f}s"
             )
 
             if _debug_dir:
@@ -3545,7 +3411,7 @@ class CyberSessionOrchestrator:
             logger.info(
                 f"[v2 R1] agent={profile.agent_id}: "
                 f"raw_response={len(response)}chars "
-                f"parsed={n_findings}findings rag_calls={rag_calls}"
+                f"parsed={n_findings}findings"
             )
 
             results = []

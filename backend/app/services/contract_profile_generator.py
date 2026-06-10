@@ -45,6 +45,14 @@ CONTRACT_AGENT_MATRIX: Dict[str, Dict[str, Any]] = {
             "every function parameter is a potential weapon, every state transition is an opportunity for manipulation. "
             "You think like an attacker who reads the code looking for what can go wrong — not what is correct. "
             "Your reports are precise: you name the exact function, the exact condition, and the exact exploit path."
+            "\n\nTRACK B — TRUST ASSUMPTIONS:\n"
+            "  Identify what this contract IMPLICITLY trusts without on-chain verification:\n"
+            "  - Token transfer returns exact amount (may fail for fee-on-transfer tokens)\n"
+            "  - Oracle price is not manipulatable in a single transaction\n"
+            "  - External contract called does not re-enter this contract\n"
+            "  - msg.sender is an EOA, not a contract\n"
+            "  - Return value of low-level call is not checked\n"
+            "  For each assumption: is it ALWAYS guaranteed? If no → candidate FINDING."
         ),
         "core_question": (
             "Where does this contract receive untrusted input or delegate trust to an external actor — "
@@ -65,6 +73,14 @@ CONTRACT_AGENT_MATRIX: Dict[str, Dict[str, Any]] = {
             "ask what input constraints, range bounds, or relationship invariants SHOULD be validated "
             "before execution — and check whether the code actually enforces them. "
             "A missing bounds check on an initializer parameter is as critical as a missing reentrancy guard."
+            "\n\nTRACK B — TRUST ASSUMPTIONS:\n"
+            "  Identify what this contract IMPLICITLY trusts without on-chain verification:\n"
+            "  - Token transfer returns exact amount (may fail for fee-on-transfer tokens)\n"
+            "  - Oracle price is not manipulatable in a single transaction\n"
+            "  - External contract called does not re-enter this contract\n"
+            "  - msg.sender is an EOA, not a contract\n"
+            "  - Return value of low-level call is not checked\n"
+            "  For each assumption: is it ALWAYS guaranteed? If no → candidate FINDING."
         ),
         "core_question": (
             "What security controls and input preconditions does this contract assume exist — "
@@ -131,6 +147,14 @@ CONTRACT_AGENT_MATRIX: Dict[str, Dict[str, Any]] = {
             "cross-function reentrancy where state is shared between functions, "
             "read-only reentrancy where view functions return stale state mid-execution, "
             "and callback-based reentrancy via ERC721/ERC777/ERC1155 hooks."
+            "\n\nTRACK C — STATE CONSISTENCY:\n"
+            "  Identify storage variables written by more than one function.\n"
+            "  For each shared variable:\n"
+            "  - Is there an ordering where function A partially updates and function B reads stale state?\n"
+            "  - Can a reentrancy path leave accounting corrupt?\n"
+            "  - Is there a window between two related storage writes where state is transiently invalid?\n"
+            "  Focus on: cumulative totals, balance mappings, index variables, linked list pointers.\n"
+            "  If inconsistent state is reachable → FINDING with the exact call sequence."
         ),
         "core_question": (
             "Can I re-enter this contract during an external call — and if so, "
@@ -394,6 +418,14 @@ CONTRACT_AGENT_MATRIX: Dict[str, Dict[str, Any]] = {
             "the snapshot is NOT updated → subsequent reads return stale data. "
             "INTRA-FUNCTION ORDERING — for every function that updates a time-weighted or per-share "
             "accumulator, verify it is computed BEFORE the denominator (liquidity, shares, supply) is changed."
+            "\n\nTRACK C — STATE CONSISTENCY:\n"
+            "  Identify storage variables written by more than one function.\n"
+            "  For each shared variable:\n"
+            "  - Is there an ordering where function A partially updates and function B reads stale state?\n"
+            "  - Can a reentrancy path leave accounting corrupt?\n"
+            "  - Is there a window between two related storage writes where state is transiently invalid?\n"
+            "  Focus on: cumulative totals, balance mappings, index variables, linked list pointers.\n"
+            "  If inconsistent state is reachable → FINDING with the exact call sequence."
         ),
         "core_question": (
             "Can this contract enter a state from which recovery is impossible, "
@@ -582,24 +614,20 @@ CONTRACT_AGENT_MATRIX: Dict[str, Dict[str, Any]] = {
         "domain_group": "code_similarity",
         "swc_focus": ["SWC-101", "SWC-130", "SWC-129"],
         "prompt": (
-            "You are a Code Similarity Auditor who identifies vulnerabilities by recognizing "
-            "structural code patterns that match historically exploited implementations. "
-            "Your approach is purely mechanical: you describe what each function physically does "
-            "with arithmetic operations, type casts, and state variable updates — then compare those "
-            "mechanics against known vulnerability patterns. "
-            "You focus on: unsafe narrowing casts (uint128→int128 causing sign flip), "
-            "arithmetic inside unchecked blocks that can overflow, "
-            "strict vs non-strict comparisons at tick or price boundaries, "
-            "state variables that are NOT decremented after token transfers, "
-            "and update ordering where an accumulator uses the new value instead of the old. "
-            "You do not reason about protocol intent — you observe code mechanics and match patterns."
+            "You are a HIST-INV Verifier who systematically checks historical vulnerability "
+            "patterns against actual contract code. "
+            "The source code you receive is annotated with [HIST-INV] comments — each derived "
+            "from past audit findings that matched this contract's code patterns. "
+            "Your job is NOT to find new bugs. Your job is to verify: does THIS contract's code "
+            "actually violate each annotated invariant? "
+            "Rules: (1) Require exact code evidence — cite the specific line that violates the invariant. "
+            "(2) If no exact violation exists, conclude Mitigated with reason. "
+            "(3) Precision over recall — one confirmed FINDING beats five speculative ones."
         ),
         "core_question": (
-            "Which functions in this contract contain arithmetic, type casting, or state update "
-            "patterns that structurally match known vulnerable implementations — "
-            "specifically: casts that overflow on large values, arithmetic without unchecked guards, "
-            "boundary comparisons using strict inequality where non-strict is required, "
-            "or state variables not decremented after transfers?"
+            "For each `// [HIST-INV]:` annotation in the source: does the actual code in that "
+            "function violate the stated invariant? Cite the exact line as evidence, or "
+            "explicitly state Mitigated with the reason the invariant holds."
         ),
     },
 
@@ -618,6 +646,33 @@ _DOMAIN_GROUP_TO_SWC_DOMAIN: Dict[str, str] = {
     "deep_analysis":  "appsec",
     "code_similarity": "appsec",
     "clmm_mechanics": "defi",
+}
+
+_TRACK_D_BY_DOMAIN: Dict[str, str] = {
+    "code_security": (
+        "Does every external call follow CEI (Checks-Effects-Interactions)? "
+        "Is there any state read that happens after an external call that could return stale data?"
+    ),
+    "crypto_math": (
+        "Is there any intermediate multiplication where the product can overflow uint256 before division? "
+        "Is there any division-before-multiplication that truncates precision?"
+    ),
+    "defi_economics": (
+        "After any sequence of deposits, borrows, and withdrawals: can total protocol liabilities "
+        "exceed total assets? Can a single actor manipulate share price by donating tokens?"
+    ),
+    "governance": (
+        "Is there any function that changes protocol parameters callable without timelock or multisig? "
+        "Can a proposal be executed before the voting period ends?"
+    ),
+    "standards": (
+        "Does this token's transfer/transferFrom match ERC20 spec exactly? "
+        "Is allowance correctly decremented? Does balanceOf return accurate values after every operation?"
+    ),
+    "deep_analysis": (
+        "Is there any library function that assumes a precondition not enforced by the caller? "
+        "Are there any integer casts (explicit or implicit) that silently truncate?"
+    ),
 }
 
 
@@ -740,11 +795,15 @@ class ContractExpertProfileGenerator:
         swc_domain = _DOMAIN_GROUP_TO_SWC_DOMAIN.get(spec["domain_group"], "appsec")
         swc_context = self.swc.get_swc_context_for_agent(swc_domain, "offensive")
         graph_ref = f"\nKnowledge Graph ID: {graph_id}" if graph_id else ""
+        track_d = _TRACK_D_BY_DOMAIN.get(spec["domain_group"], "")
+        track_d_section = (
+            f"\nTRACK D — SPEC VS IMPLEMENTATION:\n  {track_d}\n"
+        ) if track_d else ""
 
         return f"""You are {spec['display_name']} — a smart contract security specialist.
 
 {spec['prompt']}
-
+{track_d_section}
 === CONTRACT UNDER AUDIT ===
 {contract_summary}{graph_ref}
 

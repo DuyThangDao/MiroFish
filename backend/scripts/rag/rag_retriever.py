@@ -82,9 +82,9 @@ def mmr_select(
 
 class SolodirRetriever:
     def __init__(self):
-        client = chromadb.PersistentClient(path=str(CHROMA_PATH))
+        self._client = chromadb.PersistentClient(path=str(CHROMA_PATH))
         self._embed_fn = VertexEmbedding(task_type="RETRIEVAL_QUERY")
-        self._col = client.get_collection("solodit_findings", embedding_function=self._embed_fn)
+        self._col = self._client.get_collection("solodit_findings", embedding_function=self._embed_fn)
         self._parents: dict[str, str] = (
             json.loads(PARENTS_PATH.read_text()) if PARENTS_PATH.exists() else {}
         )
@@ -143,3 +143,26 @@ class SolodirRetriever:
                 "content":  self._parents.get(slug, ""),  # full parent document
             })
         return results
+
+    def query_op(self, query_text: str, n_results: int = 5) -> list[dict]:
+        """Query solodit_op collection (per-operation docs). Returns [{slug, op_line, score, impact}]."""
+        if not hasattr(self, "_op_col"):
+            self._op_col = self._client.get_collection(
+                "solodit_op", embedding_function=self._embed_fn
+            )
+        raw = self._op_col.query(
+            query_texts=[query_text],
+            n_results=n_results,
+            include=["documents", "metadatas", "distances"],
+        )
+        out = []
+        for doc, meta, dist in zip(
+            raw["documents"][0], raw["metadatas"][0], raw["distances"][0]
+        ):
+            out.append({
+                "slug":    meta["slug"],
+                "op_line": doc,
+                "score":   round(1 - dist, 4),
+                "impact":  meta.get("impact", ""),
+            })
+        return out

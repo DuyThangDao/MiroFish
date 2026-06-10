@@ -252,34 +252,17 @@ Không giữ cái đang broken chỉ vì sợ mất coverage.
 
 ## 8. Thứ tự triển khai
 
-### Phase 1 — Prerequisites (đang làm)
-- [x] Build `solodit_op` collection: `fill_op_llm.py` (91.5% done)
-- [ ] Embed `solodit_op` vào ChromaDB (1 doc/operation)
-- [ ] Update HIST-INV build để query `solodit_op` thay `solodit_findings`
-- [ ] Benchmark so sánh HIST-INV quality (solodit_op vs solodit_findings)
+Chi tiết từng phase xem trong thư mục `r1-restructure/`:
 
-### Phase 2 — Remove RAG from R1
-- [ ] Disable `_build_invariant_rag_hints` ở Turn 2 (comment out, benchmark trước)
-- [ ] Disable `_build_invariant_rag_hints` ở gap-fill
-- [ ] Disable `_build_code_similarity_rag_hints`
-- [ ] Xóa `_build_rag_observations` (dead code)
-- [ ] Benchmark: Recall trước vs sau khi remove → confirm không drop
+| Phase | File | Trạng thái | Mục tiêu |
+|---|---|---|---|
+| Phase 1 | [phase1-solodit-op-embed.md](r1-restructure/phase1-solodit-op-embed.md) | ⏳ Chờ fill_inv xong | Embed solodit_op, update HIST-INV build |
+| Phase 2 | [phase2-remove-rag-r1.md](r1-restructure/phase2-remove-rag-r1.md) | ⏳ Chờ Phase 1 | Remove 3 RAG hooks, benchmark |
+| Phase 3 | [phase3-independent-reasoning-tracks.md](r1-restructure/phase3-independent-reasoning-tracks.md) | ⏳ Chờ Phase 2 | Thêm 4 reasoning tracks vào agents |
+| Phase 4 | [phase4-code-similarity-auditor.md](r1-restructure/phase4-code-similarity-auditor.md) | ⏳ Chờ Phase 3 | Redesign hoặc loại bỏ code_similarity_auditor |
 
-### Phase 3 — Add Independent Reasoning Tracks
-- [ ] Thêm Track A (adversarial input) vào `_STEP1_BLOCK` hoặc Turn 2 instructions
-- [ ] Thêm Track B (trust assumptions) — có thể assign cho `appsec_researcher` + `appsec_hardener`
-- [ ] Thêm Track C (state consistency) — assign cho `state_machine_analyst` + `reentrancy_specialist`
-- [ ] Track D (spec vs impl) — customize per domain group trong `system_prompt`
-- [ ] Benchmark: F1 so sánh với Phase 2 baseline
-
-### Phase 4 — Redesign `code_similarity_auditor`
-- [ ] Quyết định: loại bỏ hay redesign
-- [ ] Nếu redesign: task mới = "compare HIST-INV patterns against mechanics" (không query RAG)
-
-### Phase 5 — solodit_inv (tương lai)
-- [ ] Build `solodit_inv` collection sau khi Phase 1-3 stable
-- [ ] Use case: HIST-INV build query `solodit_inv` để lấy invariants → thay thế LLM-generated invariants trong HIST annotations
-- [ ] Agent không cần viết INV từ đầu nữa — nhận sẵn từ domain knowledge
+**Phase 5** (tương lai, không ưu tiên): nếu cần, build `solodit_inv` ChromaDB collection
+để agents query invariants cho các domain patterns chưa có trong HIST-INV DB.
 
 ---
 
