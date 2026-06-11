@@ -428,7 +428,7 @@ def run_group_for_condition(grp: dict, condition: str) -> dict:
     }
 
 
-CONDITIONS_TO_RUN = ["single_turn_hyp"]
+CONDITIONS_TO_RUN = ["hist_inv_t1t2"]
 
 all_gt = [fn for grp in GROUPS for fn in grp['gt_fns']]
 
