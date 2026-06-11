@@ -116,10 +116,25 @@ File `eval_result.txt` chứa toàn bộ output verbose (matched/missed H bugs +
 Flags đặt cứng trong script: `STOP_AFTER_DEDUP=true`, `RAG_ENABLED=true`.
 Đây là cách dùng chuẩn trong giai đoạn tăng recall (focus R1, bỏ R2 voting).
 
-**HIST-INV cache — KHÔNG xóa trừ khi user yêu cầu rõ ràng:**
+**HIST-INV cache — KHÔNG xóa trừ khi user xác nhận rõ ràng:**
 Cache nằm tại `benchmark/web3bugs/agent-redesign/<contest_id>/hist_inv_cache.json`.
 Cache này lưu kết quả LLM query cho từng function — deterministic, dùng lại được giữa các runs cùng contest.
 Chỉ xóa khi: thay đổi code HIST-INV, thay đổi prompt, hoặc user nói rõ "xóa cache".
+
+**Quan trọng — luôn hỏi trước khi xóa, kể cả khi prompt vừa thay đổi.**
+Lý do: cache có thể có 180+ entries — xóa toàn bộ tốn nhiều thời gian rebuild.
+Thay vào đó, đề xuất xóa **selective** (chỉ xóa entries của các function cần test lại):
+```python
+import json
+cache = json.load(open('hist_inv_cache.json'))
+entries = cache.get('entries', {})
+# Xóa chỉ các fn cần rebuild (ví dụ: GT functions)
+target_fns = {'borrow', 'liquidate', 'registerAsset'}
+cache['entries'] = {k: v for k, v in entries.items()
+                    if v.get('fn_name','') not in target_fns}
+json.dump(cache, open('hist_inv_cache.json','w'), indent=2)
+```
+Hỏi user: "Xóa toàn bộ cache hay chỉ các function [danh sách]?"
 
 ---
 

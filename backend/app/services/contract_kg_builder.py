@@ -570,49 +570,86 @@ class ContractKGBuilder:
     @staticmethod
     def _generate_operation_queries(fn_name: str, fn_body: str,
                                      llm_client: Optional[Any] = None) -> list:
-        """V4c: enumerate ALL distinct operations → list of RAG queries.
+        """V5: state-write-first op queries — prioritize storage/arithmetic over routing calls.
 
-        Extends v4 prompt with sub-function interaction queries.
-        Falls back to v4 prompt when LLM returns empty (stochastic with large bodies).
+        Two sections in output: PRIORITY (state writes + arithmetic) listed first so
+        _collect_track fills cap slots with highest-signal queries before routing calls.
+        Falls back to single-section prompt when LLM returns empty.
         """
         if not fn_body or not fn_body.strip() or not llm_client:
             return [f"{fn_name} vulnerability"]
 
-        def _call(extended: bool) -> list:
-            prompt = (
-                "You are a Solidity code analyst.\n\n"
-                f"Function: {fn_name}()\n"
-                f"Body:\n{fn_body.strip()}\n\n"
-                "Generate search queries to find historical vulnerability findings "
-                "related to this function.\n"
-                "Each query must target a DIFFERENT operation or pattern in this function.\n"
-                "List ALL distinct operations — do not merge or skip any.\n"
-                "Focus on: type casts, arithmetic operations, state updates, unchecked blocks.\n"
-            )
-            if extended:
-                prompt += (
-                    "Also include queries about interactions between sub-function calls "
-                    "and their effects on state variables.\n"
+        def _call(two_section: bool) -> list:
+            if two_section:
+                prompt = (
+                    "You are a Solidity code analyst.\n\n"
+                    f"Function: {fn_name}()\n"
+                    f"Body:\n{fn_body.strip()}\n\n"
+                    "Generate search queries to find historical vulnerability findings "
+                    "related to this function.\n"
+                    "Each query must target a DIFFERENT operation or pattern.\n\n"
+                    "Output TWO sections — in this exact order:\n\n"
+                    "PRIORITY (state writes, arithmetic, type casts, unchecked blocks):\n"
+                    "- List every storage write (uint256/int256/mapping/array update)\n"
+                    "- List every arithmetic operation (add, sub, mul, div, shift)\n"
+                    "- List every type cast (uint256→uint128, int cast, etc.)\n"
+                    "- List unchecked blocks if present\n\n"
+                    "OTHER (external calls that interact with state):\n"
+                    "- Only calls whose return value is written to state or used in arithmetic\n"
+                    "- Omit pure reads (ownerOf, balanceOf, getPrice, view calls)\n\n"
+                    "Be specific about data types and variable names.\n"
+                    "Do NOT describe business purpose. Do NOT add 'vulnerability' keyword.\n\n"
+                    "Format: one query per line, max 15 words each.\n"
+                    "Output section headers (PRIORITY: / OTHER:) followed by queries.\n"
+                    "Output ONLY the headers and queries, nothing else."
                 )
-            prompt += (
-                "Be specific about data types (uint128, int128, uint256) and operations.\n"
-                "Do NOT describe business purpose. Do NOT add 'vulnerability' keyword.\n\n"
-                "Format: one query per line, max 15 words each.\n"
-                "Output ONLY the queries, nothing else."
-            )
+            else:
+                prompt = (
+                    "You are a Solidity code analyst.\n\n"
+                    f"Function: {fn_name}()\n"
+                    f"Body:\n{fn_body.strip()}\n\n"
+                    "Generate search queries to find historical vulnerability findings "
+                    "related to this function.\n"
+                    "Each query must target a DIFFERENT operation or pattern in this function.\n"
+                    "Focus ONLY on: state writes (storage updates), arithmetic operations, "
+                    "type casts, unchecked blocks.\n"
+                    "EXCLUDE: pure routing external calls that do not write to local state "
+                    "(e.g. ownerOf, balanceOf, getPrice, view-only calls).\n"
+                    "Be specific about data types (uint128, int128, uint256) and the storage "
+                    "variable being written.\n"
+                    "Do NOT describe business purpose. Do NOT add 'vulnerability' keyword.\n\n"
+                    "Format: one query per line, max 15 words each.\n"
+                    "Output ONLY the queries, nothing else."
+                )
             try:
                 raw = llm_client.chat(
                     [{"role": "user", "content": prompt}],
                     temperature=0, max_tokens=6144,
+                    extra_body={"google": {"thinking_config": {"thinking_budget": 0}}},
                 ).strip()
-                return [ln.strip().lstrip('0123456789.-) ').strip()
-                        for ln in raw.split('\n') if ln.strip()]
+                if not raw:
+                    return []
+                lines = [ln.strip().lstrip('0123456789.-) ').strip()
+                         for ln in raw.split('\n') if ln.strip()]
+                if two_section:
+                    # Reorder: PRIORITY lines first, OTHER lines last
+                    priority, other, current = [], [], "priority"
+                    for ln in lines:
+                        low = ln.lower()
+                        if low.startswith("priority"):
+                            current = "priority"
+                        elif low.startswith("other"):
+                            current = "other"
+                        elif ln:
+                            (priority if current == "priority" else other).append(ln)
+                    return priority + other
+                return lines
             except Exception:
                 return []
 
-        queries = _call(extended=True)
+        queries = _call(two_section=True)
         if not queries:
-            queries = _call(extended=False)
+            queries = _call(two_section=False)
         return queries if queries else [f"{fn_name} vulnerability"]
 
     @staticmethod
