@@ -40,6 +40,32 @@ from app.services.contract_hist_inv_cache import HistInvCache
 
 def _strip(t): return re.sub(r'<think>.*?</think>', '', t or '', flags=re.DOTALL).strip()
 
+# ─── Hypothesis-first block (injected into T2 for no_inv+hyp mode) ────────────
+_HYP_BLOCK = """\
+=== HYPOTHESIS-FIRST RULES ===
+Before writing any FINDING, you MUST state a specific mechanism hypothesis with code evidence.
+
+RULE: For each suspected invariant violation, explicitly write:
+  HYPOTHESIS: [what breaks mechanically]
+  CODE_EVIDENCE: [exact variable/line/pattern you observed]
+
+Good hypothesis examples (cross-protocol):
+  "cToken exchange rate read before accrueInterest called, stale rate used in mint"
+  "LP shares burned but pool reserves not updated atomically, imbalance possible"
+  "governance timelock bypassed when proposer is also executor, instant execution"
+  "fee recipient mapping deleted but balance not transferred first, funds locked"
+  "reward balance not reset before transfer, caller can drain repeatedly"
+  "global debt accumulator not updated after individual borrow, principal desync"
+
+Bad (do NOT write these):
+  "vulnerability in transfer()" — names a function, no mechanism
+  "reentrancy bug" — names a category, no specific code evidence
+  "unsafe cast" — no specific location or impact chain
+
+Only AFTER stating hypothesis + code evidence → write the FINDING block.
+If you cannot articulate a specific mechanism yet, re-read the code first.
+"""
+
 # ─── CLI args ─────────────────────────────────────────────────────────────────
 parser = argparse.ArgumentParser()
 parser.add_argument('contract', help='Contract name to simulate (e.g. ConcentratedLiquidityPool)')
@@ -47,6 +73,7 @@ parser.add_argument('contest_id', nargs='?', default='35', help='Contest ID (def
 parser.add_argument('--no-inv', action='store_true', help='Disable HIST-INV injection (pure self-reasoning)')
 parser.add_argument('--merge-both', action='store_true', help='Run with_inv then no_inv sequentially, merge findings')
 parser.add_argument('--workers', type=int, default=1, help='Parallel agents per chunk (default: 1)')
+parser.add_argument('--hyp', action='store_true', help='Use hypothesis-first RAG for no_inv mode')
 args = parser.parse_args()
 
 TARGET_CONTRACT = args.contract
@@ -54,6 +81,7 @@ CONTEST_ID      = args.contest_id
 NO_INV          = args.no_inv
 MERGE_BOTH      = args.merge_both
 WORKERS         = args.workers
+HYP             = args.hyp
 
 # ─── Paths ────────────────────────────────────────────────────────────────────
 CONTRACTS_DIR = f'/home/thangdd/repos/web3bugs/contracts/{CONTEST_ID}/trident/contracts'
@@ -65,9 +93,9 @@ GT_CONTRACTS  = {
     'Ticks',
 }
 if MERGE_BOTH:
-    _inv_tag = 'merged'
+    _inv_tag = 'merged_hyp' if HYP else 'merged'
 elif NO_INV:
-    _inv_tag = 'no_inv'
+    _inv_tag = 'no_inv_hyp' if HYP else 'no_inv'
 else:
     _inv_tag = 'with_inv'
 OUT_DIR = f'/home/thangdd/repos/MiroFish/benchmark/web3bugs/agent-redesign/{CONTEST_ID}/sim_single_{TARGET_CONTRACT}_{_inv_tag}'
@@ -327,7 +355,7 @@ def parse_findings(text: str, default_contract: str) -> list:
     return findings
 
 def run_agent(agent_id: str, ann_source: str, chunk_label: str, agent_idx: int,
-              mode_suffix: str = '') -> tuple:
+              mode_suffix: str = '', use_hyp: bool = False) -> tuple:
     profile = profiles_map.get(agent_id)
     if not profile:
         print(f"    [WARN] agent {agent_id} not found — skip", flush=True)
@@ -342,7 +370,11 @@ def run_agent(agent_id: str, ann_source: str, chunk_label: str, agent_idx: int,
     t1_resp   = llm_call(t1_prompt)
     t1_clean  = clean_inv(t1_resp)
     time.sleep(2)
-    t2_prompt = build_round1_prompt(profile, ann_source, injected_invariants=t1_clean)
+    t2_prompt = build_round1_prompt(
+        profile, ann_source,
+        injected_invariants=t1_clean,
+        step2_hint=_HYP_BLOCK if use_hyp else "",
+    )
     t2_resp   = llm_call(t2_prompt)
 
     total = time.time() - t0
@@ -368,11 +400,13 @@ def run_chunk(chunk: dict, no_inv_override: bool = None, mode_suffix: str = '') 
     print(f"\n{'='*65}")
     print(f"Chunk: {label}  |  {len(chunk['fn_names'])} fns  |  {src_lines} lines  [{mode_str}]", flush=True)
 
+    _use_hyp = HYP and use_no_inv  # hypothesis-first only for no_inv mode
+
     all_findings = []
     if WORKERS > 1:
         with ThreadPoolExecutor(max_workers=WORKERS) as exe:
             futs = {
-                exe.submit(run_agent, agent_id, ann_src, label, idx, mode_suffix): agent_id
+                exe.submit(run_agent, agent_id, ann_src, label, idx, mode_suffix, _use_hyp): agent_id
                 for idx, agent_id in enumerate(chunk['agents'])
             }
             for fut in as_completed(futs):
@@ -380,7 +414,7 @@ def run_chunk(chunk: dict, no_inv_override: bool = None, mode_suffix: str = '') 
                 all_findings.extend(parse_findings(t2_resp, chunk['contract_name']))
     else:
         for idx, agent_id in enumerate(chunk['agents']):
-            t2_resp, _ = run_agent(agent_id, ann_src, label, idx, mode_suffix)
+            t2_resp, _ = run_agent(agent_id, ann_src, label, idx, mode_suffix, _use_hyp)
             all_findings.extend(parse_findings(t2_resp, chunk['contract_name']))
             if idx < len(chunk['agents']) - 1:
                 time.sleep(5)
@@ -398,7 +432,9 @@ def run_chunk(chunk: dict, no_inv_override: bool = None, mode_suffix: str = '') 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 print('\n' + '='*65)
 print(f'Single-Contract Simulation — {TARGET_CONTRACT} (contest {CONTEST_ID})')
-inv_mode = 'DISABLED (pure self-reasoning)' if NO_INV else 'no-custom slugs'
+inv_mode = ('DISABLED + hypothesis-first' if (NO_INV and HYP)
+            else 'DISABLED (pure self-reasoning)' if NO_INV
+            else 'no-custom slugs')
 print(f'Grouper: FN_NAME_RULES | Agents: 3/chunk | HIST-INV: {inv_mode}')
 print('='*65)
 

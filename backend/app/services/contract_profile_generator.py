@@ -234,7 +234,18 @@ CONTRACT_AGENT_MATRIX: Dict[str, Dict[str, Any]] = {
         ),
         "core_question": (
             "Are there inputs or sequences of operations that cause this mathematical system "
-            "to diverge from its intended behavior in a way that favors an attacker?"
+            "to diverge from its intended behavior in a way that favors an attacker? "
+            "TYPE CAST SAFETY: list every explicit narrowing cast in the source "
+            "(uint256→uint128, uint256→uint64, int256→uint128, uint→int, int→uint). "
+            "For each cast: what is the maximum possible value of the expression being cast? "
+            "Can it exceed the target type's maximum and silently truncate? "
+            "What does silent truncation mean for the downstream logic — does it allow "
+            "minting excess, bypassing a check, or corrupting a balance? "
+            "UNCHECKED ARITHMETIC: list every `unchecked` block. "
+            "For each arithmetic operation inside: what are the max/min possible operand values? "
+            "Can subtraction underflow or addition overflow in a way that benefits an attacker? "
+            "Pay special attention to: balance checks (balanceOf - reserve), "
+            "signed/unsigned conversions (-int256(uint256(x))), and liquidity deltas."
         ),
     },
 
@@ -541,7 +552,16 @@ CONTRACT_AGENT_MATRIX: Dict[str, Dict[str, Any]] = {
             "For each accumulator, reference variable, or operation ordering in this contract: "
             "is this the correct choice for the intended invariant? "
             "If the answer is 'possibly not', write a FINDING first, then articulate the worst-case scenario — "
-            "do not use inability to prove the full attack path as a reason to stay silent."
+            "do not use inability to prove the full attack path as a reason to stay silent. "
+            "MISSING UPDATE — VALUE COMPLETENESS: for every function that removes value from "
+            "the contract (burn, withdraw, redeem, liquidate, collect): "
+            "enumerate ALL state variables that track the total value held by the pool "
+            "(e.g., reserve0, reserve1, totalSupply, totalDebt, totalShares). "
+            "Verify that EACH variable is decremented by the FULL amount being removed — "
+            "not just fees, not just principal, but the complete sum of ALL components. "
+            "If any tracked variable is not updated, or is updated with only a subset "
+            "(e.g., fee portion but not principal), the pool's internal accounting diverges "
+            "from reality — enabling inflation attacks or insolvency over time."
         ),
     },
 
