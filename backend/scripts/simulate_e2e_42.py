@@ -63,6 +63,7 @@ import argparse
 _parser = argparse.ArgumentParser()
 _parser.add_argument('--no-inv', action='store_true', help='Disable HIST-INV injection (pure self-reasoning)')
 _parser.add_argument('--workers', type=int, default=1, help='Parallel agents per chunk (default: 1)')
+_parser.add_argument('--out-dir', type=str, default='', help='Override output directory')
 _args = _parser.parse_args()
 NO_INV  = _args.no_inv
 WORKERS = _args.workers
@@ -77,7 +78,8 @@ GT_CONTRACTS  = {
 }
 CONTEST_ID = '42'
 _inv_tag = 'no_inv' if NO_INV else 'with_inv'
-OUT_DIR = f'/home/thangdd/repos/MiroFish/benchmark/web3bugs/agent-redesign/{CONTEST_ID}/sim_e2e_v9_{_inv_tag}_cg_cot_dedup2'
+_default_out = f'/home/thangdd/repos/MiroFish/benchmark/web3bugs/agent-redesign/{CONTEST_ID}/sim_e2e_v10_{_inv_tag}_cg_cot_dedup2'
+OUT_DIR = _args.out_dir if _args.out_dir else _default_out
 os.makedirs(OUT_DIR, exist_ok=True)
 
 # ─── Call graph (not available for contest 42) ────────────────────────────────
@@ -135,9 +137,16 @@ FN_NAME_RULES = [
     (r'\bclaim\b|reward|reclaim|subscribe|distribute|'
      r'add.?incentive|remove.?incentive|get.?reward|get.?incentive|'
      r'stake\b|unstake',                                            'access_reward'),
-    (r'flash(?!swap)|oracle|twap|get.?price|update.?price|arbitrage', 'economic'),
+    # Fix 3: expanded economic domain — catches swap/buyback/lock MEV patterns
+    (r'flash(?!swap)|oracle|twap|get.?price|update.?price|arbitrage|'
+     r'buyback|buy[A-Z]|sell[A-Z]|lock(?:crv|token|lp)|vecrvlock|'
+     r'swap(?:exact|token|eth)|add.?liquidity.*uni',                'economic'),
     (r'initialize|callback|settle|\bsync\b|deploy.?pool|'
      r'create.?pool|create.?position',                              'state_ordering'),
+    # Fix 2: admin/governance domain — catches setter/changer functions
+    (r'\bchange[A-Z]\w*|\bset(?:impl|contract|owner|governance|minter|treasury|'
+     r'engine|vault|nft|address|operator|role)\b|'
+     r'\bmigrate\b|\bupgrade\b|transferOwn|renounceOwn',           'admin_gov'),
 ]
 
 def match_domain(fn_name: str) -> str:
@@ -149,13 +158,57 @@ def match_domain(fn_name: str) -> str:
 
 # ─── Domain → agents (3 diverse lenses each) ─────────────────────────────────
 DOMAIN_AGENTS = {
-    'clmm_semantic':  ['clmm_specialist',   'defi_analyst',        'logic_exploiter'],
-    'math_cast':      ['math_precision',    'invariant_breaker',   'logic_exploiter'],
-    'access_reward':  ['access_escalator',  'clmm_specialist',     'state_machine_analyst'],
-    'economic':       ['defi_attacker',     'flash_loan_specialist','economic_attacker'],
-    'state_ordering': ['state_machine_analyst', 'appsec_researcher', 'logic_exploiter'],
-    'general':        ['defi_attacker',     'logic_exploiter',     'appsec_hardener'],
+    'clmm_semantic':  ['clmm_specialist',   'defi_analyst',           'logic_exploiter'],
+    'math_cast':      ['math_precision',    'invariant_breaker',      'logic_exploiter'],
+    'access_reward':  ['access_escalator',  'clmm_specialist',        'state_machine_analyst', 'mev_analyst'],
+    'economic':       ['defi_attacker',     'flash_loan_specialist',  'mev_analyst'],
+    'state_ordering': ['state_machine_analyst', 'appsec_researcher',  'logic_exploiter'],
+    'admin_gov':      ['state_dependency_analyst', 'access_escalator','validation_checker'],
+    'general':        ['defi_attacker',     'logic_exploiter',        'appsec_hardener',       'validation_checker'],
 }
+
+# ─── Fix 1: Modifier inline expansion ────────────────────────────────────────
+def _extract_modifiers(source: str) -> dict:
+    """Extract {modifier_name: body_str} from Solidity source."""
+    mods = {}
+    for m in re.finditer(r'\bmodifier\s+(\w+)\s*(?:\([^)]*\))?\s*\{', source, re.MULTILINE):
+        name = m.group(1)
+        depth, i = 1, m.end()
+        while i < len(source) and depth > 0:
+            if source[i] == '{':
+                depth += 1
+            elif source[i] == '}':
+                depth -= 1
+            i += 1
+        mods[name] = source[m.end():i - 1].strip()
+    return mods
+
+
+def _inject_modifier_comments(fn_source: str, modifiers: dict) -> str:
+    """Prepend modifier body as comment block before each function that uses them."""
+    if not modifiers:
+        return fn_source
+    lines = fn_source.split('\n')
+    out = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if re.match(r'^\s*(?:function\s+\w+|constructor)\s*[\(\{]', line):
+            sig, j = line, i + 1
+            while j < len(lines) and '{' not in sig:
+                sig += ' ' + lines[j].strip()
+                j += 1
+            used = [n for n in modifiers if re.search(r'\b' + re.escape(n) + r'\b', sig)]
+            if used:
+                indent = re.match(r'^(\s*)', line).group(1)
+                for name in used:
+                    body_lines = modifiers[name].replace('\n', ' ').split(';')
+                    summary = '; '.join(bl.strip() for bl in body_lines if bl.strip())[:300]
+                    out.append(f"{indent}// [MODIFIER {name}]: {summary}")
+        out.append(line)
+        i += 1
+    return '\n'.join(out)
+
 
 # ─── Function extractor ───────────────────────────────────────────────────────
 FN_RE = re.compile(r'^\s*(?:function\s+(\w+)|constructor)\s*\(', re.MULTILINE)
@@ -208,8 +261,10 @@ def extract_functions(source: str, fn_names: list) -> str:
 def build_chunk_source(contract_name: str, source: str, fn_names: list,
                        aux_contracts: list = None) -> str:
     """Build focused source: header + chunk functions. Optionally append aux contracts."""
+    modifiers = _extract_modifiers(source)   # Fix 1
     header = extract_contract_header(source)
     fns    = extract_functions(source, fn_names)
+    fns    = _inject_modifier_comments(fns, modifiers)  # Fix 1
     parts  = [
         f"// ─── {contract_name}.sol ─────────────────────────────────────────────────",
         header.rstrip(),
@@ -402,8 +457,8 @@ _FIELD_RE = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 
-def parse_findings(text: str, default_contract: str) -> list:
-    """Parse FINDING blocks from T2 text into list of finding dicts."""
+def parse_findings(text: str, default_contract: str, source: str = 'T2') -> list:
+    """Parse FINDING blocks from agent response into list of finding dicts."""
     findings = []
     parts = re.split(r'\nFINDING:', '\n' + text)
     for part in parts[1:]:
@@ -436,6 +491,7 @@ def parse_findings(text: str, default_contract: str) -> list:
             'severity':      fields.get('severity', 'medium'),
             'code_anchor':   fields.get('code_anchor', ''),
             'evidence':      fields.get('evidence', ''),
+            'source':        source,
         }
         if finding['title']:
             findings.append(finding)
@@ -452,8 +508,8 @@ def run_agent(agent_id: str, ann_source: str, chunk_label: str, agent_idx: int,
         text = open(out).read()
         t2_m = re.search(r'=== T2 \(standard\) ===\n(.*?)(?====)', text, re.DOTALL)
         t3_m = re.search(r'=== T3 \(CoT sweep\) ===\n(.*?)$',    text, re.DOTALL)
-        t2_f = parse_findings(t2_m.group(1) if t2_m else '', contract_name)
-        t3_f = parse_findings(t3_m.group(1) if t3_m else '', contract_name)
+        t2_f = parse_findings(t2_m.group(1) if t2_m else '', contract_name, source='T2')
+        t3_f = parse_findings(t3_m.group(1) if t3_m else '', contract_name, source='T3')
         with _LOCK:
             print(f"    [{chunk_label}/{agent_id}] RESUMED  T2={len(t2_f)} T3={len(t3_f)}", flush=True)
         return t2_f, t3_f
@@ -476,7 +532,7 @@ def run_agent(agent_id: str, ann_source: str, chunk_label: str, agent_idx: int,
     # T2: standard finding discovery
     t2_prompt = build_round1_prompt(profile, ann_source, injected_invariants=t1_clean)
     t2_resp   = llm_call(t2_prompt, client)
-    t2_findings = parse_findings(t2_resp, contract_name)
+    t2_findings = parse_findings(t2_resp, contract_name, source='T2')
     time.sleep(2)
 
     # T3: independent CoT sweep (fresh, no T2 findings injected)
@@ -487,7 +543,7 @@ def run_agent(agent_id: str, ann_source: str, chunk_label: str, agent_idx: int,
         source=ann_source,
     )
     t3_resp     = llm_call(t3_prompt, client)
-    t3_findings = parse_findings(t3_resp, contract_name)
+    t3_findings = parse_findings(t3_resp, contract_name, source='T3')
 
     total = time.time() - t0
     n2, n3 = len(t2_findings), len(t3_findings)
@@ -546,7 +602,7 @@ def run_chunk(chunk: dict) -> list:
 print('\n' + '='*65)
 print(f'E2E Simulation — Contest {CONTEST_ID} (Mochi Finance) — GT contracts only')
 inv_mode = 'DISABLED (pure self-reasoning)' if NO_INV else 'no-custom slugs'
-print(f'Grouper: FN_NAME_RULES | Agents: 3/chunk | HIST-INV: {inv_mode} | T2+T3 (CoT)')
+print(f'Grouper: FN_NAME_RULES | Agents: 3-4/chunk | HIST-INV: {inv_mode} | T2+T3 (CoT)')
 print('='*65)
 
 contracts = discover_contracts()
@@ -567,14 +623,14 @@ for chunk in chunks:
     time.sleep(5)
 
 # Global dedup trên toàn bộ findings (cross-chunk duplicates được xử lý đúng)
-print(f"\n{'='*65}")
-print(f"Global dedup: {len(all_raw)} raw findings across all chunks")
-all_deduped = dedup_pipeline(all_raw, FULL_SOURCE)
-print(f"Global dedup result: {len(all_raw)} → {len(all_deduped)}")
+# print(f"\n{'='*65}")
+# print(f"Global dedup: {len(all_raw)} raw findings across all chunks")
+# all_deduped = dedup_pipeline(all_raw, FULL_SOURCE)
+# print(f"Global dedup result: {len(all_raw)} → {len(all_deduped)}")
 
 wall_time = time.time() - t_start
 
-# ─── Save 2 reports ───────────────────────────────────────────────────────────
+# ─── Save reports ─────────────────────────────────────────────────────────────
 def _save_report(findings, tag, config_note):
     report = {
         "contest_id":     CONTEST_ID,
@@ -587,14 +643,14 @@ def _save_report(findings, tag, config_note):
     json.dump(report, open(path, 'w'), indent=2, ensure_ascii=False)
     return path
 
-raw_path    = _save_report(all_raw,     "raw",    "T2+T3_merged_no_dedup")
-dedup_path  = _save_report(all_deduped, "deduped","T2+T3_pipeline_dedup")
+raw_path = _save_report(all_raw, "raw", "T2+T3_merged_no_dedup")
+# dedup_path  = _save_report(all_deduped, "deduped","T2+T3_pipeline_dedup")
 
 print(f"\n{'='*65}")
-print(f"DONE — raw={len(all_raw)}  deduped={len(all_deduped)}  |  {wall_time:.0f}s")
-print(f"Raw report:    {raw_path}")
-print(f"Deduped report:{dedup_path}")
+print(f"DONE — raw={len(all_raw)}  |  {wall_time:.0f}s")
+print(f"Raw report: {raw_path}")
+# print(f"Deduped report:{dedup_path}")
 print(f"\nEval commands:")
 print(f"  cd backend/scripts/evaluate")
 print(f"  python web3bugs_eval.py gt/gt_{CONTEST_ID}.json {raw_path} --verbose")
-print(f"  python web3bugs_eval.py gt/gt_{CONTEST_ID}.json {dedup_path} --verbose")
+# print(f"  python web3bugs_eval.py gt/gt_{CONTEST_ID}.json {dedup_path} --verbose")

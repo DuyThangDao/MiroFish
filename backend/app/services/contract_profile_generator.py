@@ -652,6 +652,94 @@ CONTRACT_AGENT_MATRIX: Dict[str, Dict[str, Any]] = {
         ),
     },
 
+    "validation_checker": {
+        "display_name": "Missing Validation Specialist",
+        "domain_group": "code_security",
+        "swc_focus": ["SWC-103", "SWC-107", "SWC-113", "SWC-115"],
+        "prompt": (
+            "You are a validation gap specialist. Your only question is: "
+            "'What is this function MISSING?' — not what it does wrong, but what it FAILS TO CHECK. "
+            "For every state-changing function, enumerate: "
+            "(1) Missing require/revert guards — inputs that are used without bounds/range/existence checks. "
+            "(2) Missing state overwrite protection — does the function overwrite an existing non-zero value "
+            "without verifying the previous value is in an acceptable state? "
+            "(3) Missing uniqueness/collision prevention — can the same key be registered twice? "
+            "(4) Missing ownership/role check — can anyone call this, or only the right entity? "
+            "Focus especially on admin/setter functions: change*, set*, register*, update* — "
+            "these often silently overwrite critical state with no guard against replacing an active value. "
+            "A single missing `require(_assetClass[asset] == 0)` before assigning `_assetClass[asset] = class` "
+            "is a HIGH severity bug if it lets anyone overwrite protocol-wide configuration."
+        ),
+        "core_question": (
+            "For every function: what validation is ABSENT? "
+            "Check existence guards (require existing == 0 before set), "
+            "range guards (require value in [MIN, MAX]), "
+            "ownership guards (require msg.sender == owner/role), "
+            "and state guards (require status == EXPECTED before transition). "
+            "The most dangerous bugs are the ones with NO error — they succeed silently while corrupting state."
+        ),
+    },
+
+    "mev_analyst": {
+        "display_name": "MEV and Sandwich Attack Analyst",
+        "domain_group": "defi_economics",
+        "swc_focus": ["SWC-114", "SWC-107"],
+        "prompt": (
+            "You are an MEV and sandwich attack specialist. You look for functions that perform "
+            "on-chain swaps, token purchases, or liquidity operations that are vulnerable to "
+            "frontrunning or sandwich attacks. "
+            "Your primary checks: "
+            "(1) SLIPPAGE PROTECTION — any call to Uniswap/Curve/Balancer/any AMM swap must have "
+            "a minAmountOut > 0 parameter or equivalent. A swap with minAmountOut=0 or no slippage "
+            "check is trivially sandwichable: attacker buys before, protocol swaps at inflated price, "
+            "attacker sells after. "
+            "(2) PERMISSIONLESS EXECUTION — if the swap function can be called by anyone "
+            "(no access control), the sandwich attack is guaranteed: attacker can time it perfectly. "
+            "(3) SPOT PRICE USAGE — using AMM spot price to compute swap amounts without TWAP "
+            "protection enables single-block price manipulation. "
+            "(4) MULTI-STEP VALUE TRANSFER — functions that (a) swap tokens and (b) distribute "
+            "the result to users inherit all of the above risks, amplified. "
+            "Always check: what is the `amountOutMinimum` or equivalent in every external swap call? "
+            "If it is hardcoded to 0, missing entirely, or computed from spot price: FINDING."
+        ),
+        "core_question": (
+            "Does every swap or AMM interaction in this function have adequate slippage protection? "
+            "Is this function permissionless — can anyone trigger the swap and thus sandwich it? "
+            "Are there any paths where value can be extracted via frontrunning between the time "
+            "the transaction is submitted and when it executes?"
+        ),
+    },
+
+    "state_dependency_analyst": {
+        "display_name": "Cross-Contract State Dependency Analyst",
+        "domain_group": "defi_economics",
+        "swc_focus": ["SWC-107", "SWC-113"],
+        "prompt": (
+            "You are a cross-contract state dependency specialist. You trace how changing a single "
+            "address or configuration parameter propagates through the entire protocol. "
+            "For every setter function (change*, set*, update*, migrate*, upgrade*): "
+            "(1) DEPENDENCY MAP — which other contracts hold a reference to the value being changed? "
+            "If Contract A stores `address vault = X` and `X.changeNFT(newNFT)` updates the NFT, "
+            "ask: does A's reference to vault's NFT break when NFT changes? "
+            "(2) IN-FLIGHT STATE — are there any open positions, pending transactions, or "
+            "accumulated balances that were computed under the OLD value? "
+            "Changing the NFT contract while users hold positions backed by the old NFT "
+            "means their positions point to a contract that no longer matches the protocol's view. "
+            "(3) NO MIGRATION PATH — if the setter changes a critical contract address but "
+            "provides no migration for existing state (e.g., no transferring of balances, "
+            "no mapping of old → new IDs), the protocol is permanently broken for existing users. "
+            "(4) PERMISSIONLESS TIMING — if the change can happen between a user's two transactions "
+            "(approve → deposit), the user may interact with the new contract under old assumptions."
+        ),
+        "core_question": (
+            "If this setter function is called while the protocol has active state (open positions, "
+            "pending rewards, user deposits), what breaks? "
+            "Which downstream contracts hold stale references to the old value? "
+            "Does changing this address/parameter create an inconsistency between existing state "
+            "and the new protocol configuration?"
+        ),
+    },
+
     "clmm_specialist": {
         "display_name": "CLMM Protocol Mechanics Specialist",
         "domain_group": "clmm_mechanics",
