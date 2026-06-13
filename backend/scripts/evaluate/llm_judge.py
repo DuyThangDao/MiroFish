@@ -88,14 +88,36 @@ def _extract_visible(text: str) -> str:
     return m.group(1).strip() if m else text.strip()
 
 
-def _get_llm_client():
-    """Return LLMClient, preferring LLM2 key/base_url if set (avoids rate limit on main key)."""
+def _build_client_pool():
+    """Build list of LLMClients from up to 3 Vertex key configs (LLM_*, LLM2_*, LLM3_*)."""
     from app.utils.llm_client import LLMClient
-    key2 = os.environ.get("LLM2_VERTEX_AI_KEY_FILE")
-    url2 = os.environ.get("LLM2_BASE_URL")
-    if key2 and url2:
-        return LLMClient(vertex_key_file=key2, base_url=url2)
-    return LLMClient()
+    pool = []
+    for prefix in ("LLM", "LLM2", "LLM3"):
+        key_file = os.environ.get(f"{prefix}_VERTEX_AI_KEY_FILE")
+        base_url = os.environ.get(f"{prefix}_BASE_URL")
+        if prefix == "LLM":
+            # primary key — always present
+            if key_file and base_url:
+                pool.append(LLMClient(vertex_key_file=key_file, base_url=base_url))
+            else:
+                pool.append(LLMClient())
+        elif key_file and base_url:
+            pool.append(LLMClient(vertex_key_file=key_file, base_url=base_url))
+    return pool
+
+
+_CLIENT_POOL: list = []
+_POOL_LOCK = __import__("threading").Lock()
+
+
+def _get_client(worker_id: int = 0):
+    """Return the LLMClient assigned to this worker (round-robin over pool)."""
+    global _CLIENT_POOL
+    if not _CLIENT_POOL:
+        with _POOL_LOCK:
+            if not _CLIENT_POOL:
+                _CLIENT_POOL = _build_client_pool()
+    return _CLIENT_POOL[worker_id % len(_CLIENT_POOL)]
 
 
 def _model() -> str:
@@ -107,7 +129,7 @@ def _cache_key(*parts) -> str:
     return hashlib.md5("|".join(str(p) for p in parts).encode()).hexdigest()
 
 
-def judge_match(gt_bug: dict, predicted: dict) -> Tuple[bool, str]:
+def judge_match(gt_bug: dict, predicted: dict, worker_id: int = 0) -> Tuple[bool, str]:
     """
     Determine if a predicted finding matches a GT H bug.
 
@@ -139,7 +161,7 @@ Does the predicted finding identify the same vulnerability as the ground truth?
 Answer: YES or NO
 Reason: (one sentence)"""
 
-    client = _get_llm_client()
+    client = _get_client(worker_id)
     text = client.chat(
         messages=[{"role": "user", "content": prompt}],
         max_tokens=2000,
@@ -154,7 +176,7 @@ Reason: (one sentence)"""
     return result
 
 
-def classify_swc(swc_id: str, predicted: dict) -> Tuple[bool, str]:
+def classify_swc(swc_id: str, predicted: dict, worker_id: int = 0) -> Tuple[bool, str]:
     """
     Classify whether a predicted finding describes a specific SWC vulnerability.
 
@@ -182,7 +204,7 @@ Does this predicted finding describe a "{swc_name}" vulnerability ({swc_id})?
 Answer: YES or NO
 Reason: (one sentence)"""
 
-    client = _get_llm_client()
+    client = _get_client(worker_id)
     text = client.chat(
         messages=[{"role": "user", "content": prompt}],
         max_tokens=2000,

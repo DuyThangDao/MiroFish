@@ -61,6 +61,7 @@ import argparse
 _parser = argparse.ArgumentParser()
 _parser.add_argument('--no-inv', action='store_true', help='Disable HIST-INV injection (pure self-reasoning)')
 _parser.add_argument('--workers', type=int, default=1, help='Parallel agents per chunk (default: 1)')
+_parser.add_argument('--out-dir', type=str, default='', help='Override output directory')
 _args = _parser.parse_args()
 NO_INV  = _args.no_inv
 WORKERS = _args.workers
@@ -76,7 +77,8 @@ GT_CONTRACTS  = {
 }
 CONTEST_ID = '35'
 _inv_tag = 'no_inv' if NO_INV else 'with_inv'
-OUT_DIR = f'/home/thangdd/repos/MiroFish/benchmark/web3bugs/agent-redesign/{CONTEST_ID}/sim_e2e_v9_{_inv_tag}_cg_cot_dedup2'
+_default_out = f'/home/thangdd/repos/MiroFish/benchmark/web3bugs/agent-redesign/{CONTEST_ID}/sim_e2e_v9_{_inv_tag}_cg_cot_dedup2'
+OUT_DIR = _args.out_dir if _args.out_dir else _default_out
 os.makedirs(OUT_DIR, exist_ok=True)
 
 # ─── Call graph (from cached kg_result.json run-74) ──────────────────────────

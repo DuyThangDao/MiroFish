@@ -70,7 +70,11 @@ WORKERS = _args.workers
 # ─── Paths ────────────────────────────────────────────────────────────────────
 CONTRACTS_DIR = '/home/thangdd/repos/web3bugs/contracts/42/projects/mochi-core/contracts'
 SKIP_DIRS     = {'interfaces', 'test', 'workInProgress', 'flat', 'mocks'}
-# No GT_CONTRACTS filter — scan all project contracts
+GT_CONTRACTS  = {
+    'MochiVault', 'FeePoolV0', 'ReferralFeePoolV0',
+    'MochiProfileV0', 'MochiTreasuryV0', 'MochiEngine',
+    'VestedRewardPool',
+}
 CONTEST_ID = '42'
 _inv_tag = 'no_inv' if NO_INV else 'with_inv'
 OUT_DIR = f'/home/thangdd/repos/MiroFish/benchmark/web3bugs/agent-redesign/{CONTEST_ID}/sim_e2e_v9_{_inv_tag}_cg_cot_dedup2'
@@ -237,10 +241,12 @@ def build_chunks(contracts: dict) -> list:
     """
     Returns list of chunk dicts:
     {domain, contract_name, source, fn_names, agents}
-    Scans ALL contracts (no GT filter — full source audit).
+    Only includes chunks for GT_CONTRACTS.
     """
     domain_contract_fns = defaultdict(list)
     for cname, (_, src) in contracts.items():
+        if cname not in GT_CONTRACTS:
+            continue
         for m in FN_RE.finditer(src):
             fn   = m.group(1) or 'constructor'
             dom  = match_domain(fn)
@@ -538,7 +544,7 @@ def run_chunk(chunk: dict) -> list:
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 print('\n' + '='*65)
-print(f'E2E Simulation — Contest {CONTEST_ID} (Mochi Finance) — FULL SOURCE')
+print(f'E2E Simulation — Contest {CONTEST_ID} (Mochi Finance) — GT contracts only')
 inv_mode = 'DISABLED (pure self-reasoning)' if NO_INV else 'no-custom slugs'
 print(f'Grouper: FN_NAME_RULES | Agents: 3/chunk | HIST-INV: {inv_mode} | T2+T3 (CoT)')
 print('='*65)
@@ -546,11 +552,11 @@ print('='*65)
 contracts = discover_contracts()
 print(f"Contracts discovered: {len(contracts)}")
 
-# Full source for dedup CODE_ANCHOR check (covers cross-contract references)
-FULL_SOURCE = "\n\n".join(src for cname, (_, src) in contracts.items())
+# GT source for dedup CODE_ANCHOR check
+FULL_SOURCE = "\n\n".join(src for cname, (_, src) in contracts.items() if cname in GT_CONTRACTS)
 
 chunks = build_chunks(contracts)
-print(f"\nChunks to simulate ({len(chunks)} total — all contracts):")
+print(f"\nChunks to simulate ({len(chunks)} total — GT contracts only):")
 for c in chunks:
     print(f"  [{c['domain']}] {c['contract_name']}: {c['fn_names']}")
 

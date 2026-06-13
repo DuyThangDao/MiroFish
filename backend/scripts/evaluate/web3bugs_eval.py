@@ -14,11 +14,14 @@ Findings JSON: audit_report.json field "findings" (or "consensus_vulns" for comp
 import argparse
 import json
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Dict, List, Set
+from typing import Dict, List, Optional, Set, Tuple
 
 from llm_judge import judge_match
 from metrics import compute_metrics
+
+_EVAL_WORKERS = 3
 
 
 _KEYWORD_KEYWORDS = {
@@ -60,69 +63,90 @@ def _tier2_candidates(findings: List[dict], gt_fn: str, gt_con: str) -> List[dic
     return results
 
 
+def _evaluate_one_gt(
+    gt: dict,
+    findings: List[dict],
+    verbose: bool,
+    worker_id: int = 0,
+) -> Tuple[Optional[dict], List[str]]:
+    """Evaluate a single GT bug. Returns (match_detail_or_None, verbose_lines)."""
+    h_id  = gt.get("h_id", "?")
+    gt_fn = (gt.get("function_name") or "").lower().rstrip("()")
+    gt_con = (gt.get("contract_name") or "").lower()
+    lines: List[str] = []
+
+    # ── Tier-1 ────────────────────────────────────────────────────────────────
+    candidates = [
+        f for f in findings
+        if (f.get("function_name") or "").lower().rstrip("()") == gt_fn
+        and (f.get("contract_name") or "").lower() == gt_con
+    ]
+    if verbose:
+        lines.append(f"\n[H] {h_id}: {gt.get('title','')[:60]}")
+        lines.append(f"    location: {gt_con}.{gt_fn}  →  {len(candidates)} T1 candidates")
+
+    for pred in candidates:
+        fid = pred.get("finding_id") or pred.get("title", "")[:30]
+        is_match, reason = judge_match(gt, pred, worker_id=worker_id)
+        if verbose:
+            lines.append(f"    [T1] '{fid[:40]}': {'YES' if is_match else 'NO'} — {reason}")
+        if is_match:
+            return (
+                {"h_id": h_id, "finding_id": fid, "tier": 1, "reason": reason},
+                lines,
+            )
+
+    # ── Tier-2 ────────────────────────────────────────────────────────────────
+    t2_cands = _tier2_candidates(findings, gt_fn, gt_con)
+    if verbose and t2_cands:
+        lines.append(f"    location: {gt_con}.{gt_fn}  →  {len(t2_cands)} T2 candidates")
+
+    for pred in t2_cands:
+        fid = pred.get("finding_id") or pred.get("title", "")[:30]
+        is_match, reason = judge_match(gt, pred, worker_id=worker_id)
+        if verbose:
+            lines.append(f"    [T2] '{fid[:40]}': {'YES' if is_match else 'NO'} — {reason}")
+        if is_match:
+            return (
+                {"h_id": h_id, "finding_id": fid, "tier": 2, "reason": reason},
+                lines,
+            )
+
+    return None, lines
+
+
 def run_eval(gt_path: str, findings_path: str, verbose: bool = False) -> dict:
     gt_bugs: List[dict] = _load_json(gt_path)
     report = _load_json(findings_path)
     findings: List[dict] = _get_findings(report)
 
+    # results indexed by position so verbose output prints in GT order
+    results: List[Tuple[Optional[dict], List[str]]] = [None] * len(gt_bugs)
+
+    with ThreadPoolExecutor(max_workers=_EVAL_WORKERS) as pool:
+        futures = {
+            pool.submit(_evaluate_one_gt, gt, findings, verbose, i % _EVAL_WORKERS): i
+            for i, gt in enumerate(gt_bugs)
+        }
+        for fut in as_completed(futures):
+            i = futures[fut]
+            results[i] = fut.result()
+
     matched_h_ids: Set[str] = set()
     matched_finding_ids: Set[str] = set()
-    matched_t2_h_ids: Set[str] = set()  # subset matched via Tier-2
-
+    matched_t2_h_ids: Set[str] = set()
     match_details: List[dict] = []
 
-    for gt in gt_bugs:
-        h_id     = gt.get("h_id", "?")
-        gt_fn    = (gt.get("function_name") or "").lower().rstrip("()")
-        gt_con   = (gt.get("contract_name") or "").lower()
-
-        # ── Tier-1: exact (contract, function) match ──────────────────────────
-        candidates = [
-            f for f in findings
-            if (f.get("function_name") or "").lower().rstrip("()") == gt_fn
-            and (f.get("contract_name") or "").lower() == gt_con
-        ]
-
+    for detail, lines in results:
         if verbose:
-            print(f"\n[H] {h_id}: {gt.get('title','')[:60]}")
-            print(f"    location: {gt_con}.{gt_fn}  →  {len(candidates)} T1 candidates")
-
-        t1_matched = False
-        for pred in candidates:
-            fid = pred.get("finding_id") or pred.get("title", "")[:30]
-            is_match, reason = judge_match(gt, pred)
-            if verbose:
-                print(f"    [T1] '{fid[:40]}': {'YES' if is_match else 'NO'} — {reason}")
-            if is_match:
-                matched_h_ids.add(h_id)
-                matched_finding_ids.add(fid)
-                match_details.append({
-                    "h_id": h_id, "finding_id": fid, "tier": 1, "reason": reason,
-                })
-                t1_matched = True
-                break
-
-        if t1_matched:
-            continue  # Tier-1 already matched — no need for Tier-2
-
-        # ── Tier-2: attack_path/description mentions GT function ───────────────
-        t2_cands = _tier2_candidates(findings, gt_fn, gt_con)
-        if verbose and t2_cands:
-            print(f"    location: {gt_con}.{gt_fn}  →  {len(t2_cands)} T2 candidates")
-
-        for pred in t2_cands:
-            fid = pred.get("finding_id") or pred.get("title", "")[:30]
-            is_match, reason = judge_match(gt, pred)
-            if verbose:
-                print(f"    [T2] '{fid[:40]}': {'YES' if is_match else 'NO'} — {reason}")
-            if is_match:
-                matched_h_ids.add(h_id)
-                matched_finding_ids.add(fid)
-                matched_t2_h_ids.add(h_id)
-                match_details.append({
-                    "h_id": h_id, "finding_id": fid, "tier": 2, "reason": reason,
-                })
-                break
+            for line in lines:
+                print(line)
+        if detail:
+            matched_h_ids.add(detail["h_id"])
+            matched_finding_ids.add(detail["finding_id"])
+            if detail["tier"] == 2:
+                matched_t2_h_ids.add(detail["h_id"])
+            match_details.append(detail)
 
     tp = len(matched_h_ids)
     tp_t1 = tp - len(matched_t2_h_ids)
