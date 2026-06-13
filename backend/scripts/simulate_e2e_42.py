@@ -1,14 +1,16 @@
 """
-End-to-end simulation: grouper thực → per-chunk simulation → audit_report.json → eval.
+End-to-end simulation: contest 42 (Mochi Finance) — full source.
+
+Identical to simulate_e2e.py (contest 35) except:
+  - CONTEST_ID = '42', CONTRACTS_DIR = mochi-core
+  - GT_CONTRACTS filter removed → scan all project contracts
+  - No kg_result.json available → _context_summary = '' (no call graph)
+  - Profile source = MochiVault.sol
 
 Flow:
-  1. Chạy FN_NAME_RULES grouper trên toàn bộ contest source
-  2. Với mỗi (domain × contract) chunk chứa GT contracts: build focused source
-  3. Chạy 3 agents × T1+T2 HIST-INV (no custom slugs)
-  4. Parse FINDING blocks → audit_report.json (eval format)
-  5. In hướng dẫn chạy eval
-
-Config: NO custom_* slugs, call graph prepended, T2 (standard) + T3 (independent CoT sweep) merged + global dedup (post all chunks).
+  1. FN_NAME_RULES grouper on all contracts (no GT filter)
+  2. 3 agents × T1+T2 HIST-INV (no custom slugs) + T3 CoT sweep
+  3. Global dedup → audit_report_42_{raw,deduped}.json
 """
 import sys, os, re, json, time, threading
 from collections import defaultdict
@@ -66,22 +68,16 @@ NO_INV  = _args.no_inv
 WORKERS = _args.workers
 
 # ─── Paths ────────────────────────────────────────────────────────────────────
-CONTRACTS_DIR = '/home/thangdd/repos/web3bugs/contracts/35/trident/contracts'
+CONTRACTS_DIR = '/home/thangdd/repos/web3bugs/contracts/42/projects/mochi-core/contracts'
 SKIP_DIRS     = {'interfaces', 'test', 'workInProgress', 'flat', 'mocks'}
-GT_CONTRACTS  = {
-    'ConcentratedLiquidityPool',
-    'ConcentratedLiquidityPoolManager',
-    'ConcentratedLiquidityPosition',
-    'Ticks',
-}
-CONTEST_ID = '35'
+# No GT_CONTRACTS filter — scan all project contracts
+CONTEST_ID = '42'
 _inv_tag = 'no_inv' if NO_INV else 'with_inv'
 OUT_DIR = f'/home/thangdd/repos/MiroFish/benchmark/web3bugs/agent-redesign/{CONTEST_ID}/sim_e2e_v9_{_inv_tag}_cg_cot_dedup2'
 os.makedirs(OUT_DIR, exist_ok=True)
 
-# ─── Call graph (from cached kg_result.json run-74) ──────────────────────────
-_KG_RESULT_PATH = '/home/thangdd/repos/MiroFish/benchmark/web3bugs/agent-redesign/35/run-74/kg_result.json'
-_context_summary = json.load(open(_KG_RESULT_PATH)).get('context_summary', '')
+# ─── Call graph (not available for contest 42) ────────────────────────────────
+_context_summary = ''
 
 def _get_call_graph_block(contract_names: list) -> str:
     """Extract CALL GRAPH lines for one or more contracts from context_summary."""
@@ -241,12 +237,10 @@ def build_chunks(contracts: dict) -> list:
     """
     Returns list of chunk dicts:
     {domain, contract_name, source, fn_names, agents}
-    Only includes chunks for GT_CONTRACTS.
+    Scans ALL contracts (no GT filter — full source audit).
     """
     domain_contract_fns = defaultdict(list)
     for cname, (_, src) in contracts.items():
-        if cname not in GT_CONTRACTS:
-            continue
         for m in FN_RE.finditer(src):
             fn   = m.group(1) or 'constructor'
             dom  = match_domain(fn)
@@ -255,44 +249,23 @@ def build_chunks(contracts: dict) -> list:
     chunks = []
     for (dom, cname), fns in sorted(domain_contract_fns.items()):
         _, src = contracts[cname]
-        # For clmm_semantic CLP: attach Ticks.sol as aux (cross-contract fee accounting)
-        aux = []
-        if dom == 'clmm_semantic' and cname == 'ConcentratedLiquidityPool':
-            if 'Ticks' in contracts:
-                aux = [('Ticks', contracts['Ticks'][1])]
-        # For math_cast CLPosition: attach CLP as aux (calls into pool)
-        if dom == 'math_cast' and cname == 'ConcentratedLiquidityPosition':
-            if 'ConcentratedLiquidityPool' in contracts:
-                aux = [('ConcentratedLiquidityPool', contracts['ConcentratedLiquidityPool'][1])]
-        # For general CLPosition: attach CLP as aux (collect/burn cross-contract interaction)
-        if dom == 'general' and cname == 'ConcentratedLiquidityPosition':
-            if 'ConcentratedLiquidityPool' in contracts:
-                aux = [('ConcentratedLiquidityPool', contracts['ConcentratedLiquidityPool'][1])]
-        # For general Ticks: use full Ticks source (small file)
-        if dom == 'general' and cname == 'Ticks':
-            src_full = src
-            chunks.append({'domain': dom, 'contract_name': cname,
-                           'source': f"// ─── {cname}.sol ─────────────────────────────────────────────────\n{src_full}",
-                           'fn_names': fns, 'aux_names': [],
-                           'agents': DOMAIN_AGENTS.get(dom, DOMAIN_AGENTS['general'])})
-            continue
-
-        chunk_source = build_chunk_source(cname, src, fns, aux)
+        chunk_source = build_chunk_source(cname, src, fns)
         chunks.append({
             'domain':         dom,
             'contract_name':  cname,
             'source':         chunk_source,
             'fn_names':       fns,
-            'aux_names':      [(a_name, None) for a_name, _ in aux],
+            'aux_names':      [],
             'agents':         DOMAIN_AGENTS.get(dom, DOMAIN_AGENTS['general']),
         })
     return chunks
 
 # ─── Profiles ─────────────────────────────────────────────────────────────────
-_clp_src = open(os.path.join(
-    CONTRACTS_DIR, 'pool/concentrated/ConcentratedLiquidityPool.sol')).read()
+_primary_src = open(
+    '/home/thangdd/repos/web3bugs/contracts/42/projects/mochi-core/contracts/vault/MochiVault.sol'
+).read()
 gen = Gen()
-profiles_map = {p.agent_id: p for p in gen.generate_tier1_profiles(_clp_src)}
+profiles_map = {p.agent_id: p for p in gen.generate_tier1_profiles(_primary_src)}
 
 # ─── Orchestrator (for pipeline dedup) ───────────────────────────────────────
 _orch = CyberSessionOrchestrator()
@@ -304,27 +277,17 @@ def _clean_anchor(anchor: str) -> str:
     """Strip markdown fences and filename prefixes agents add in CoT output."""
     if not anchor:
         return anchor
-    # Extract code inside ```solidity ... ``` if present
     m = _MD_FENCE_RE.search(anchor)
     if m:
         anchor = m.group(1).strip()
-    # Strip leading (ContractName.sol) prefix
     anchor = _FILENAME_RE.sub('', anchor).strip()
-    # Strip surrounding backticks from inline code
     anchor = anchor.strip('`').strip()
     return anchor
 
 def dedup_pipeline(findings: list, full_source: str) -> list:
-    """Apply main pipeline dedup using full GT source (not chunk-only source).
-
-    Steps (mirror main pipeline):
-      1. _dedup_pre_r2  — CODE_ANCHOR substring check against full source
-      2. _static_anchor_dedup — exact anchor merge
-      3. _llm_anchor_dedup   — LLM semantic merge
-    """
+    """Apply main pipeline dedup using full source (not chunk-only source)."""
     if not findings:
         return findings
-    # Clean code_anchor before dedup — T3 CoT agents wrap in markdown fences/filename prefix
     for f in findings:
         f['code_anchor'] = _clean_anchor(f.get('code_anchor', ''))
     pool = {
@@ -359,7 +322,14 @@ def llm_call(prompt: str, client=None) -> str:
                 messages=[{"role": "user", "content": prompt}],
                 extra_body={"google": {"thinking_config": {"thinking_budget": 0}}}
             )
-            return _strip(resp.choices[0].message.content)
+            msg = resp.choices[0].message if resp.choices else None
+            content = msg.content if msg is not None else None
+            if content is None:
+                wait = 15 * (attempt + 1)
+                with _LOCK: print(f"    [null content, retry {wait}s]", flush=True)
+                time.sleep(wait)
+                continue
+            return _strip(content)
         except Exception as e:
             if '429' in str(e) or 'rate' in str(e).lower():
                 wait = 30 * (attempt + 1)
@@ -429,9 +399,8 @@ _FIELD_RE = re.compile(
 def parse_findings(text: str, default_contract: str) -> list:
     """Parse FINDING blocks from T2 text into list of finding dicts."""
     findings = []
-    # Split on FINDING: boundaries
     parts = re.split(r'\nFINDING:', '\n' + text)
-    for part in parts[1:]:  # skip everything before first FINDING
+    for part in parts[1:]:
         lines = part.strip().split('\n')
         title = lines[0].strip()
         fields = {'title': title, 'contract_name': default_contract,
@@ -452,7 +421,6 @@ def parse_findings(text: str, default_contract: str) -> list:
         if current_field and buf:
             fields[current_field.lower()] = '\n'.join(buf).strip()
 
-        # Normalize field names for eval
         finding = {
             'title':         fields.get('title', ''),
             'description':   fields.get('description', '') or fields.get('outcome', ''),
@@ -471,6 +439,19 @@ def parse_findings(text: str, default_contract: str) -> list:
 def run_agent(agent_id: str, ann_source: str, chunk_label: str, agent_idx: int,
               contract_name: str, client=None) -> tuple:
     """Returns (t2_findings, t3_findings)."""
+    out = os.path.join(OUT_DIR, f"{chunk_label.replace('/', '_')}_{agent_id}.txt")
+
+    # Resume: nếu file đã có → parse lại, không gọi LLM
+    if os.path.exists(out):
+        text = open(out).read()
+        t2_m = re.search(r'=== T2 \(standard\) ===\n(.*?)(?====)', text, re.DOTALL)
+        t3_m = re.search(r'=== T3 \(CoT sweep\) ===\n(.*?)$',    text, re.DOTALL)
+        t2_f = parse_findings(t2_m.group(1) if t2_m else '', contract_name)
+        t3_f = parse_findings(t3_m.group(1) if t3_m else '', contract_name)
+        with _LOCK:
+            print(f"    [{chunk_label}/{agent_id}] RESUMED  T2={len(t2_f)} T3={len(t3_f)}", flush=True)
+        return t2_f, t3_f
+
     profile = profiles_map.get(agent_id)
     if not profile:
         print(f"    [WARN] agent {agent_id} not found — skip", flush=True)
@@ -521,7 +502,7 @@ def run_agent(agent_id: str, ann_source: str, chunk_label: str, agent_idx: int,
 def run_chunk(chunk: dict) -> list:
     label    = f"{chunk['domain']}/{chunk['contract_name']}"
     base_src  = chunk['source'] if NO_INV else _annotate_source_with_hist_inv(chunk['source'], INV_MAP)
-    # Prepend call graph for this contract (+ aux contracts if present)
+    # Prepend call graph for this contract (empty for contest 42 — no kg_result.json)
     cg_contracts = [chunk['contract_name']] + [a for a, _ in chunk.get('aux_names', [])]
     cg_block = _get_call_graph_block(cg_contracts)
     ann_src  = (cg_block + "\n" + base_src) if cg_block else base_src
@@ -557,7 +538,7 @@ def run_chunk(chunk: dict) -> list:
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 print('\n' + '='*65)
-print(f'E2E Simulation — Contest {CONTEST_ID}')
+print(f'E2E Simulation — Contest {CONTEST_ID} (Mochi Finance) — FULL SOURCE')
 inv_mode = 'DISABLED (pure self-reasoning)' if NO_INV else 'no-custom slugs'
 print(f'Grouper: FN_NAME_RULES | Agents: 3/chunk | HIST-INV: {inv_mode} | T2+T3 (CoT)')
 print('='*65)
@@ -565,13 +546,11 @@ print('='*65)
 contracts = discover_contracts()
 print(f"Contracts discovered: {len(contracts)}")
 
-# Full GT source for dedup CODE_ANCHOR check (covers cross-contract references)
-FULL_GT_SOURCE = "\n\n".join(
-    src for cname, (_, src) in contracts.items() if cname in GT_CONTRACTS
-)
+# Full source for dedup CODE_ANCHOR check (covers cross-contract references)
+FULL_SOURCE = "\n\n".join(src for cname, (_, src) in contracts.items())
 
 chunks = build_chunks(contracts)
-print(f"\nChunks to simulate ({len(chunks)} total — GT contracts only):")
+print(f"\nChunks to simulate ({len(chunks)} total — all contracts):")
 for c in chunks:
     print(f"  [{c['domain']}] {c['contract_name']}: {c['fn_names']}")
 
@@ -584,7 +563,7 @@ for chunk in chunks:
 # Global dedup trên toàn bộ findings (cross-chunk duplicates được xử lý đúng)
 print(f"\n{'='*65}")
 print(f"Global dedup: {len(all_raw)} raw findings across all chunks")
-all_deduped = dedup_pipeline(all_raw, FULL_GT_SOURCE)
+all_deduped = dedup_pipeline(all_raw, FULL_SOURCE)
 print(f"Global dedup result: {len(all_raw)} → {len(all_deduped)}")
 
 wall_time = time.time() - t_start

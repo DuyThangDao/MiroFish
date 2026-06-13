@@ -1498,6 +1498,12 @@ LOCATION RULE — before writing FUNCTION: or VIOLATED_AT: in any EVIDENCE block
       (e.g., the function that changes liquidity/supply THEN computes the accumulator),
       NOT a downstream function that merely reads the stale result.
   (3) If you cannot find the exact function name in the source, do NOT guess — skip the FINDING.
+  (4) PRIVATE/INTERNAL HELPER ATTRIBUTION — if the vulnerable line is inside a private or
+      internal helper function called by the function you are analyzing
+      (e.g. `_getAmountsForLiquidity`, `_updateFees`, `_computeReward`, `_settle`):
+      set FUNCTION to the HELPER's name, NOT the public caller.
+      Example: if mint() calls _getAmountsForLiquidity() and the bug is a typecast inside
+      _getAmountsForLiquidity, write FUNCTION: _getAmountsForLiquidity — not FUNCTION: mint.
 
 PROTOCOL INVARIANT ANALYSIS — mandatory before writing any FINDING:
 

@@ -2815,7 +2815,7 @@ class CyberSessionOrchestrator:
         text = _re.sub(r'/\*.*?\*/', '', text, flags=_re.DOTALL)
         text = _re.sub(r'\s+', ' ', text).strip()
         text = text.rstrip(';').strip()
-        return text[:100].lower()
+        return text[:200].lower()
 
     @staticmethod
     def _normalize_source(text: str) -> str:
@@ -2915,14 +2915,18 @@ class CyberSessionOrchestrator:
 
     @classmethod
     def _pick_primary(cls, group: list) -> tuple:
-        """Given list of (pid, item), return (pid, item) with best evidence priority."""
+        """Given list of (pid, item), return (pid, item) with best evidence priority.
+        Tiebreak by longest description+attack_path to preserve most informative finding."""
         def priority(pid_item):
             _, item = pid_item
             ev = (item.get("evidence_snippets") or [""])[0]
+            ev_rank = 99
             for prefix, rank in cls._EV_PRIORITY.items():
                 if ev.upper().startswith(prefix):
-                    return rank
-            return 99
+                    ev_rank = rank
+                    break
+            text_len = len(item.get("description") or "") + len(item.get("attack_path") or "")
+            return (ev_rank, -text_len)
         return min(group, key=priority)
 
     @classmethod
@@ -2959,6 +2963,8 @@ class CyberSessionOrchestrator:
                 merged = dict(primary)
                 all_evidence = list(primary.get("evidence_snippets", []))
                 all_submitters = list(primary.get("submitters", []))
+                extra_descs: list = []
+                extra_paths: list = []
                 for pid, item in group:
                     if pid == primary_pid:
                         continue
@@ -2968,9 +2974,20 @@ class CyberSessionOrchestrator:
                     for s in (item.get("submitters") or []):
                         if s not in all_submitters:
                             all_submitters.append(s)
+                    # Preserve description/attack_path text so T2 matching still works
+                    d = (item.get("description") or "").strip()
+                    p = (item.get("attack_path") or "").strip()
+                    if d and d not in (merged.get("description") or ""):
+                        extra_descs.append(d)
+                    if p and p not in (merged.get("attack_path") or ""):
+                        extra_paths.append(p)
                     n_merged += 1
                 merged["evidence_snippets"] = all_evidence
                 merged["submitters"] = all_submitters
+                if extra_descs:
+                    merged["description"] = (merged.get("description") or "") + "\n" + "\n".join(extra_descs)
+                if extra_paths:
+                    merged["attack_path"] = (merged.get("attack_path") or "") + "\n" + "\n".join(extra_paths)
                 merged_pool[primary_pid] = merged
                 logger.debug(
                     f"[static_dedup] merged {len(group)} findings at "
@@ -2983,6 +3000,139 @@ class CyberSessionOrchestrator:
         logger.info(
             f"[static_dedup] {len(candidate_pool)} → {len(merged_pool)} "
             f"({n_merged} findings merged by exact anchor)"
+        )
+        return merged_pool
+
+    def _semi_static_anchor_dedup(self, candidate_pool: dict, source_code: str) -> dict:
+        """
+        Semi-static anchor dedup: group by exact (contract, function, normalized_anchor).
+        - Group size = 1: auto-pass (no LLM)
+        - Group size ≥ 2: LLM verifies "same bug?" before merging
+          - LLM MERGE → merge (same as pure static)
+          - LLM KEEP_SEPARATE → add all findings individually
+        Runs LLM calls in parallel via ThreadPoolExecutor.
+        """
+        import re as _re, time as _time
+        from collections import defaultdict as _dd
+        from concurrent.futures import ThreadPoolExecutor
+
+        anchor_groups: dict = _dd(list)
+        no_anchor: list = []
+
+        for pid, item in candidate_pool.items():
+            anchor = self._normalize_evidence(item.get("code_anchor", ""))
+            if anchor:
+                key = (
+                    item.get("contract_name", "").lower().strip(),
+                    item.get("function_name", "").lower().strip(),
+                    anchor,
+                )
+                anchor_groups[key].append((pid, item))
+            else:
+                no_anchor.append((pid, item))
+
+        single_groups = {k: v for k, v in anchor_groups.items() if len(v) == 1}
+        multi_groups  = {k: v for k, v in anchor_groups.items() if len(v) >= 2}
+
+        merged_pool: dict = {}
+        n_merged = 0
+        n_llm_calls = 0
+        max_workers = int(os.environ.get("LLM_DEDUP_WORKERS", "2"))
+
+        def _verify_group(key, group):
+            """LLM verifies if anchor-sharing findings describe the same bug."""
+            contract, fn, anchor_text = key
+            fn_body = self._extract_function_body(source_code, fn)
+            parts = [
+                f"  [{i+1}] title: {item.get('title', '')[:80]}\n"
+                f"       description: {(item.get('description') or '')[:250]}\n"
+                f"       attack_path: {(item.get('attack_path') or '')[:150]}"
+                for i, (pid, item) in enumerate(group)
+            ]
+            prompt = (
+                "You are a deduplication agent for smart contract audit findings.\n\n"
+                f"CONTRACT: {contract}  FUNCTION: {fn}\n"
+                f"SHARED CODE ANCHOR: {anchor_text[:150]}\n"
+            )
+            if fn_body:
+                prompt += f"\nFUNCTION SOURCE:\n{fn_body}\n"
+            prompt += (
+                f"\nThe following {len(group)} findings all point to the EXACT SAME code anchor line.\n"
+                "Same anchor does NOT mean same bug — different vulnerabilities can share the same line.\n\n"
+                "FINDINGS:\n" + "\n\n".join(parts) + "\n\n"
+                "TASK: For each pair, decide MERGE or KEEP_SEPARATE.\n\n"
+                "Rules:\n"
+                "  - MERGE only when certain: same root cause, same fix, same attacker action\n"
+                "  - KEEP_SEPARATE when descriptions name different state variables or mechanisms\n"
+                "  - MANDATORY KEEP_SEPARATE:\n"
+                "    (a) One finding is about UPDATE ORDER, other is about INITIALIZATION\n"
+                "    (b) Different state variables as root cause (e.g. secondsPerLiquidity vs feeGrowthOutside)\n"
+                "    (c) Different attack vectors or different exploit consequences\n"
+                "  - When in doubt: KEEP_SEPARATE (missed TP is worse than keeping duplicates)\n\n"
+                "Output one decision per pair:\n"
+                "  MERGE: [i] == [j]  | REASON: <one sentence>\n"
+                "  KEEP_SEPARATE: [i] vs [j] | REASON: <one sentence>"
+            )
+            merge_pairs: list = []
+            try:
+                t0 = _time.time()
+                response = self._call_agent_v2(prompt, max_tokens=512)
+                elapsed = _time.time() - t0
+                logger.info(
+                    f"[semi_static_dedup] {contract}.{fn}: {elapsed:.1f}s, "
+                    f"{len(group)} findings, anchor={anchor_text[:40]!r}"
+                )
+                for line in response.split('\n'):
+                    m = _re.search(r'MERGE:\s*\[(\d+)\]\s*==\s*\[(\d+)\]', line)
+                    if m:
+                        i, j = int(m.group(1)) - 1, int(m.group(2)) - 1
+                        if 0 <= i < len(group) and 0 <= j < len(group) and i != j:
+                            merge_pairs.append((min(i, j), max(i, j)))
+                merge_pairs = list(set(merge_pairs))
+            except Exception as e:
+                logger.warning(
+                    f"[semi_static_dedup] error for {contract}.{fn}: {e} — keeping separate"
+                )
+            return merge_pairs
+
+        # Single-anchor groups: auto-pass
+        for key, group in single_groups.items():
+            pid, item = group[0]
+            merged_pool[pid] = item
+
+        # Multi-member anchor groups: parallel LLM verification
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures = {
+                ex.submit(_verify_group, key, group): (key, group)
+                for key, group in multi_groups.items()
+            }
+            for future, (key, group) in futures.items():
+                try:
+                    merge_pairs = future.result()
+                    n_llm_calls += 1
+                    merged_items = self._apply_llm_merges(group, merge_pairs)
+                    n_merged += len(group) - len(merged_items)
+                    for pid, item in merged_items:
+                        merged_pool[pid] = item
+                    if len(group) != len(merged_items):
+                        logger.debug(
+                            f"[semi_static_dedup] ({key[0]}.{key[1]}) "
+                            f"{len(group)} → {len(merged_items)} findings"
+                        )
+                except Exception as e:
+                    logger.warning(
+                        f"[semi_static_dedup] collect error {key}: {e} — keeping all separate"
+                    )
+                    for pid, item in group:
+                        merged_pool[pid] = item
+
+        for pid, item in no_anchor:
+            merged_pool[pid] = item
+
+        logger.info(
+            f"[semi_static_dedup] {n_llm_calls} LLM calls ({max_workers} workers), "
+            f"{len(candidate_pool)} → {len(merged_pool)} "
+            f"({n_merged} findings merged by semi-static)"
         )
         return merged_pool
 
@@ -3107,7 +3257,14 @@ class CyberSessionOrchestrator:
                 "Rules:\n"
                 "  - Only merge when CERTAIN they share the same root cause\n"
                 "  - Different anchors usually mean different bugs — when in doubt: KEEP_SEPARATE\n"
-                "  - KEEP_SEPARATE is always safer (duplicate > missed TP)\n\n"
+                "  - KEEP_SEPARATE is always safer (duplicate > missed TP)\n"
+                "  - MANDATORY KEEP_SEPARATE cases:\n"
+                "    (a) Either finding has anchor 'N/A' or empty — different code evidence means different bugs\n"
+                "    (b) Findings name different state variables as the root cause\n"
+                "        (e.g. one says 'secondsPerLiquidity', other says 'nearestTick' or 'feeGrowthOutside')\n"
+                "        Different variables = different bugs, even in the same function\n"
+                "    (c) One finding is about update ORDER (computed before/after), other is about\n"
+                "        INITIALIZATION (stale snapshot) — these are always separate bugs\n\n"
                 "Output one decision per line:\n"
                 "  MERGE: [i] == [j]  | REASON: <one sentence>\n"
                 "  KEEP_SEPARATE: [i] | REASON: <one sentence>"
@@ -3161,8 +3318,8 @@ class CyberSessionOrchestrator:
         return result_pool
 
     def _run_anchor_dedup(self, candidate_pool: dict, source_code: str) -> dict:
-        """Sequential dedup entry point: Bước 1 (static) → Bước 2 (LLM)."""
-        after_static = self._static_anchor_dedup(candidate_pool)
+        """Sequential dedup entry point: Bước 1 (semi-static) → Bước 2 (LLM)."""
+        after_static = self._semi_static_anchor_dedup(candidate_pool, source_code)
         after_llm = self._llm_anchor_dedup(after_static, source_code)
         return after_llm
 

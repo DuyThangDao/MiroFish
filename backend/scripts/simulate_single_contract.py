@@ -40,6 +40,26 @@ from app.services.contract_hist_inv_cache import HistInvCache
 
 def _strip(t): return re.sub(r'<think>.*?</think>', '', t or '', flags=re.DOTALL).strip()
 
+# ─── CoT TRACE block — injected into T2 for math_precision only ──────────────
+_MATH_COT_BLOCK = """\
+=== CAST & ARITHMETIC TRACE (REQUIRED) ===
+For EVERY cast or arithmetic operation that could overflow/underflow, write a TRACE block BEFORE your FINDING:
+
+TRACE [{function}]:
+  OP: <exact operation, e.g. "int256(uint256(_liquidity))" or "balanceOf - reserve0">
+  TYPE_CHAIN: <trace each step with the maximum possible value at each conversion>
+    e.g., "_liquidity: uint128(max=2^128-1) → uint256(ok, same value) → int256(OVERFLOW if val > 2^255-1)"
+  UNCHECKED: <yes / no — is this inside an `unchecked` block?>
+  ATTACKER_CONTROL: <can an attacker choose this input value? how?>
+  VERDICT: EXPLOITABLE | SAFE | UNCLEAR
+
+Rules:
+- Only write a FINDING for TRACE blocks where VERDICT=EXPLOITABLE.
+- For signed/unsigned conversions (int256↔uint256): check if value can exceed target type's max.
+- For unchecked subtractions: check if minuend can be smaller than subtrahend.
+- Skip TRACE for literals and provably-bounded constants.
+"""
+
 # ─── Hypothesis-first block (injected into T2 for no_inv+hyp mode) ────────────
 _HYP_BLOCK = """\
 === HYPOTHESIS-FIRST RULES ===
@@ -74,6 +94,7 @@ parser.add_argument('--no-inv', action='store_true', help='Disable HIST-INV inje
 parser.add_argument('--merge-both', action='store_true', help='Run with_inv then no_inv sequentially, merge findings')
 parser.add_argument('--workers', type=int, default=1, help='Parallel agents per chunk (default: 1)')
 parser.add_argument('--hyp', action='store_true', help='Use hypothesis-first RAG for no_inv mode')
+parser.add_argument('--contracts-dir', help='Override contracts directory path')
 args = parser.parse_args()
 
 TARGET_CONTRACT = args.contract
@@ -84,7 +105,7 @@ WORKERS         = args.workers
 HYP             = args.hyp
 
 # ─── Paths ────────────────────────────────────────────────────────────────────
-CONTRACTS_DIR = f'/home/thangdd/repos/web3bugs/contracts/{CONTEST_ID}/trident/contracts'
+CONTRACTS_DIR = args.contracts_dir or f'/home/thangdd/repos/web3bugs/contracts/{CONTEST_ID}/trident/contracts'
 SKIP_DIRS     = {'interfaces', 'test', 'workInProgress', 'flat', 'mocks'}
 GT_CONTRACTS  = {
     'ConcentratedLiquidityPool',
@@ -154,11 +175,11 @@ def match_domain(fn_name: str) -> str:
 # ─── Domain → agents ──────────────────────────────────────────────────────────
 DOMAIN_AGENTS = {
     'clmm_semantic':  ['clmm_specialist',   'defi_analyst',        'logic_exploiter'],
-    'math_cast':      ['math_precision',    'library_auditor',     'invariant_breaker'],
+    'math_cast':      ['math_precision',    'invariant_breaker',   'logic_exploiter'],
     'access_reward':  ['access_escalator',  'appsec_researcher',   'state_machine_analyst'],
     'economic':       ['defi_attacker',     'flash_loan_specialist','economic_attacker'],
     'state_ordering': ['state_machine_analyst', 'appsec_researcher', 'logic_exploiter'],
-    'general':        ['defi_attacker',     'logic_exploiter',     'invariant_breaker'],
+    'general':        ['defi_attacker',     'logic_exploiter',     'appsec_hardener'],
 }
 
 FN_RE = re.compile(r'^\s*function\s+(\w+)\s*\(', re.MULTILINE)
@@ -277,8 +298,13 @@ def build_chunks(contracts: dict, target: str) -> list:
     return chunks
 
 # ─── Profiles ─────────────────────────────────────────────────────────────────
-_clp_src = open(os.path.join(
-    CONTRACTS_DIR, 'pool/concentrated/ConcentratedLiquidityPool.sol')).read()
+# Use target contract source for profile generation; fall back to CLP for contest 35
+_profile_src_path = os.path.join(CONTRACTS_DIR, 'pool/concentrated/ConcentratedLiquidityPool.sol')
+if not os.path.exists(_profile_src_path):
+    # Find any .sol file in CONTRACTS_DIR to use as profile seed
+    _sol_files = [f for f in os.listdir(CONTRACTS_DIR) if f.endswith('.sol')]
+    _profile_src_path = os.path.join(CONTRACTS_DIR, _sol_files[0]) if _sol_files else None
+_clp_src = open(_profile_src_path).read() if _profile_src_path else ""
 gen = Gen()
 profiles_map = {p.agent_id: p for p in gen.generate_tier1_profiles(_clp_src)}
 
@@ -370,10 +396,14 @@ def run_agent(agent_id: str, ann_source: str, chunk_label: str, agent_idx: int,
     t1_resp   = llm_call(t1_prompt)
     t1_clean  = clean_inv(t1_resp)
     time.sleep(2)
+    if use_hyp:
+        _hint = _HYP_BLOCK
+    else:
+        _hint = ""
     t2_prompt = build_round1_prompt(
         profile, ann_source,
         injected_invariants=t1_clean,
-        step2_hint=_HYP_BLOCK if use_hyp else "",
+        step2_hint=_hint,
     )
     t2_resp   = llm_call(t2_prompt)
 

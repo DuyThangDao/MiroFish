@@ -89,8 +89,12 @@ def _extract_visible(text: str) -> str:
 
 
 def _get_llm_client():
-    """Return project LLMClient (handles Vertex AI / API key automatically)."""
+    """Return LLMClient, preferring LLM2 key/base_url if set (avoids rate limit on main key)."""
     from app.utils.llm_client import LLMClient
+    key2 = os.environ.get("LLM2_VERTEX_AI_KEY_FILE")
+    url2 = os.environ.get("LLM2_BASE_URL")
+    if key2 and url2:
+        return LLMClient(vertex_key_file=key2, base_url=url2)
     return LLMClient()
 
 
