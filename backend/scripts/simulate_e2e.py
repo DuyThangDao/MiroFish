@@ -1,14 +1,22 @@
 """
-End-to-end simulation: grouper thực → per-chunk simulation → audit_report.json → eval.
+End-to-end simulation: contest-agnostic — per-chunk simulation → audit_report.json → eval.
+
+Usage:
+  python scripts/simulate_e2e.py \
+    --contest-id 35 \
+    --contracts-dir /path/to/contracts \
+    --gt-contracts ContractA ContractB ... \
+    [--kg-result /path/to/kg_result.json] \
+    [--primary-contract /path/to/Primary.sol] \
+    [--cache-path /path/to/hist_inv_cache.json] \
+    [--no-inv] [--workers N] [--out-dir /path]
 
 Flow:
   1. Chạy FN_NAME_RULES grouper trên toàn bộ contest source
   2. Với mỗi (domain × contract) chunk chứa GT contracts: build focused source
-  3. Chạy 3 agents × T1+T2 HIST-INV (no custom slugs)
+  3. Chạy 3-4 agents × T1+T2 HIST-INV + T3 CoT sweep
   4. Parse FINDING blocks → audit_report.json (eval format)
   5. In hướng dẫn chạy eval
-
-Config: NO custom_* slugs, call graph prepended, T2 (standard) + T3 (independent CoT sweep) merged + global dedup (post all chunks).
 """
 import sys, os, re, json, time, threading
 from collections import defaultdict
@@ -50,6 +58,7 @@ from app.services.contract_oasis_env import build_round1_prompt
 from app.services.contract_profile_generator import ContractExpertProfileGenerator as Gen
 from app.services.cyber_session_orchestrator import _annotate_source_with_hist_inv, CyberSessionOrchestrator
 from app.services.contract_hist_inv_cache import HistInvCache
+from app.services.contract_kg_builder import ContractKGBuilder
 
 # Disable attack_path validation — e2e format không dùng ACTOR/CALL/STATE_CHANGE/OUTCOME
 os.environ.setdefault("ATTACK_PATH_VALIDATION", "false")
@@ -58,35 +67,101 @@ def _strip(t): return re.sub(r'<think>.*?</think>', '', t or '', flags=re.DOTALL
 
 # ─── CLI args ─────────────────────────────────────────────────────────────────
 import argparse
-_parser = argparse.ArgumentParser()
-_parser.add_argument('--no-inv', action='store_true', help='Disable HIST-INV injection (pure self-reasoning)')
-_parser.add_argument('--workers', type=int, default=1, help='Parallel agents per chunk (default: 1)')
-_parser.add_argument('--out-dir', type=str, default='', help='Override output directory')
+_parser = argparse.ArgumentParser(description='Contest-agnostic e2e simulation')
+_parser.add_argument('--contest-id',        required=True,  help='Contest ID, e.g. 35, 42, 5')
+_parser.add_argument('--contracts-dir',     required=True,  help='Path to contracts root directory')
+_parser.add_argument('--gt-contracts',      nargs='+', required=True, help='GT contract names (without .sol)')
+_parser.add_argument('--kg-result',         default='',     help='Path to kg_result.json for call graph (optional)')
+_parser.add_argument('--primary-contract',  default='',     help='Path to primary .sol for agent profile generation (optional; auto-detect if omitted)')
+_parser.add_argument('--cache-path',        default='',     help='Override hist_inv_cache.json path')
+_parser.add_argument('--no-inv',   action='store_true',     help='Disable HIST-INV injection (pure self-reasoning)')
+_parser.add_argument('--workers',  type=int, default=1,     help='Parallel agents per chunk (default: 1)')
+_parser.add_argument('--out-dir',  default='',              help='Override output directory')
 _args = _parser.parse_args()
-NO_INV  = _args.no_inv
-WORKERS = _args.workers
 
-# ─── Paths ────────────────────────────────────────────────────────────────────
-CONTRACTS_DIR = '/home/thangdd/repos/web3bugs/contracts/35/trident/contracts'
+CONTEST_ID    = _args.contest_id
+CONTRACTS_DIR = _args.contracts_dir
+GT_CONTRACTS  = set(_args.gt_contracts)
+NO_INV        = _args.no_inv
+WORKERS       = _args.workers
 SKIP_DIRS     = {'interfaces', 'test', 'workInProgress', 'flat', 'mocks'}
-GT_CONTRACTS  = {
-    'ConcentratedLiquidityPool',
-    'ConcentratedLiquidityPoolManager',
-    'ConcentratedLiquidityPosition',
-    'Ticks',
-}
-CONTEST_ID = '35'
-_inv_tag = 'no_inv' if NO_INV else 'with_inv'
-_default_out = f'/home/thangdd/repos/MiroFish/benchmark/web3bugs/agent-redesign/{CONTEST_ID}/sim_e2e_v10_{_inv_tag}_cg_cot_dedup2'
-OUT_DIR = _args.out_dir if _args.out_dir else _default_out
+
+_inv_tag     = 'no_inv' if NO_INV else 'with_inv'
+_BENCH_DIR   = os.path.join(os.path.dirname(__file__), '../../benchmark/web3bugs/agent-redesign', CONTEST_ID)
+_default_out = os.path.join(_BENCH_DIR, f'sim_e2e_v10_{_inv_tag}_cg_cot_dedup2')
+OUT_DIR      = _args.out_dir if _args.out_dir else _default_out
 os.makedirs(OUT_DIR, exist_ok=True)
 
-# ─── Call graph (from cached kg_result.json run-74) ──────────────────────────
-_KG_RESULT_PATH = '/home/thangdd/repos/MiroFish/benchmark/web3bugs/agent-redesign/35/run-74/kg_result.json'
-_context_summary = json.load(open(_KG_RESULT_PATH)).get('context_summary', '')
+# ─── Call graph ───────────────────────────────────────────────────────────────
+# Priority: --kg-result file → auto-saved kg_result_auto.json → full KG pipeline
+_context_summary = ''
+_KG_AUTO_PATH = os.path.join(_BENCH_DIR, 'kg_result_auto.json')
+
+def _load_kg_from_file(path: str) -> str:
+    return json.load(open(path)).get('context_summary', '')
+
+def _build_kg_pipeline(contracts: dict) -> str:
+    """Run full KG build pipeline (identical to main pipeline) to get context_summary.
+
+    Concatenates all contract sources with '// ─── Name.sol ───' markers,
+    builds Zep KG (or skips if Zep disabled), and returns the full context_summary
+    (call graph + critical state vars + risk signals + external deps).
+    Result is saved to kg_result_auto.json for reuse on subsequent runs.
+    """
+    parts = []
+    for cname in sorted(contracts):
+        _, src = contracts[cname]
+        parts.append(f"// ─── {cname}.sol ────────────────────────────────────────────────────")
+        parts.append(src)
+    combined_source = "\n".join(parts)
+
+    # No hist_inv_cache_path → clean call graph (no ↳ HIST: annotations)
+    kg_builder = ContractKGBuilder()
+
+    print(f"[kg] building KG pipeline: {len(contracts)} contracts, {len(combined_source):,} chars...", flush=True)
+    task_id = kg_builder.build_from_source_async(
+        source_code=combined_source,
+        graph_name=f"Contest {CONTEST_ID} Audit",
+        contract_name=CONTEST_ID,
+    )
+
+    deadline = time.monotonic() + 3600
+    last_pct  = -1
+    while time.monotonic() < deadline:
+        task = kg_builder.task_manager.get_task(task_id)
+        if not task:
+            print("[kg] task disappeared — call graph disabled", flush=True)
+            return ''
+        pct = task.progress or 0
+        if pct != last_pct:
+            print(f"[kg] {pct}% — {task.message or ''}", flush=True)
+            last_pct = pct
+        if task.status.value == 'completed':
+            result = task.result or {}
+            ctx = result.get('context_summary', '')
+            print(f"[kg] done — context_summary {len(ctx):,} chars", flush=True)
+            # Save for reuse
+            result['_source'] = 'kg_result_auto'
+            json.dump(result, open(_KG_AUTO_PATH, 'w'), indent=2, ensure_ascii=False)
+            print(f"[kg] saved → {_KG_AUTO_PATH}", flush=True)
+            return ctx
+        elif task.status.value in ('failed', 'error'):
+            print(f"[kg] build failed: {task.error} — call graph disabled", flush=True)
+            return ''
+        time.sleep(5)
+
+    print("[kg] timeout — call graph disabled", flush=True)
+    return ''
+
+if _args.kg_result and os.path.exists(_args.kg_result):
+    _context_summary = _load_kg_from_file(_args.kg_result)
+    print(f"[kg] loaded from --kg-result: {_args.kg_result}")
+elif os.path.exists(_KG_AUTO_PATH):
+    _context_summary = _load_kg_from_file(_KG_AUTO_PATH)
+    print(f"[kg] loaded from auto-saved: {_KG_AUTO_PATH}")
+# else: built after discover_contracts() below — need source files first
 
 def _get_call_graph_block(contract_names: list) -> str:
-    """Extract CALL GRAPH lines for one or more contracts from context_summary."""
     parts = []
     for cname in contract_names:
         m = re.search(
@@ -99,9 +174,10 @@ def _get_call_graph_block(contract_names: list) -> str:
         return "CALL GRAPH:\n" + "\n\n".join(parts) + "\n"
     return ""
 
-# ─── HIST-INV (no custom) ─────────────────────────────────────────────────────
-_CACHE_PATH = f'/home/thangdd/repos/MiroFish/benchmark/web3bugs/agent-redesign/{CONTEST_ID}/hist_inv_cache.json'
-_RAG_CACHE  = '/home/thangdd/repos/MiroFish/backend/scripts/rag/rag_sections_cache.json'
+# ─── HIST-INV ─────────────────────────────────────────────────────────────────
+_CACHE_PATH = _args.cache_path if _args.cache_path else \
+    os.path.join(_BENCH_DIR, 'hist_inv_cache.json')
+_RAG_CACHE  = os.path.join(os.path.dirname(__file__), 'rag/rag_sections_cache.json')
 
 hc = HistInvCache(_CACHE_PATH)
 matched_slugs = hc.get_matched_slugs()
@@ -137,13 +213,11 @@ FN_NAME_RULES = [
     (r'\bclaim\b|reward|reclaim|subscribe|distribute|'
      r'add.?incentive|remove.?incentive|get.?reward|get.?incentive|'
      r'stake\b|unstake',                                            'access_reward'),
-    # Fix 3: expanded economic domain — catches swap/buyback/lock MEV patterns
     (r'flash(?!swap)|oracle|twap|get.?price|update.?price|arbitrage|'
      r'buyback|buy[A-Z]|sell[A-Z]|lock(?:crv|token|lp)|vecrvlock|'
      r'swap(?:exact|token|eth)|add.?liquidity.*uni',                'economic'),
     (r'initialize|callback|settle|\bsync\b|deploy.?pool|'
      r'create.?pool|create.?position',                              'state_ordering'),
-    # Fix 2: admin/governance domain — catches setter/changer functions
     (r'\bchange[A-Z]\w*|\bset(?:impl|contract|owner|governance|minter|treasury|'
      r'engine|vault|nft|address|operator|role)\b|'
      r'\bmigrate\b|\bupgrade\b|transferOwn|renounceOwn',           'admin_gov'),
@@ -156,7 +230,7 @@ def match_domain(fn_name: str) -> str:
             return domain
     return 'general'
 
-# ─── Domain → agents (3 diverse lenses each) ─────────────────────────────────
+# ─── Domain → agents (3-4 diverse lenses each) ───────────────────────────────
 DOMAIN_AGENTS = {
     'clmm_semantic':  ['clmm_specialist',   'defi_analyst',           'logic_exploiter'],
     'math_cast':      ['math_precision',    'invariant_breaker',      'logic_exploiter'],
@@ -167,9 +241,8 @@ DOMAIN_AGENTS = {
     'general':        ['defi_attacker',     'logic_exploiter',        'appsec_hardener',       'validation_checker'],
 }
 
-# ─── Fix 1: Modifier inline expansion ────────────────────────────────────────
+# ─── Modifier inline expansion ────────────────────────────────────────────────
 def _extract_modifiers(source: str) -> dict:
-    """Extract {modifier_name: body_str} from Solidity source."""
     mods = {}
     for m in re.finditer(r'\bmodifier\s+(\w+)\s*(?:\([^)]*\))?\s*\{', source, re.MULTILINE):
         name = m.group(1)
@@ -185,7 +258,6 @@ def _extract_modifiers(source: str) -> dict:
 
 
 def _inject_modifier_comments(fn_source: str, modifiers: dict) -> str:
-    """Prepend modifier body as comment block before each function that uses them."""
     if not modifiers:
         return fn_source
     lines = fn_source.split('\n')
@@ -194,7 +266,6 @@ def _inject_modifier_comments(fn_source: str, modifiers: dict) -> str:
     while i < len(lines):
         line = lines[i]
         if re.match(r'^\s*(?:function\s+\w+|constructor)\s*[\(\{]', line):
-            # Collect full signature until opening brace
             sig, j = line, i + 1
             while j < len(lines) and '{' not in sig:
                 sig += ' ' + lines[j].strip()
@@ -261,11 +332,10 @@ def extract_functions(source: str, fn_names: list) -> str:
 
 def build_chunk_source(contract_name: str, source: str, fn_names: list,
                        aux_contracts: list = None) -> str:
-    """Build focused source: header + chunk functions. Optionally append aux contracts."""
-    modifiers = _extract_modifiers(source)   # Fix 1: extract before header strips them
+    modifiers = _extract_modifiers(source)
     header = extract_contract_header(source)
     fns    = extract_functions(source, fn_names)
-    fns    = _inject_modifier_comments(fns, modifiers)  # Fix 1: annotate function sigs
+    fns    = _inject_modifier_comments(fns, modifiers)
     parts  = [
         f"// ─── {contract_name}.sol ─────────────────────────────────────────────────",
         header.rstrip(),
@@ -281,7 +351,6 @@ def build_chunk_source(contract_name: str, source: str, fn_names: list,
 
 # ─── Discover all sol files ───────────────────────────────────────────────────
 def discover_contracts():
-    """Return {contract_name: (path, source)} for non-skip contracts."""
     contracts = {}
     for root, dirs, files in os.walk(CONTRACTS_DIR):
         dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
@@ -289,16 +358,11 @@ def discover_contracts():
             if fname.endswith('.sol'):
                 cname = fname.replace('.sol', '')
                 path  = os.path.join(root, fname)
-                contracts[cname] = (path, open(path).read())
+                contracts[cname] = (path, open(path, errors='replace').read())
     return contracts
 
 # ─── Group functions per (domain × contract) ──────────────────────────────────
 def build_chunks(contracts: dict) -> list:
-    """
-    Returns list of chunk dicts:
-    {domain, contract_name, source, fn_names, agents}
-    Only includes chunks for GT_CONTRACTS.
-    """
     domain_contract_fns = defaultdict(list)
     for cname, (_, src) in contracts.items():
         if cname not in GT_CONTRACTS:
@@ -311,44 +375,27 @@ def build_chunks(contracts: dict) -> list:
     chunks = []
     for (dom, cname), fns in sorted(domain_contract_fns.items()):
         _, src = contracts[cname]
-        # For clmm_semantic CLP: attach Ticks.sol as aux (cross-contract fee accounting)
-        aux = []
-        if dom == 'clmm_semantic' and cname == 'ConcentratedLiquidityPool':
-            if 'Ticks' in contracts:
-                aux = [('Ticks', contracts['Ticks'][1])]
-        # For math_cast CLPosition: attach CLP as aux (calls into pool)
-        if dom == 'math_cast' and cname == 'ConcentratedLiquidityPosition':
-            if 'ConcentratedLiquidityPool' in contracts:
-                aux = [('ConcentratedLiquidityPool', contracts['ConcentratedLiquidityPool'][1])]
-        # For general CLPosition: attach CLP as aux (collect/burn cross-contract interaction)
-        if dom == 'general' and cname == 'ConcentratedLiquidityPosition':
-            if 'ConcentratedLiquidityPool' in contracts:
-                aux = [('ConcentratedLiquidityPool', contracts['ConcentratedLiquidityPool'][1])]
-        # For general Ticks: use full Ticks source (small file)
-        if dom == 'general' and cname == 'Ticks':
-            src_full = src
-            chunks.append({'domain': dom, 'contract_name': cname,
-                           'source': f"// ─── {cname}.sol ─────────────────────────────────────────────────\n{src_full}",
-                           'fn_names': fns, 'aux_names': [],
-                           'agents': DOMAIN_AGENTS.get(dom, DOMAIN_AGENTS['general'])})
-            continue
-
-        chunk_source = build_chunk_source(cname, src, fns, aux)
+        chunk_source = build_chunk_source(cname, src, fns)
         chunks.append({
-            'domain':         dom,
-            'contract_name':  cname,
-            'source':         chunk_source,
-            'fn_names':       fns,
-            'aux_names':      [(a_name, None) for a_name, _ in aux],
-            'agents':         DOMAIN_AGENTS.get(dom, DOMAIN_AGENTS['general']),
+            'domain':        dom,
+            'contract_name': cname,
+            'source':        chunk_source,
+            'fn_names':      fns,
+            'aux_names':     [],
+            'agents':        DOMAIN_AGENTS.get(dom, DOMAIN_AGENTS['general']),
         })
     return chunks
 
-# ─── Profiles ─────────────────────────────────────────────────────────────────
-_clp_src = open(os.path.join(
-    CONTRACTS_DIR, 'pool/concentrated/ConcentratedLiquidityPool.sol')).read()
-gen = Gen()
-profiles_map = {p.agent_id: p for p in gen.generate_tier1_profiles(_clp_src)}
+# ─── Profiles (auto-detect primary contract if not specified) ─────────────────
+def _find_primary_src(contracts: dict) -> str:
+    if _args.primary_contract and os.path.exists(_args.primary_contract):
+        return open(_args.primary_contract, errors='replace').read()
+    # Auto-detect: first GT contract found (alphabetical)
+    for cname in sorted(GT_CONTRACTS):
+        if cname in contracts:
+            print(f"[profiles] auto-detected primary contract: {cname}")
+            return contracts[cname][1]
+    raise RuntimeError(f"No GT contract found in {CONTRACTS_DIR} from {GT_CONTRACTS}")
 
 # ─── Orchestrator (for pipeline dedup) ───────────────────────────────────────
 _orch = CyberSessionOrchestrator()
@@ -357,49 +404,37 @@ _MD_FENCE_RE   = re.compile(r'```[a-z]*\n?(.*?)```', re.DOTALL)
 _FILENAME_RE   = re.compile(r'^\([^\)]+\.sol\)\s*', re.IGNORECASE)
 
 def _clean_anchor(anchor: str) -> str:
-    """Strip markdown fences and filename prefixes agents add in CoT output."""
     if not anchor:
         return anchor
-    # Extract code inside ```solidity ... ``` if present
     m = _MD_FENCE_RE.search(anchor)
     if m:
         anchor = m.group(1).strip()
-    # Strip leading (ContractName.sol) prefix
     anchor = _FILENAME_RE.sub('', anchor).strip()
-    # Strip surrounding backticks from inline code
     anchor = anchor.strip('`').strip()
     return anchor
 
 def dedup_pipeline(findings: list, full_source: str) -> list:
-    """Apply main pipeline dedup using full GT source (not chunk-only source).
-
-    Steps (mirror main pipeline):
-      1. _dedup_pre_r2  — CODE_ANCHOR substring check against full source
-      2. _static_anchor_dedup — exact anchor merge
-      3. _llm_anchor_dedup   — LLM semantic merge
-    """
     if not findings:
         return findings
-    # Clean code_anchor before dedup — T3 CoT agents wrap in markdown fences/filename prefix
     for f in findings:
         f['code_anchor'] = _clean_anchor(f.get('code_anchor', ''))
     pool = {
         f"f_{i:04d}": {
-            "contract_name":    f.get("contract_name", ""),
-            "function_name":    f.get("function_name", ""),
-            "title":            f.get("title", ""),
-            "code_anchor":      f.get("code_anchor", ""),
+            "contract_name":     f.get("contract_name", ""),
+            "function_name":     f.get("function_name", ""),
+            "title":             f.get("title", ""),
+            "code_anchor":       f.get("code_anchor", ""),
             "evidence_snippets": [f["evidence"]] if f.get("evidence") else [],
-            "attack_path":      f.get("attack_path", ""),
-            "submitters":       [],
-            "description":      f.get("description", ""),
+            "attack_path":       f.get("attack_path", ""),
+            "submitters":        [],
+            "description":       f.get("description", ""),
         }
         for i, f in enumerate(findings)
     }
     n0 = len(pool)
-    pool = _orch._dedup_pre_r2(pool, full_source)               # CODE_ANCHOR check (full source)
-    pool = _orch._semi_static_anchor_dedup(pool, full_source)   # semi-static: LLM verifies before merge
-    pool = _orch._llm_anchor_dedup(pool, full_source)           # semantic merge by function
+    pool = _orch._dedup_pre_r2(pool, full_source)
+    pool = _orch._semi_static_anchor_dedup(pool, full_source)
+    pool = _orch._llm_anchor_dedup(pool, full_source)
     print(f"      [dedup] {n0} → pre_r2={len(pool)} → final={len(pool)}", flush=True)
     return list(pool.values())
 
@@ -415,7 +450,8 @@ def llm_call(prompt: str, client=None) -> str:
                 messages=[{"role": "user", "content": prompt}],
                 extra_body={"google": {"thinking_config": {"thinking_budget": 0}}}
             )
-            content = resp.choices[0].message.content if resp.choices and resp.choices[0].message else None
+            msg = resp.choices[0].message if resp.choices else None
+            content = msg.content if msg is not None else None
             if content is None:
                 wait = 30 * (attempt + 1)
                 with _LOCK: print(f"    [empty response, retry {attempt+1}/5, wait {wait}s]", flush=True)
@@ -429,7 +465,7 @@ def llm_call(prompt: str, client=None) -> str:
                 time.sleep(wait)
             else:
                 raise
-    return ""  # fallback: empty string instead of crash
+    return ""
 
 def clean_inv(t1: str) -> str:
     lines = [l for l in t1.splitlines() if re.match(r'\s*INV-\d+:', l)]
@@ -472,16 +508,6 @@ If the vulnerable line is inside a PRIVATE or INTERNAL helper function that is c
 """
 
 # ─── FINDING parser ───────────────────────────────────────────────────────────
-_FINDING_RE = re.compile(
-    r'FINDING:\s*(.+?)\n'
-    r'(?:.*?CONTRACT:\s*(\w+)\n)?'
-    r'(?:.*?FUNCTION:\s*(\w+)\b.*?\n)?'
-    r'(?:.*?SEVERITY:\s*(\w+)\n)?'
-    r'(?:.*?DESCRIPTION:\s*([\s\S]*?))?'
-    r'(?=FINDING:|ANALYZED:|$)',
-    re.IGNORECASE | re.DOTALL,
-)
-
 _FIELD_RE = re.compile(
     r'^(CONTRACT|FUNCTION|SEVERITY|CODE_ANCHOR|EVIDENCE|ATTACK_PATH|'
     r'ACTOR|CALL|STATE_CHANGE|OUTCOME|DESCRIPTION|PATCH):\s*',
@@ -489,11 +515,9 @@ _FIELD_RE = re.compile(
 )
 
 def parse_findings(text: str, default_contract: str, source: str = 'T2') -> list:
-    """Parse FINDING blocks from agent response into list of finding dicts."""
     findings = []
-    # Split on FINDING: boundaries
     parts = re.split(r'\nFINDING:', '\n' + text)
-    for part in parts[1:]:  # skip everything before first FINDING
+    for part in parts[1:]:
         lines = part.strip().split('\n')
         title = lines[0].strip()
         fields = {'title': title, 'contract_name': default_contract,
@@ -514,7 +538,6 @@ def parse_findings(text: str, default_contract: str, source: str = 'T2') -> list
         if current_field and buf:
             fields[current_field.lower()] = '\n'.join(buf).strip()
 
-        # Normalize field names for eval
         finding = {
             'title':         fields.get('title', ''),
             'description':   fields.get('description', '') or fields.get('outcome', ''),
@@ -532,8 +555,21 @@ def parse_findings(text: str, default_contract: str, source: str = 'T2') -> list
 
 # ─── Run one agent on one chunk ────────────────────────────────────────────────
 def run_agent(agent_id: str, ann_source: str, chunk_label: str, agent_idx: int,
-              contract_name: str, client=None) -> tuple:
+              contract_name: str, profiles_map: dict, client=None) -> tuple:
     """Returns (t2_findings, t3_findings)."""
+    out = os.path.join(OUT_DIR, f"{chunk_label.replace('/', '_')}_{agent_id}.txt")
+
+    # Resume: nếu file đã có → parse lại, không gọi LLM
+    if os.path.exists(out):
+        text = open(out).read()
+        t2_m = re.search(r'=== T2 \(standard\) ===\n(.*?)(?====)', text, re.DOTALL)
+        t3_m = re.search(r'=== T3 \(CoT sweep\) ===\n(.*?)$',    text, re.DOTALL)
+        t2_f = parse_findings(t2_m.group(1) if t2_m else '', contract_name, source='T2')
+        t3_f = parse_findings(t3_m.group(1) if t3_m else '', contract_name, source='T3')
+        with _LOCK:
+            print(f"    [{chunk_label}/{agent_id}] RESUMED  T2={len(t2_f)} T3={len(t3_f)}", flush=True)
+        return t2_f, t3_f
+
     profile = profiles_map.get(agent_id)
     if not profile:
         print(f"    [WARN] agent {agent_id} not found — skip", flush=True)
@@ -570,8 +606,6 @@ def run_agent(agent_id: str, ann_source: str, chunk_label: str, agent_idx: int,
     with _LOCK:
         print(f"    [{chunk_label}/{agent_id}] {total:.1f}s  T2={n2} T3={n3} FINDINGs", flush=True)
 
-    # Save raw output
-    out = os.path.join(OUT_DIR, f"{chunk_label.replace('/', '_')}_{agent_id}.txt")
     with open(out, 'w') as f:
         f.write(f"Chunk: {chunk_label}  Agent: {agent_id}  Time: {total:.1f}s\n\n")
         f.write(f"{'='*60}\n=== T1 ===\n{t1_resp}\n\n")
@@ -580,11 +614,10 @@ def run_agent(agent_id: str, ann_source: str, chunk_label: str, agent_idx: int,
 
     return t2_findings, t3_findings
 
-# ─── Run one chunk (3 agents) ─────────────────────────────────────────────────
-def run_chunk(chunk: dict) -> list:
+# ─── Run one chunk ─────────────────────────────────────────────────────────────
+def run_chunk(chunk: dict, profiles_map: dict) -> list:
     label    = f"{chunk['domain']}/{chunk['contract_name']}"
     base_src  = chunk['source'] if NO_INV else _annotate_source_with_hist_inv(chunk['source'], INV_MAP)
-    # Prepend call graph for this contract (+ aux contracts if present)
     cg_contracts = [chunk['contract_name']] + [a for a, _ in chunk.get('aux_names', [])]
     cg_block = _get_call_graph_block(cg_contracts)
     ann_src  = (cg_block + "\n" + base_src) if cg_block else base_src
@@ -599,7 +632,7 @@ def run_chunk(chunk: dict) -> list:
     if WORKERS > 1:
         with ThreadPoolExecutor(max_workers=WORKERS) as exe:
             futs = {
-                exe.submit(run_agent, agent_id, ann_src, label, idx, cname,
+                exe.submit(run_agent, agent_id, ann_src, label, idx, cname, profiles_map,
                            llm_pool[idx % len(llm_pool)]): agent_id
                 for idx, agent_id in enumerate(chunk['agents'])
             }
@@ -609,7 +642,7 @@ def run_chunk(chunk: dict) -> list:
                 all_findings.extend(t3_f)
     else:
         for idx, agent_id in enumerate(chunk['agents']):
-            t2_f, t3_f = run_agent(agent_id, ann_src, label, idx, cname)
+            t2_f, t3_f = run_agent(agent_id, ann_src, label, idx, cname, profiles_map)
             all_findings.extend(t2_f)
             all_findings.extend(t3_f)
             if idx < len(chunk['agents']) - 1:
@@ -621,6 +654,8 @@ def run_chunk(chunk: dict) -> list:
 # ─── Main ─────────────────────────────────────────────────────────────────────
 print('\n' + '='*65)
 print(f'E2E Simulation — Contest {CONTEST_ID}')
+print(f'Contracts dir: {CONTRACTS_DIR}')
+print(f'GT contracts: {sorted(GT_CONTRACTS)}')
 inv_mode = 'DISABLED (pure self-reasoning)' if NO_INV else 'no-custom slugs'
 print(f'Grouper: FN_NAME_RULES | Agents: 3-4/chunk | HIST-INV: {inv_mode} | T2+T3 (CoT)')
 print('='*65)
@@ -628,10 +663,20 @@ print('='*65)
 contracts = discover_contracts()
 print(f"Contracts discovered: {len(contracts)}")
 
-# Full GT source for dedup CODE_ANCHOR check (covers cross-contract references)
-FULL_GT_SOURCE = "\n\n".join(
-    src for cname, (_, src) in contracts.items() if cname in GT_CONTRACTS
-)
+# Build call graph via full KG pipeline if not already loaded
+if not _context_summary:
+    if _args.kg_result:
+        print(f"[kg] --kg-result path not found: {_args.kg_result} — call graph disabled")
+    else:
+        _context_summary = _build_kg_pipeline(contracts)
+
+# Build profiles from primary contract
+_primary_src = _find_primary_src(contracts)
+gen = Gen()
+profiles_map = {p.agent_id: p for p in gen.generate_tier1_profiles(_primary_src)}
+
+# Full GT source for dedup CODE_ANCHOR check
+FULL_GT_SOURCE = "\n\n".join(src for cname, (_, src) in contracts.items() if cname in GT_CONTRACTS)
 
 chunks = build_chunks(contracts)
 print(f"\nChunks to simulate ({len(chunks)} total — GT contracts only):")
@@ -641,7 +686,7 @@ for c in chunks:
 t_start = time.time()
 all_raw = []
 for chunk in chunks:
-    all_raw.extend(run_chunk(chunk))
+    all_raw.extend(run_chunk(chunk, profiles_map))
     time.sleep(5)
 
 # Global dedup trên toàn bộ findings (cross-chunk duplicates được xử lý đúng)
@@ -652,7 +697,7 @@ for chunk in chunks:
 
 wall_time = time.time() - t_start
 
-# ─── Save 2 reports ───────────────────────────────────────────────────────────
+# ─── Save reports ─────────────────────────────────────────────────────────────
 def _save_report(findings, tag, config_note):
     report = {
         "contest_id":     CONTEST_ID,
@@ -666,7 +711,7 @@ def _save_report(findings, tag, config_note):
     return path
 
 raw_path = _save_report(all_raw, "raw", "T2+T3_merged_no_dedup")
-# dedup_path  = _save_report(all_deduped, "deduped","T2+T3_pipeline_dedup")
+# dedup_path = _save_report(all_deduped, "deduped", "T2+T3_pipeline_dedup")
 
 print(f"\n{'='*65}")
 print(f"DONE — raw={len(all_raw)}  |  {wall_time:.0f}s")
