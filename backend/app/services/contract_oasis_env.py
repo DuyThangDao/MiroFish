@@ -1520,6 +1520,28 @@ STEP 2 — FIND VIOLATIONS:
   If Q1 = YES → write a FINDING with:
     EVIDENCE: INV: <invariant statement> | VIOLATED_AT: <fn()> | COUNTEREXAMPLE: <condition that causes violation>
 
+STEP 2B — PARAMETER GUARD SWEEP (mandatory, SEPARATE from HIST-CHECK above):
+  HIST-CHECK verifies historical annotations. This step verifies YOUR OWN INVs per function.
+  They are different — both are required.
+
+  For each INV of the form "<parameter X> must be Y" or "<X> must satisfy condition C":
+  → Find ALL functions where X appears in the signature
+  → For each function, output one PARAM-GUARD line:
+      PARAM-GUARD [INV-N/FunctionName]: ENFORCED — <quote the require/guard line>
+      PARAM-GUARD [INV-N/FunctionName]: MISSING — no require(<condition>) in body → write FINDING below
+
+  IMPORTANT: "Other functions enforce it" is NOT valid — each function must have its own guard.
+
+  EXAMPLE (do not skip similar patterns):
+    INV states "base must be VADER or USDV"
+    addLiquidity(address base, ...) → has require(base == USDV || base == VADER) → ENFORCED
+    _removeLiquidity(address base, ...) → has require(base == USDV || base == VADER) → ENFORCED
+    swap(address base, ...) → NO require checking base → MISSING → FINDING
+    mintSynth(address base, ...) → NO require checking base → MISSING → FINDING
+    (Even though addLiquidity enforces it, swap and mintSynth each need their own guard.)
+
+  For each PARAM-GUARD line marked MISSING, write a FINDING immediately below it.
+
 CAST & COMPARISON PRECISION — before writing any arithmetic finding, answer these questions:
 
 For every explicit narrowing cast (uint256→uint128, uint128→int128, uint256→int24, etc.):

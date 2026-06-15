@@ -3235,56 +3235,151 @@ class CyberSessionOrchestrator:
         n_llm_merged = 0
         max_workers = int(os.environ.get("LLM_DEDUP_WORKERS", "2"))
 
+        _LARGE_BATCH = 8  # max findings per single LLM call for large groups
+
         def _process_one_group(contract: str, fn: str, group: list) -> list:
             fn_body = self._extract_function_body(source_code, fn)
-            parts = [
-                f"  [{i+1}] anchor: {item.get('code_anchor', 'N/A')[:120]}\n"
-                f"       evidence: {(item.get('evidence_snippets') or ['N/A'])[0][:120]}\n"
-                f"       title: {item.get('title', '')[:80]}"
-                for i, (pid, item) in enumerate(group)
-            ]
-            prompt = (
-                "You are a deduplication agent for smart contract audit findings.\n\n"
-                f"CONTRACT: {contract}  FUNCTION: {fn}\n"
-            )
-            if fn_body:
-                prompt += f"\nFUNCTION SOURCE:\n{fn_body}\n"
-            prompt += (
-                f"\nFINDINGS (same function, different code anchors):\n"
-                + "\n\n".join(parts)
-                + "\n\n"
-                "TASK: Identify pairs that describe the SAME underlying vulnerability.\n\n"
-                "Rules:\n"
-                "  - Only merge when CERTAIN they share the same root cause\n"
-                "  - Different anchors usually mean different bugs — when in doubt: KEEP_SEPARATE\n"
-                "  - KEEP_SEPARATE is always safer (duplicate > missed TP)\n"
-                "  - MANDATORY KEEP_SEPARATE cases:\n"
-                "    (a) Either finding has anchor 'N/A' or empty — different code evidence means different bugs\n"
-                "    (b) Findings name different state variables as the root cause\n"
-                "        (e.g. one says 'secondsPerLiquidity', other says 'nearestTick' or 'feeGrowthOutside')\n"
-                "        Different variables = different bugs, even in the same function\n"
-                "    (c) One finding is about update ORDER (computed before/after), other is about\n"
-                "        INITIALIZATION (stale snapshot) — these are always separate bugs\n\n"
-                "Output one decision per line:\n"
-                "  MERGE: [i] == [j]  | REASON: <one sentence>\n"
-                "  KEEP_SEPARATE: [i] | REASON: <one sentence>"
-            )
-            merge_pairs: list = []
-            try:
-                t0 = _time.time()
-                response = self._call_agent_v2(prompt, max_tokens=512)
-                elapsed = _time.time() - t0
-                logger.info(f"[llm_dedup] {contract}.{fn}: {elapsed:.1f}s, {len(group)} findings")
-                for line in response.split('\n'):
-                    m = _re.search(r'MERGE:\s*\[(\d+)\]\s*==\s*\[(\d+)\]', line)
-                    if m:
-                        i, j = int(m.group(1)) - 1, int(m.group(2)) - 1
-                        if 0 <= i < len(group) and 0 <= j < len(group) and i != j:
-                            merge_pairs.append((min(i, j), max(i, j)))
-                merge_pairs = list(set(merge_pairs))
-            except Exception as e:
-                logger.warning(f"[llm_dedup] error for {contract}.{fn}: {e} — keeping separate")
-            return self._apply_llm_merges(group, merge_pairs)
+
+            def _build_dedup_prompt(sub_group, fn_body_text):
+                parts = [
+                    f"  [{i+1}] anchor: {item.get('code_anchor', 'N/A')[:120]}\n"
+                    f"       evidence: {(item.get('evidence_snippets') or ['N/A'])[0][:120]}\n"
+                    f"       title: {item.get('title', '')[:80]}"
+                    for i, (pid, item) in enumerate(sub_group)
+                ]
+                prompt = (
+                    "You are a deduplication agent for smart contract audit findings.\n\n"
+                    f"CONTRACT: {contract}  FUNCTION: {fn}\n"
+                )
+                if fn_body_text:
+                    prompt += f"\nFUNCTION SOURCE:\n{fn_body_text}\n"
+                prompt += (
+                    f"\nFINDINGS (same function, different code anchors):\n"
+                    + "\n\n".join(parts)
+                    + "\n\n"
+                    "TASK: Identify pairs that describe the SAME underlying vulnerability.\n\n"
+                    "Rules:\n"
+                    "  - Only merge when CERTAIN they share the same root cause\n"
+                    "  - Different anchors usually mean different bugs — when in doubt: KEEP_SEPARATE\n"
+                    "  - KEEP_SEPARATE is always safer (duplicate > missed TP)\n"
+                    "  - MANDATORY KEEP_SEPARATE cases:\n"
+                    "    (a) Either finding has anchor 'N/A' or empty — different code evidence means different bugs\n"
+                    "    (b) Findings name different state variables as the root cause\n"
+                    "        (e.g. one says 'secondsPerLiquidity', other says 'nearestTick' or 'feeGrowthOutside')\n"
+                    "        Different variables = different bugs, even in the same function\n"
+                    "    (c) One finding is about update ORDER (computed before/after), other is about\n"
+                    "        INITIALIZATION (stale snapshot) — these are always separate bugs\n\n"
+                    "Output one decision per line:\n"
+                    "  MERGE: [i] == [j]  | REASON: <one sentence>\n"
+                    "  KEEP_SEPARATE: [i] | REASON: <one sentence>"
+                )
+                return prompt
+
+            def _call_sub_batch(sub_group, fn_body_text) -> list:
+                pairs = []
+                try:
+                    t0 = _time.time()
+                    response = self._call_agent_v2(
+                        _build_dedup_prompt(sub_group, fn_body_text), max_tokens=512
+                    )
+                    elapsed = _time.time() - t0
+                    logger.info(
+                        f"[llm_dedup] {contract}.{fn}: {elapsed:.1f}s, {len(sub_group)} findings"
+                    )
+                    for line in response.split('\n'):
+                        m = _re.search(r'MERGE:\s*\[(\d+)\]\s*==\s*\[(\d+)\]', line)
+                        if m:
+                            i, j = int(m.group(1)) - 1, int(m.group(2)) - 1
+                            if 0 <= i < len(sub_group) and 0 <= j < len(sub_group) and i != j:
+                                pairs.append((min(i, j), max(i, j)))
+                except Exception as e:
+                    logger.warning(f"[llm_dedup] error {contract}.{fn}: {e} — keeping separate")
+                return pairs
+
+            if len(group) <= _LARGE_BATCH:
+                # Small group: original single-call path
+                merge_pairs = _call_sub_batch(group, fn_body)
+                return self._apply_llm_merges(group, list(set(merge_pairs)))
+
+            # Large group: iterative reduction via union-find over original indices
+            n = len(group)
+            parent = list(range(n))
+
+            def _find(x):
+                while parent[x] != x:
+                    parent[x] = parent[parent[x]]
+                    x = parent[x]
+                return x
+
+            def _union(a, b):
+                pa, pb = _find(a), _find(b)
+                if pa != pb:
+                    parent[pb] = pa  # merge b into a
+
+            reps = list(range(n))  # current representative original indices
+
+            for round_num in range(6):  # log8(1000) < 4, 6 rounds is generous
+                if len(reps) <= 1:
+                    break
+                any_merged = False
+                next_reps_set: set = set()
+
+                for batch_start in range(0, len(reps), _LARGE_BATCH):
+                    batch_orig = reps[batch_start:batch_start + _LARGE_BATCH]
+                    if len(batch_orig) < 2:
+                        for idx in batch_orig:
+                            next_reps_set.add(_find(idx))
+                        continue
+
+                    sub_group = [group[idx] for idx in batch_orig]
+                    local_pairs = _call_sub_batch(sub_group, fn_body)
+
+                    for li, lj in local_pairs:
+                        gi, gj = batch_orig[li], batch_orig[lj]
+                        if _find(gi) != _find(gj):
+                            _union(gi, gj)
+                            any_merged = True
+
+                    for idx in batch_orig:
+                        next_reps_set.add(_find(idx))
+
+                reps = list(next_reps_set)
+                logger.info(
+                    f"[llm_dedup] {contract}.{fn} large-group "
+                    f"round {round_num+1}: {n} → {len(reps)} reps"
+                )
+                if not any_merged:
+                    break
+
+            # Build result: one representative per union-find cluster
+            seen_roots: set = set()
+            result = []
+            for i in range(n):
+                root = _find(i)
+                if root in seen_roots:
+                    continue
+                seen_roots.add(root)
+                cluster = [group[j] for j in range(n) if _find(j) == root]
+                if len(cluster) == 1:
+                    result.append(cluster[0])
+                else:
+                    primary_pid, primary = self._pick_primary(cluster)
+                    merged = dict(primary)
+                    all_ev = list(primary.get("evidence_snippets", []))
+                    all_sub = list(primary.get("submitters", []))
+                    for pid, item in cluster:
+                        if pid == primary_pid:
+                            continue
+                        for ev in (item.get("evidence_snippets") or []):
+                            if ev not in all_ev:
+                                all_ev.append(ev)
+                        for s in (item.get("submitters") or []):
+                            if s not in all_sub:
+                                all_sub.append(s)
+                    merged["evidence_snippets"] = all_ev
+                    merged["submitters"] = all_sub
+                    result.append((primary_pid, merged))
+            return result
 
         # Single-item groups: no LLM needed, add directly
         for (_contract, _fn), group in single_groups.items():

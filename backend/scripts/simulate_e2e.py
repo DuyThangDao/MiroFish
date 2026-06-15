@@ -33,15 +33,14 @@ os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = KEY_FILE
 BASE_URL = os.getenv('LLM_BASE_URL', '')
 MODEL    = os.getenv('LLM_MODEL_NAME', 'google/gemini-3-flash-preview')
 
-import google.auth.transport.requests
-from google.oauth2 import service_account
 from openai import OpenAI
+from app.utils.llm_client import _build_vertex_ai_http_client
 
 def _make_client(key_file: str, base_url: str) -> OpenAI:
-    c = service_account.Credentials.from_service_account_file(
-        key_file, scopes=['https://www.googleapis.com/auth/cloud-platform'])
-    c.refresh(google.auth.transport.requests.Request())
-    return OpenAI(api_key=c.token, base_url=base_url)
+    """Dùng _build_vertex_ai_http_client — token tự refresh trước mỗi request."""
+    http_client = _build_vertex_ai_http_client(key_file)
+    return OpenAI(api_key="vertex-ai", base_url=base_url,
+                  http_client=http_client, max_retries=0)
 
 KEY_FILE2  = os.getenv('LLM2_VERTEX_AI_KEY_FILE', '')
 BASE_URL2  = os.getenv('LLM2_BASE_URL', BASE_URL)
@@ -59,6 +58,7 @@ from app.services.contract_profile_generator import ContractExpertProfileGenerat
 from app.services.cyber_session_orchestrator import _annotate_source_with_hist_inv, CyberSessionOrchestrator
 from app.services.contract_hist_inv_cache import HistInvCache
 from app.services.contract_kg_builder import ContractKGBuilder
+from scripts.flatten_contest import flatten_contest_dir
 
 # Disable attack_path validation — e2e format không dùng ACTOR/CALL/STATE_CHANGE/OUTCOME
 os.environ.setdefault("ATTACK_PATH_VALIDATION", "false")
@@ -69,13 +69,15 @@ def _strip(t): return re.sub(r'<think>.*?</think>', '', t or '', flags=re.DOTALL
 import argparse
 _parser = argparse.ArgumentParser(description='Contest-agnostic e2e simulation')
 _parser.add_argument('--contest-id',        required=True,  help='Contest ID, e.g. 35, 42, 5')
-_parser.add_argument('--contracts-dir',     required=True,  help='Path to contracts root directory')
+_parser.add_argument('--contest-dir',       default='',     help='Full contest directory for KG build (e.g. web3bugs/contracts/42). If omitted, falls back to --contracts-dir.')
+_parser.add_argument('--contracts-dir',     required=True,  help='Path to contracts root directory (for agent scanning)')
 _parser.add_argument('--gt-contracts',      nargs='+', required=True, help='GT contract names (without .sol)')
 _parser.add_argument('--kg-result',         default='',     help='Path to kg_result.json for call graph (optional)')
 _parser.add_argument('--primary-contract',  default='',     help='Path to primary .sol for agent profile generation (optional; auto-detect if omitted)')
 _parser.add_argument('--cache-path',        default='',     help='Override hist_inv_cache.json path')
 _parser.add_argument('--no-inv',   action='store_true',     help='Disable HIST-INV injection (pure self-reasoning)')
-_parser.add_argument('--workers',  type=int, default=1,     help='Parallel agents per chunk (default: 1)')
+_parser.add_argument('--workers',  type=int, default=1,     help='Global parallel workers across all chunks (default: 1)')
+_parser.add_argument('--dedup',    action='store_true',     help='Run per-chunk dedup after all agents of a chunk complete')
 _parser.add_argument('--out-dir',  default='',              help='Override output directory')
 _args = _parser.parse_args()
 
@@ -84,6 +86,7 @@ CONTRACTS_DIR = _args.contracts_dir
 GT_CONTRACTS  = set(_args.gt_contracts)
 NO_INV        = _args.no_inv
 WORKERS       = _args.workers
+DEDUP_ENABLED = _args.dedup
 SKIP_DIRS     = {'interfaces', 'test', 'workInProgress', 'flat', 'mocks'}
 
 _inv_tag     = 'no_inv' if NO_INV else 'with_inv'
@@ -101,24 +104,28 @@ def _load_kg_from_file(path: str) -> str:
     return json.load(open(path)).get('context_summary', '')
 
 def _build_kg_pipeline(contracts: dict) -> str:
-    """Run full KG build pipeline (identical to main pipeline) to get context_summary.
+    """Build KG using main pipeline flatten logic when --contest-dir is given,
+    otherwise fall back to simple concat of --contracts-dir files.
 
-    Concatenates all contract sources with '// ─── Name.sol ───' markers,
-    builds Zep KG (or skips if Zep disabled), and returns the full context_summary
-    (call graph + critical state vars + risk signals + external deps).
-    Result is saved to kg_result_auto.json for reuse on subsequent runs.
+    Result saved to kg_result_auto.json for reuse on subsequent runs.
     """
-    parts = []
-    for cname in sorted(contracts):
-        _, src = contracts[cname]
-        parts.append(f"// ─── {cname}.sol ────────────────────────────────────────────────────")
-        parts.append(src)
-    combined_source = "\n".join(parts)
+    if _args.contest_dir and os.path.isdir(_args.contest_dir):
+        print(f"[kg] flattening full contest dir: {_args.contest_dir}", flush=True)
+        result = flatten_contest_dir(_args.contest_dir, verbose=True, emit_manifest=True)
+        source_code, manifest = result if isinstance(result, tuple) else (result, {})
+        combined_source = manifest.get('in_scope_source') or source_code
+        print(f"[kg] flatten done — {len(combined_source):,} chars (in_scope)", flush=True)
+    else:
+        parts = []
+        for cname in sorted(contracts):
+            _, src = contracts[cname]
+            parts.append(f"// ─── {cname}.sol ────────────────────────────────────────────────────")
+            parts.append(src)
+        combined_source = "\n".join(parts)
+        print(f"[kg] building KG from --contracts-dir: {len(contracts)} contracts, {len(combined_source):,} chars", flush=True)
 
-    # No hist_inv_cache_path → clean call graph (no ↳ HIST: annotations)
     kg_builder = ContractKGBuilder()
-
-    print(f"[kg] building KG pipeline: {len(contracts)} contracts, {len(combined_source):,} chars...", flush=True)
+    print(f"[kg] submitting to KG builder...", flush=True)
     task_id = kg_builder.build_from_source_async(
         source_code=combined_source,
         graph_name=f"Contest {CONTEST_ID} Audit",
@@ -205,22 +212,25 @@ print(f"[INV_MAP] {len(INV_MAP)} functions annotated (no custom slugs)")
 FN_NAME_RULES = [
     (r'\btick\b|range.?fee|fee.?growth|nearest.?tick|sqrt.?ratio|'
      r'seconds.?per|range.?seconds|get.?price.?and',               'clmm_semantic'),
-    (r'\bburn\b|\bmint\b|\bswap\b|flash.?swap|'
-     r'get.?amount|amount.?for|get.?amounts|'
+    (r'\bburn|\bmint|\bswap|flash.?swap|'
+     r'get\w*amount|amount.?for|get.?amounts|'
      r'_update.?position|_update.?fees|_update.?seconds|'
      r'_get.?amounts|_compute.?liquidity|get.?reserves|'
-     r'add.?liquidity|remove.?liquidity|liquidity.?delta',          'math_cast'),
+     r'add.?liquidity|remove.?liquidity|liquidity.?delta|'
+     r'\bcalc',                                                      'math_cast'),
     (r'\bclaim\b|reward|reclaim|subscribe|distribute|'
      r'add.?incentive|remove.?incentive|get.?reward|get.?incentive|'
-     r'stake\b|unstake',                                            'access_reward'),
+     r'stake\b|unstake|'
+     r'deposit|harvest|withdraw',                                    'access_reward'),
     (r'flash(?!swap)|oracle|twap|get.?price|update.?price|arbitrage|'
      r'buyback|buy[A-Z]|sell[A-Z]|lock(?:crv|token|lp)|vecrvlock|'
      r'swap(?:exact|token|eth)|add.?liquidity.*uni',                'economic'),
-    (r'initialize|callback|settle|\bsync\b|deploy.?pool|'
+    (r'initialize|\binit\b|callback|settle|\bsync\b|deploy.?pool|'
      r'create.?pool|create.?position',                              'state_ordering'),
     (r'\bchange[A-Z]\w*|\bset(?:impl|contract|owner|governance|minter|treasury|'
      r'engine|vault|nft|address|operator|role)\b|'
-     r'\bmigrate\b|\bupgrade\b|transferOwn|renounceOwn',           'admin_gov'),
+     r'\bmigrate\b|\bupgrade\b|transferOwn|renounceOwn|'
+     r'proposal|votes?|curate|\blist[A-Z]|lock.?unit|unlock.?unit|exclu', 'admin_gov'),
 ]
 
 def match_domain(fn_name: str) -> str:
@@ -237,7 +247,7 @@ DOMAIN_AGENTS = {
     'access_reward':  ['access_escalator',  'clmm_specialist',        'state_machine_analyst', 'mev_analyst'],
     'economic':       ['defi_attacker',     'flash_loan_specialist',  'mev_analyst'],
     'state_ordering': ['state_machine_analyst', 'appsec_researcher',  'logic_exploiter'],
-    'admin_gov':      ['state_dependency_analyst', 'access_escalator','validation_checker'],
+    'admin_gov':      ['state_dependency_analyst', 'access_escalator', 'validation_checker', 'logic_exploiter'],
     'general':        ['defi_attacker',     'logic_exploiter',        'appsec_hardener',       'validation_checker'],
 }
 
@@ -361,8 +371,38 @@ def discover_contracts():
                 contracts[cname] = (path, open(path, errors='replace').read())
     return contracts
 
+# ─── Auto-detect aux contracts via import analysis ────────────────────────────
+_IMPORT_RE = re.compile(r'import\s+[^;]+;', re.MULTILINE)
+_PATH_RE   = re.compile(r'["\']([^"\']+\.sol)["\']')
+
+def build_aux_map(contracts: dict, gt: set) -> dict:
+    """Return {cname: [dep_cname, ...]} for every GT contract.
+
+    Resolves both direct imports (Ticks.sol → Ticks) and interface imports
+    (IConcentratedLiquidityPool.sol → ConcentratedLiquidityPool via I-prefix strip).
+    """
+    result = {}
+    for cname in gt:
+        if cname not in contracts:
+            continue
+        _, src = contracts[cname]
+        deps = []
+        for m in _IMPORT_RE.finditer(src):
+            for path_str in _PATH_RE.findall(m.group(0)):
+                imported = os.path.basename(path_str).replace('.sol', '')
+                # Direct match
+                if imported in gt and imported != cname:
+                    if imported not in deps:
+                        deps.append(imported)
+                # Interface heuristic: IName → Name
+                elif imported.startswith('I') and imported[1:] in gt and imported[1:] != cname:
+                    if imported[1:] not in deps:
+                        deps.append(imported[1:])
+        result[cname] = deps
+    return result
+
 # ─── Group functions per (domain × contract) ──────────────────────────────────
-def build_chunks(contracts: dict) -> list:
+def build_chunks(contracts: dict, aux_map: dict) -> list:
     domain_contract_fns = defaultdict(list)
     for cname, (_, src) in contracts.items():
         if cname not in GT_CONTRACTS:
@@ -375,13 +415,29 @@ def build_chunks(contracts: dict) -> list:
     chunks = []
     for (dom, cname), fns in sorted(domain_contract_fns.items()):
         _, src = contracts[cname]
-        chunk_source = build_chunk_source(cname, src, fns)
+
+        # Aux contracts from import analysis (cross-contract context)
+        aux = [(dep, contracts[dep][1]) for dep in aux_map.get(cname, []) if dep in contracts]
+
+        # Small library with no deps: include full source instead of function extraction
+        if not aux and len(src) < 30_000 and not aux_map.get(cname):
+            chunks.append({
+                'domain':        dom,
+                'contract_name': cname,
+                'source':        f"// ─── {cname}.sol ─────────────────────────────────────────────────\n{src}",
+                'fn_names':      fns,
+                'aux_names':     [],
+                'agents':        DOMAIN_AGENTS.get(dom, DOMAIN_AGENTS['general']),
+            })
+            continue
+
+        chunk_source = build_chunk_source(cname, src, fns, aux)
         chunks.append({
             'domain':        dom,
             'contract_name': cname,
             'source':        chunk_source,
             'fn_names':      fns,
-            'aux_names':     [],
+            'aux_names':     [(a_name, None) for a_name, _ in aux],
             'agents':        DOMAIN_AGENTS.get(dom, DOMAIN_AGENTS['general']),
         })
     return chunks
@@ -614,42 +670,59 @@ def run_agent(agent_id: str, ann_source: str, chunk_label: str, agent_idx: int,
 
     return t2_findings, t3_findings
 
-# ─── Run one chunk ─────────────────────────────────────────────────────────────
-def run_chunk(chunk: dict, profiles_map: dict) -> list:
+# ─── Per-chunk state (thread-safe) ────────────────────────────────────────────
+class ChunkState:
+    def __init__(self, label: str, cname: str, ann_src: str, agents: list):
+        self.label      = label
+        self.label_flat = label.replace('/', '_')
+        self.cname      = cname
+        self.ann_src    = ann_src
+        self.agents     = agents
+        self.lock       = threading.Lock()
+        self.findings   = []
+        self.agents_done   = 0
+        self.agents_total  = len(agents)
+        self.raw_path   = os.path.join(OUT_DIR, f"{self.label_flat}_chunk_raw.json")
+        self.dedup_path = os.path.join(OUT_DIR, f"{self.label_flat}_chunk_dedup.json")
+
+def _save_chunk_raw(cs: ChunkState):
+    data = {"chunk": cs.label, "findings_count": len(cs.findings), "findings": cs.findings}
+    json.dump(data, open(cs.raw_path, 'w'), indent=2, ensure_ascii=False)
+    with _LOCK:
+        print(f"  [{cs.label}] → {len(cs.findings)} raw findings → {cs.raw_path}", flush=True)
+
+def _run_chunk_dedup(cs: ChunkState):
+    deduped = dedup_pipeline(list(cs.findings), FULL_GT_SOURCE)
+    data = {"chunk": cs.label, "findings_count": len(deduped), "findings": deduped}
+    json.dump(data, open(cs.dedup_path, 'w'), indent=2, ensure_ascii=False)
+    with _LOCK:
+        print(f"  [{cs.label}] dedup: {len(cs.findings)} → {len(deduped)} → {cs.dedup_path}", flush=True)
+
+def _agent_task(cs: ChunkState, agent_id: str, agent_idx: int, profiles_map: dict, client) -> None:
+    """Run one agent, append findings to chunk state, trigger dedup if last agent."""
+    t2_f, t3_f = run_agent(agent_id, cs.ann_src, cs.label, agent_idx, cs.cname, profiles_map, client)
+    with cs.lock:
+        cs.findings.extend(t2_f)
+        cs.findings.extend(t3_f)
+        cs.agents_done += 1
+        is_last = (cs.agents_done == cs.agents_total)
+    if is_last:
+        _save_chunk_raw(cs)
+        if DEDUP_ENABLED:
+            _global_executor.submit(_run_chunk_dedup, cs)
+
+def _prepare_chunk_state(chunk: dict) -> ChunkState:
     label    = f"{chunk['domain']}/{chunk['contract_name']}"
-    base_src  = chunk['source'] if NO_INV else _annotate_source_with_hist_inv(chunk['source'], INV_MAP)
+    base_src = chunk['source'] if NO_INV else _annotate_source_with_hist_inv(chunk['source'], INV_MAP)
     cg_contracts = [chunk['contract_name']] + [a for a, _ in chunk.get('aux_names', [])]
     cg_block = _get_call_graph_block(cg_contracts)
     ann_src  = (cg_block + "\n" + base_src) if cg_block else base_src
     src_lines = ann_src.count('\n') + 1
     mode_str  = 'no_inv' if NO_INV else 'with_inv'
-
-    print(f"\n{'='*65}")
-    print(f"Chunk: {label}  |  {len(chunk['fn_names'])} fns  |  {src_lines} lines  [{mode_str}]", flush=True)
-
-    all_findings = []
-    cname = chunk['contract_name']
-    if WORKERS > 1:
-        with ThreadPoolExecutor(max_workers=WORKERS) as exe:
-            futs = {
-                exe.submit(run_agent, agent_id, ann_src, label, idx, cname, profiles_map,
-                           llm_pool[idx % len(llm_pool)]): agent_id
-                for idx, agent_id in enumerate(chunk['agents'])
-            }
-            for fut in as_completed(futs):
-                t2_f, t3_f = fut.result()
-                all_findings.extend(t2_f)
-                all_findings.extend(t3_f)
-    else:
-        for idx, agent_id in enumerate(chunk['agents']):
-            t2_f, t3_f = run_agent(agent_id, ann_src, label, idx, cname, profiles_map)
-            all_findings.extend(t2_f)
-            all_findings.extend(t3_f)
-            if idx < len(chunk['agents']) - 1:
-                time.sleep(5)
-
-    print(f"  → {len(all_findings)} raw findings", flush=True)
-    return all_findings
+    with _LOCK:
+        print(f"\n{'='*65}")
+        print(f"Chunk queued: {label}  |  {len(chunk['fn_names'])} fns  |  {src_lines} lines  [{mode_str}]", flush=True)
+    return ChunkState(label, chunk['contract_name'], ann_src, chunk['agents'])
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 print('\n' + '='*65)
@@ -678,22 +751,52 @@ profiles_map = {p.agent_id: p for p in gen.generate_tier1_profiles(_primary_src)
 # Full GT source for dedup CODE_ANCHOR check
 FULL_GT_SOURCE = "\n\n".join(src for cname, (_, src) in contracts.items() if cname in GT_CONTRACTS)
 
-chunks = build_chunks(contracts)
+aux_map = build_aux_map(contracts, GT_CONTRACTS)
+print(f"\nAux contracts (auto-detected):")
+for cname, deps in sorted(aux_map.items()):
+    if deps:
+        print(f"  {cname} → {deps}")
+
+chunks = build_chunks(contracts, aux_map)
 print(f"\nChunks to simulate ({len(chunks)} total — GT contracts only):")
 for c in chunks:
-    print(f"  [{c['domain']}] {c['contract_name']}: {c['fn_names']}")
+    aux_str = f" +aux={c['aux_names']}" if c['aux_names'] else ""
+    print(f"  [{c['domain']}] {c['contract_name']}: {c['fn_names']}{aux_str}")
 
 t_start = time.time()
-all_raw = []
-for chunk in chunks:
-    all_raw.extend(run_chunk(chunk, profiles_map))
-    time.sleep(5)
 
-# Global dedup trên toàn bộ findings (cross-chunk duplicates được xử lý đúng)
-# print(f"\n{'='*65}")
-# print(f"Global dedup: {len(all_raw)} raw findings across all chunks")
-# all_deduped = dedup_pipeline(all_raw, FULL_GT_SOURCE)
-# print(f"Global dedup result: {len(all_raw)} → {len(all_deduped)}")
+# Prepare all chunk states (source annotation, print headers) before submitting tasks
+chunk_states = [_prepare_chunk_state(c) for c in chunks]
+
+# Global executor shared between agent tasks and dedup tasks
+total_tasks = sum(cs.agents_total for cs in chunk_states)
+print(f"\n[exec] {total_tasks} agent tasks across {len(chunk_states)} chunks | workers={WORKERS} | dedup={'on' if DEDUP_ENABLED else 'off'}", flush=True)
+
+_global_executor = ThreadPoolExecutor(max_workers=WORKERS)
+agent_futures = {}
+task_counter = 0
+for cs in chunk_states:
+    for idx, agent_id in enumerate(cs.agents):
+        client = llm_pool[task_counter % len(llm_pool)]
+        f = _global_executor.submit(_agent_task, cs, agent_id, idx, profiles_map, client)
+        agent_futures[f] = f"{cs.label}/{agent_id}"
+        task_counter += 1
+
+for fut in as_completed(agent_futures):
+    label = agent_futures[fut]
+    try:
+        fut.result()
+    except Exception as e:
+        with _LOCK:
+            print(f"  [ERROR] {label}: {e}", flush=True)
+
+# All agent tasks done — dedup tasks were submitted inside _agent_task before they returned,
+# so shutdown(wait=True) safely waits for all dedup tasks too.
+_global_executor.shutdown(wait=True)
+
+all_raw = []
+for cs in chunk_states:
+    all_raw.extend(cs.findings)
 
 wall_time = time.time() - t_start
 
@@ -711,12 +814,15 @@ def _save_report(findings, tag, config_note):
     return path
 
 raw_path = _save_report(all_raw, "raw", "T2+T3_merged_no_dedup")
-# dedup_path = _save_report(all_deduped, "deduped", "T2+T3_pipeline_dedup")
 
 print(f"\n{'='*65}")
-print(f"DONE — raw={len(all_raw)}  |  {wall_time:.0f}s")
-print(f"Raw report: {raw_path}")
+print(f"DONE — raw={len(all_raw)}  |  {wall_time:.0f}s  |  workers={WORKERS}")
+print(f"Global raw report: {raw_path}")
+print(f"\nPer-chunk files:")
+for cs in chunk_states:
+    raw_exists  = '✓' if os.path.exists(cs.raw_path)   else '✗'
+    dedup_exists = '✓' if os.path.exists(cs.dedup_path) else '-'
+    print(f"  [{raw_exists}raw/{dedup_exists}dedup] {cs.label_flat}")
 print(f"\nEval commands:")
 print(f"  cd backend/scripts/evaluate")
 print(f"  python web3bugs_eval.py gt/gt_{CONTEST_ID}.json {raw_path} --verbose")
-# print(f"  python web3bugs_eval.py gt/gt_{CONTEST_ID}.json {dedup_path} --verbose")

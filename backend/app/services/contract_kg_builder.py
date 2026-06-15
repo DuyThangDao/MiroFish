@@ -1070,6 +1070,62 @@ class ContractKGBuilder:
         return entries
 
     @staticmethod
+    def _build_validator_coverage(source_code: str) -> str:
+        """
+        Scan for bool-returning is*()/has*()/check*() view/pure helpers.
+        For each validator with PARTIAL coverage (some callers, some non-callers),
+        emit a ⚠ line so agents can spot missing validation calls.
+        Skip if 0% or 100% called — only partial coverage is signal.
+        """
+        # Find all is*/has*/can*/check* functions that return bool
+        validator_re = re.compile(
+            r'function\s+((?:is|has|can|check)[A-Za-z_]\w*)\s*\([^)]*\)'
+            r'[^{]*\breturns\s*\(\s*bool[^)]*\)',
+            re.MULTILINE
+        )
+        validators = [m.group(1) for m in validator_re.finditer(source_code)]
+        if not validators:
+            return ""
+
+        # Extract all public/external function bodies
+        fn_body_re = re.compile(r'function\s+(\w+)\s*\([^)]*\)[^{]*\{', re.MULTILINE)
+        matches = list(fn_body_re.finditer(source_code))
+        if not matches:
+            return ""
+
+        # For each public function (non-validator), track which validators it calls
+        pub_fns: dict = {}
+        validator_set = set(validators)
+        for i, m in enumerate(matches):
+            fn_name = m.group(1)
+            if fn_name in validator_set:
+                continue
+            start = m.end()
+            end = matches[i + 1].start() if i + 1 < len(matches) else len(source_code)
+            body = source_code[start:end]
+            called_validators = {v for v in validators if re.search(rf'\b{v}\s*\(', body)}
+            pub_fns[fn_name] = called_validators
+
+        if not pub_fns:
+            return ""
+
+        lines = []
+        for v in validators:
+            callers     = [fn for fn, cv in pub_fns.items() if v in cv]
+            non_callers = [fn for fn, cv in pub_fns.items() if v not in cv]
+            # Only emit when coverage is partial
+            if not callers or not non_callers:
+                continue
+            lines.append(
+                f"  ⚠ {v}(): called by [{', '.join(sorted(callers))}] "
+                f"| NOT called by [{', '.join(sorted(non_callers))}] — verify if intentional"
+            )
+
+        if not lines:
+            return ""
+        return "VALIDATOR COVERAGE (partial — verify missing calls):\n" + "\n".join(lines) + "\n"
+
+    @staticmethod
     def _build_call_graph_summary(source_code: str, known_functions: List[str]) -> str:
         """
         Build a per-function call-dependency summary using known_functions from the parsed
@@ -1094,13 +1150,19 @@ class ContractKGBuilder:
                 section = source_code[start:end]
                 local_fns = list(set(re.findall(r'\bfunction\s+([a-zA-Z_]\w*)\s*\(', section)))
                 entries = ContractKGBuilder._build_call_graph_entries(section, local_fns)
+                vc = ContractKGBuilder._build_validator_coverage(section)
                 if entries:
-                    parts.append(f"[{contract_name}]\n" + "\n".join(entries))
+                    section_text = f"[{contract_name}]\n" + "\n".join(entries)
+                    if vc:
+                        section_text += "\n" + vc
+                    parts.append(section_text)
             return ("CALL GRAPH:\n" + "\n\n".join(parts) + "\n") if parts else ""
 
         # Single contract: existing behavior
         entries = ContractKGBuilder._build_call_graph_entries(source_code, known_functions)
-        return ("CALL GRAPH:\n" + "\n".join(entries) + "\n") if entries else ""
+        cg = ("CALL GRAPH:\n" + "\n".join(entries) + "\n") if entries else ""
+        vc = ContractKGBuilder._build_validator_coverage(source_code)
+        return cg + ("\n" + vc if vc else "")
 
     # ─── Context summary for agent injection ─────────────────────────────────
 
