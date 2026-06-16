@@ -9,6 +9,8 @@ Thumbs.db
 vertex-ai.json
 vertex-ai-1.json
 vertex-ai-2.json
+vertex-ai-3.json
+vertex-ai-4.json
 .env.local
 .env.*.local
 .env.development

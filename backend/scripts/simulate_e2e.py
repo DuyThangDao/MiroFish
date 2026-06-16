@@ -46,10 +46,13 @@ KEY_FILE2  = os.getenv('LLM2_VERTEX_AI_KEY_FILE', '')
 BASE_URL2  = os.getenv('LLM2_BASE_URL', BASE_URL)
 KEY_FILE3  = os.getenv('LLM3_VERTEX_AI_KEY_FILE', '')
 BASE_URL3  = os.getenv('LLM3_BASE_URL', BASE_URL)
+KEY_FILE4  = os.getenv('LLM4_VERTEX_AI_KEY_FILE', '')
+BASE_URL4  = os.getenv('LLM4_BASE_URL', BASE_URL)
 llm = _make_client(KEY_FILE, BASE_URL)
 _extra = []
 if KEY_FILE2: _extra.append(_make_client(KEY_FILE2, BASE_URL2))
 if KEY_FILE3: _extra.append(_make_client(KEY_FILE3, BASE_URL3))
+if KEY_FILE4: _extra.append(_make_client(KEY_FILE4, BASE_URL4))
 llm_pool = [llm] + _extra
 print(f"[setup] llm_pool = {len(llm_pool)} client(s)")
 
@@ -87,7 +90,7 @@ GT_CONTRACTS  = set(_args.gt_contracts)
 NO_INV        = _args.no_inv
 WORKERS       = _args.workers
 DEDUP_ENABLED = _args.dedup
-SKIP_DIRS     = {'interfaces', 'test', 'workInProgress', 'flat', 'mocks'}
+SKIP_DIRS     = {'interfaces', 'test', 'workInProgress', 'flat', 'mocks', 'mock', 'node_modules', 'artifacts'}
 
 _inv_tag     = 'no_inv' if NO_INV else 'with_inv'
 _BENCH_DIR   = os.path.join(os.path.dirname(__file__), '../../benchmark/web3bugs/agent-redesign', CONTEST_ID)
@@ -240,15 +243,17 @@ def match_domain(fn_name: str) -> str:
             return domain
     return 'general'
 
-# ─── Domain → agents (3-4 diverse lenses each) ───────────────────────────────
+# ─── Domain → agents (Fix F: broader coverage per domain) ────────────────────
 DOMAIN_AGENTS = {
     'clmm_semantic':  ['clmm_specialist',   'defi_analyst',           'logic_exploiter'],
-    'math_cast':      ['math_precision',    'invariant_breaker',      'logic_exploiter'],
-    'access_reward':  ['access_escalator',  'clmm_specialist',        'state_machine_analyst', 'mev_analyst'],
+    'math_cast':      ['math_precision',    'invariant_breaker',      'logic_exploiter',       'evm_hardener',
+                       'token_specialist', 'reentrancy_specialist'],
+    'access_reward':  ['access_escalator',  'clmm_specialist',        'state_machine_analyst', 'mev_analyst', 'appsec_hardener'],
     'economic':       ['defi_attacker',     'flash_loan_specialist',  'mev_analyst'],
     'state_ordering': ['state_machine_analyst', 'appsec_researcher',  'logic_exploiter'],
-    'admin_gov':      ['state_dependency_analyst', 'access_escalator', 'validation_checker', 'logic_exploiter'],
-    'general':        ['defi_attacker',     'logic_exploiter',        'appsec_hardener',       'validation_checker'],
+    'admin_gov':      ['state_dependency_analyst', 'access_escalator', 'validation_checker',   'logic_exploiter'],
+    'general':        ['defi_attacker',     'logic_exploiter',        'appsec_hardener',       'validation_checker',
+                       'token_specialist',  'governance_specialist'],
 }
 
 # ─── Modifier inline expansion ────────────────────────────────────────────────
@@ -401,6 +406,57 @@ def build_aux_map(contracts: dict, gt: set) -> dict:
         result[cname] = deps
     return result
 
+# ─── Fix E: parent contract source injection ──────────────────────────────────
+_INHERIT_RE = re.compile(
+    r'(?:abstract\s+)?contract\s+\w+\s+is\s+([^{]+)\{'
+)
+
+def _find_parent_sources(cname: str, contracts: dict, exclude: set = None) -> list:
+    """Return [(parent_name, parent_src)] for implementation parents in the same dir.
+
+    Guards applied:
+      - Same directory as target contract (no cross-dir parents)
+      - Not inside an interfaces/ path component
+      - Not a pure interface declaration
+      - File < 200 lines (excludes large ERC721 base classes like TridentNFT)
+      - Not already in GT_CONTRACTS or exclude set
+    """
+    if cname not in contracts:
+        return []
+    filepath, src = contracts[cname]
+    contract_dir = os.path.normpath(os.path.dirname(filepath))
+    exclude = (exclude or set()) | GT_CONTRACTS
+
+    parent_names = []
+    for m in _INHERIT_RE.finditer(src):
+        for p in re.split(r'\s*,\s*', m.group(1).strip()):
+            p = p.strip()
+            if p and p not in parent_names:
+                parent_names.append(p)
+
+    result = []
+    for pname in parent_names:
+        if pname in exclude:
+            continue
+        if pname not in contracts:
+            continue
+        p_filepath, p_src = contracts[pname]
+        # Must be in the same directory
+        if os.path.normpath(os.path.dirname(p_filepath)) != contract_dir:
+            continue
+        # Skip if path contains an interfaces/ component
+        if 'interfaces' in p_filepath.replace('\\', '/').split('/'):
+            continue
+        # Skip pure interface declarations
+        if re.search(r'^\s*interface\s+\w+', p_src, re.MULTILINE):
+            continue
+        # Size guard: < 200 lines
+        if p_src.count('\n') + 1 >= 200:
+            continue
+        result.append((pname, p_src))
+    return result
+
+
 # ─── Group functions per (domain × contract) ──────────────────────────────────
 def build_chunks(contracts: dict, aux_map: dict) -> list:
     domain_contract_fns = defaultdict(list)
@@ -419,25 +475,36 @@ def build_chunks(contracts: dict, aux_map: dict) -> list:
         # Aux contracts from import analysis (cross-contract context)
         aux = [(dep, contracts[dep][1]) for dep in aux_map.get(cname, []) if dep in contracts]
 
-        # Small library with no deps: include full source instead of function extraction
+        # Fix E: parent contracts in same dir (not interfaces, not GT, < 200 lines)
+        aux_names_set = {name for name, _ in aux}
+        parents = _find_parent_sources(cname, contracts, exclude=aux_names_set)
+        if parents:
+            print(f"[Fix E] {cname}: injecting parent source(s): {[p for p,_ in parents]}")
+
+        # Small contract with no cross-contract deps: include full source
         if not aux and len(src) < 30_000 and not aux_map.get(cname):
+            full_src = f"// ─── {cname}.sol ─────────────────────────────────────────────────\n{src}"
+            for pname, psrc in parents:
+                full_src += f"\n\n// ─── {pname}.sol (parent) ─────────────────────────────────────────\n{psrc}"
             chunks.append({
                 'domain':        dom,
                 'contract_name': cname,
-                'source':        f"// ─── {cname}.sol ─────────────────────────────────────────────────\n{src}",
+                'source':        full_src,
                 'fn_names':      fns,
-                'aux_names':     [],
+                'aux_names':     [(pname, None) for pname, _ in parents],
                 'agents':        DOMAIN_AGENTS.get(dom, DOMAIN_AGENTS['general']),
             })
             continue
 
-        chunk_source = build_chunk_source(cname, src, fns, aux)
+        # Function-extraction mode: parents go through aux_contracts pipeline
+        all_aux = aux + parents
+        chunk_source = build_chunk_source(cname, src, fns, all_aux or None)
         chunks.append({
             'domain':        dom,
             'contract_name': cname,
             'source':        chunk_source,
             'fn_names':      fns,
-            'aux_names':     [(a_name, None) for a_name, _ in aux],
+            'aux_names':     [(a_name, None) for a_name, _ in all_aux],
             'agents':        DOMAIN_AGENTS.get(dom, DOMAIN_AGENTS['general']),
         })
     return chunks
@@ -570,6 +637,32 @@ _FIELD_RE = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 
+def _filter_to_chunk_contract(findings: list, chunk_contract: str,
+                               aux_contracts: list = None) -> list:
+    """Drop findings whose contract_name is not the primary contract or an aux contract.
+    Prevents agents from hallucinating findings about external contracts they only
+    see referenced via interface calls (e.g. DAO() calls inside Router.sol).
+    Aux contracts (explicitly included in source) are allowed.
+    """
+    allowed = {chunk_contract.lower()}
+    for a in (aux_contracts or []):
+        allowed.add(a.lower())
+    out, dropped = [], 0
+    for f in findings:
+        cn = (f.get('contract_name') or '').strip()
+        if not cn or cn.lower() in allowed:
+            out.append(f)
+        else:
+            dropped += 1
+    if dropped:
+        import logging as _log
+        _log.getLogger(__name__).info(
+            f"[contract_filter] dropped {dropped} findings for non-chunk contracts "
+            f"(allowed={sorted(allowed)})"
+        )
+    return out
+
+
 def parse_findings(text: str, default_contract: str, source: str = 'T2') -> list:
     findings = []
     parts = re.split(r'\nFINDING:', '\n' + text)
@@ -611,7 +704,8 @@ def parse_findings(text: str, default_contract: str, source: str = 'T2') -> list
 
 # ─── Run one agent on one chunk ────────────────────────────────────────────────
 def run_agent(agent_id: str, ann_source: str, chunk_label: str, agent_idx: int,
-              contract_name: str, profiles_map: dict, client=None) -> tuple:
+              contract_name: str, profiles_map: dict, client=None,
+              aux_contracts: list = None) -> tuple:
     """Returns (t2_findings, t3_findings)."""
     out = os.path.join(OUT_DIR, f"{chunk_label.replace('/', '_')}_{agent_id}.txt")
 
@@ -620,8 +714,8 @@ def run_agent(agent_id: str, ann_source: str, chunk_label: str, agent_idx: int,
         text = open(out).read()
         t2_m = re.search(r'=== T2 \(standard\) ===\n(.*?)(?====)', text, re.DOTALL)
         t3_m = re.search(r'=== T3 \(CoT sweep\) ===\n(.*?)$',    text, re.DOTALL)
-        t2_f = parse_findings(t2_m.group(1) if t2_m else '', contract_name, source='T2')
-        t3_f = parse_findings(t3_m.group(1) if t3_m else '', contract_name, source='T3')
+        t2_f = _filter_to_chunk_contract(parse_findings(t2_m.group(1) if t2_m else '', contract_name, source='T2'), contract_name, aux_contracts)
+        t3_f = _filter_to_chunk_contract(parse_findings(t3_m.group(1) if t3_m else '', contract_name, source='T3'), contract_name, aux_contracts)
         with _LOCK:
             print(f"    [{chunk_label}/{agent_id}] RESUMED  T2={len(t2_f)} T3={len(t3_f)}", flush=True)
         return t2_f, t3_f
@@ -644,7 +738,7 @@ def run_agent(agent_id: str, ann_source: str, chunk_label: str, agent_idx: int,
     # T2: standard finding discovery
     t2_prompt = build_round1_prompt(profile, ann_source, injected_invariants=t1_clean)
     t2_resp   = llm_call(t2_prompt, client)
-    t2_findings = parse_findings(t2_resp, contract_name, source='T2')
+    t2_findings = _filter_to_chunk_contract(parse_findings(t2_resp, contract_name, source='T2'), contract_name, aux_contracts)
     time.sleep(2)
 
     # T3: independent CoT sweep (fresh, no T2 findings injected)
@@ -655,7 +749,7 @@ def run_agent(agent_id: str, ann_source: str, chunk_label: str, agent_idx: int,
         source=ann_source,
     )
     t3_resp     = llm_call(t3_prompt, client)
-    t3_findings = parse_findings(t3_resp, contract_name, source='T3')
+    t3_findings = _filter_to_chunk_contract(parse_findings(t3_resp, contract_name, source='T3'), contract_name, aux_contracts)
 
     total = time.time() - t0
     n2, n3 = len(t2_findings), len(t3_findings)
@@ -672,12 +766,13 @@ def run_agent(agent_id: str, ann_source: str, chunk_label: str, agent_idx: int,
 
 # ─── Per-chunk state (thread-safe) ────────────────────────────────────────────
 class ChunkState:
-    def __init__(self, label: str, cname: str, ann_src: str, agents: list):
+    def __init__(self, label: str, cname: str, ann_src: str, agents: list, aux_names: list = None):
         self.label      = label
         self.label_flat = label.replace('/', '_')
         self.cname      = cname
         self.ann_src    = ann_src
         self.agents     = agents
+        self.aux_names  = aux_names or []  # list of aux contract names
         self.lock       = threading.Lock()
         self.findings   = []
         self.agents_done   = 0
@@ -700,7 +795,7 @@ def _run_chunk_dedup(cs: ChunkState):
 
 def _agent_task(cs: ChunkState, agent_id: str, agent_idx: int, profiles_map: dict, client) -> None:
     """Run one agent, append findings to chunk state, trigger dedup if last agent."""
-    t2_f, t3_f = run_agent(agent_id, cs.ann_src, cs.label, agent_idx, cs.cname, profiles_map, client)
+    t2_f, t3_f = run_agent(agent_id, cs.ann_src, cs.label, agent_idx, cs.cname, profiles_map, client, aux_contracts=cs.aux_names)
     with cs.lock:
         cs.findings.extend(t2_f)
         cs.findings.extend(t3_f)
@@ -722,7 +817,8 @@ def _prepare_chunk_state(chunk: dict) -> ChunkState:
     with _LOCK:
         print(f"\n{'='*65}")
         print(f"Chunk queued: {label}  |  {len(chunk['fn_names'])} fns  |  {src_lines} lines  [{mode_str}]", flush=True)
-    return ChunkState(label, chunk['contract_name'], ann_src, chunk['agents'])
+    aux_names = [a for a, _ in chunk.get('aux_names', [])]
+    return ChunkState(label, chunk['contract_name'], ann_src, chunk['agents'], aux_names)
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 print('\n' + '='*65)

@@ -37,6 +37,11 @@ class Config:
     LLM2_VERTEX_AI_KEY_FILE = os.environ.get('LLM2_VERTEX_AI_KEY_FILE')
     LLM2_BASE_URL           = os.environ.get('LLM2_BASE_URL')
     LLM2_GLOBAL_RPM_LIMIT   = int(os.environ.get('LLM2_GLOBAL_RPM_LIMIT', '18'))
+    # Vertex AI accounts 3 & 4 — thêm worker khi set
+    LLM3_VERTEX_AI_KEY_FILE = os.environ.get('LLM3_VERTEX_AI_KEY_FILE')
+    LLM3_BASE_URL           = os.environ.get('LLM3_BASE_URL')
+    LLM4_VERTEX_AI_KEY_FILE = os.environ.get('LLM4_VERTEX_AI_KEY_FILE')
+    LLM4_BASE_URL           = os.environ.get('LLM4_BASE_URL')
 
     # Boost LLM — dùng cho Phase C attacker agents + invariant extraction
     # Mode A — Claude trên Vertex AI (cùng service account):

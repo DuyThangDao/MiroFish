@@ -21,7 +21,7 @@ from typing import Dict, List, Optional, Set, Tuple
 from llm_judge import judge_match
 from metrics import compute_metrics
 
-_EVAL_WORKERS = 3
+_EVAL_WORKERS = 4
 
 
 _KEYWORD_KEYWORDS = {

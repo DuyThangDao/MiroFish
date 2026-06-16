@@ -89,10 +89,10 @@ def _extract_visible(text: str) -> str:
 
 
 def _build_client_pool():
-    """Build list of LLMClients from up to 3 Vertex key configs (LLM_*, LLM2_*, LLM3_*)."""
+    """Build list of LLMClients from up to 4 Vertex key configs (LLM_*, LLM2_*, LLM3_*, LLM4_*)."""
     from app.utils.llm_client import LLMClient
     pool = []
-    for prefix in ("LLM", "LLM2", "LLM3"):
+    for prefix in ("LLM", "LLM2", "LLM3", "LLM4"):
         key_file = os.environ.get(f"{prefix}_VERTEX_AI_KEY_FILE")
         base_url = os.environ.get(f"{prefix}_BASE_URL")
         if prefix == "LLM":

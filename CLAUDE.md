@@ -82,23 +82,39 @@ OASIS simulations run as a separate subprocess to avoid Python GIL contention. C
 
 ### Benchmark Audit (cách chuẩn — dùng cho mọi lần chạy mới)
 
-Kết quả được lưu vào `benchmark/web3bugs/agent-redesign/<contest_id>/run-N/`.
-Mỗi lần chạy mới tạo thêm `run-N` tiếp theo (run-1, run-2, ...).
-Sau khi xong, output dir tự có: `dedup_findings.json`, `audit_report_dedup.json`, `run.log`.
+**⚠️ QUAN TRỌNG: Luôn dùng `simulate_e2e.py`, KHÔNG dùng `run_benchmark.sh` hay `run_contract_audit.py`.**
+`run_benchmark.sh` gọi `run_contract_audit.py` (full 5-step pipeline), còn `simulate_e2e.py` là script audit đang dùng.
+
+Kết quả lưu vào `benchmark/web3bugs/agent-redesign/<contest_id>/sim_e2e_<run_label>/`.
+Contest metadata (gt_contracts, contracts_dir) tra trong `benchmark/benchmark_contests.json`.
 
 ```bash
 cd /home/thangdd/repos/MiroFish/backend
+source .venv/bin/activate
 
-# Chạy foreground (có progress output):
-bash scripts/run_benchmark.sh \
-  /home/thangdd/repos/web3bugs/contracts/<contest_id> \
-  ../benchmark/web3bugs/agent-redesign/<contest_id>/run-N
+# Chạy background (cách chuẩn):
+LOG=/tmp/sim_e2e_<contest_id>_<label>_$(date +%Y%m%d_%H%M%S).log
+nohup python scripts/simulate_e2e.py \
+  --contest-id <contest_id> \
+  --contest-dir /home/thangdd/repos/web3bugs/contracts/<contest_id> \
+  --contracts-dir <contracts_dir từ benchmark_contests.json> \
+  --gt-contracts <gt_contracts từ benchmark_contests.json> \
+  --workers 4 \
+  --dedup \
+  --out-dir ../benchmark/web3bugs/agent-redesign/<contest_id>/sim_e2e_<label> \
+> "$LOG" 2>&1 & echo "PID=$!  LOG=$LOG"
+```
 
-# Chạy background:
-nohup bash scripts/run_benchmark.sh \
-  /home/thangdd/repos/web3bugs/contracts/<contest_id> \
-  ../benchmark/web3bugs/agent-redesign/<contest_id>/run-N \
-  > /tmp/benchmark_<contest_id>_runN.log 2>&1 &
+Ví dụ contest 5 (Vader Protocol):
+```bash
+nohup python scripts/simulate_e2e.py \
+  --contest-id 5 \
+  --contest-dir /home/thangdd/repos/web3bugs/contracts/5 \
+  --contracts-dir /home/thangdd/repos/web3bugs/contracts/5/vader-protocol/contracts \
+  --gt-contracts DAO Pools Router USDV Utils Vader Vault Vether \
+  --workers 4 --dedup \
+  --out-dir ../benchmark/web3bugs/agent-redesign/5/sim_e2e_<label> \
+> /tmp/sim_e2e_5_<label>.log 2>&1 &
 ```
 
 **Eval sau khi xong (kết quả tự động lưu vào run dir):**

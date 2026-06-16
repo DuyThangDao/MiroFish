@@ -1390,24 +1390,71 @@ STEP 1 — LIST INVARIANTS:
   - Read NatSpec @notice/@dev — they often describe conditions that must hold
   - Read require() messages — each require is an invariant candidate
   - Look for state variables named "total", "global", "cumulative" — they usually must equal sum of sub-values
-  - Look for functions named "distribute", "reward", "migrate", "sync" — they often have ordering invariants"""
+  - Look for functions named "distribute", "reward", "migrate", "sync" — they often have ordering invariants
 
-_INDEPENDENT_TRACKS_BLOCK = (
+  ACCESS CONTROL INV — mandatory scan:
+  - For EVERY function that writes to a shared counter, mapping, or array (e.g., registers an asset,
+    adds to a list, increments a global total): check if there is an explicit msg.sender restriction
+    (onlyOwner, onlyDAO, require(msg.sender == ...), or a role modifier).
+  - If a function modifies shared state with NO caller restriction → generate an INV:
+    "INV-N: <FunctionName>() MUST require explicit caller authorization before modifying <state variable>."
+  - Do NOT skip this even if the function has other checks (bounds, amount > 0) — those are NOT access control."""
+
+_TRACK_E_BLOCK = (
+    "TRACK E — UNINITIALIZED STATE VARIABLES:\n"
+    "  For every state variable used in a security-critical check (time gate, block delay,\n"
+    "  fee rate, reward accumulator, cooldown, cap), verify it is explicitly SET somewhere\n"
+    "  in the contract (constructor, init(), or a dedicated setter).\n"
+    "  A variable that is only READ but never WRITTEN defaults to 0 in Solidity —\n"
+    "  this silently bypasses the check (e.g., a delay of 0 = no delay).\n"
+    "  Any security variable that is never assigned = FINDING candidate.\n\n"
+    "  TIME-DELTA PATTERN — check explicitly:\n"
+    "  If the contract uses `block.timestamp - lastTime[user]` (or `block.number - lastBlock[user]`)\n"
+    "  to compute rewards, interest, or cooldowns:\n"
+    "    → Check if `lastTime[user]` is SET in the deposit/entry/join function.\n"
+    "    → If NOT set on entry: a new depositor has lastTime[user] == 0, so the delta equals\n"
+    "      the entire chain history — producing a massive, incorrect reward on first claim.\n"
+    "    → This is a FINDING candidate: 'Uninitialized lastTime leads to inflated first reward.'\n\n"
+)
+
+_INDEPENDENT_TRACKS_BLOCK_BASE = (
     "\nINDEPENDENT REASONING TRACKS — run these regardless of HIST-INV annotations:\n\n"
     "TRACK A — ADVERSARIAL INPUTS:\n"
     "  For the 2-3 most complex functions: test numeric bounds (0, max_uint),\n"
     "  address(0), empty arrays, and cross-function call sequences.\n"
     "  Any input that corrupts state without reverting = FINDING candidate.\n\n"
-    "TRACK B/C/D: applied per your domain expertise (see your system prompt).\n"
 )
+
+_INDEPENDENT_TRACKS_BLOCK_SUFFIX = "TRACK B/C/D: applied per your domain expertise (see your system prompt).\n"
+
+# Domains where TRACK E is relevant (initialization bugs, access/reward logic)
+_TRACK_E_DOMAINS = {"general", "access_reward"}
+
+
+def _build_independent_tracks_block(domain_group: str) -> str:
+    """Build INDEPENDENT_TRACKS_BLOCK with TRACK E scoped to relevant domains only."""
+    block = _INDEPENDENT_TRACKS_BLOCK_BASE
+    if domain_group in _TRACK_E_DOMAINS:
+        block += _TRACK_E_BLOCK
+    block += _INDEPENDENT_TRACKS_BLOCK_SUFFIX
+    return block
 
 _HIST_INV_CHECK_BLOCK = """\
 HIST-INV CHECK — run this BEFORE writing any FINDING:
   Scan the source for `// [HIST-INV]:` comments (historical HIGH-severity pattern matches).
   For EACH annotated function, output one verdict line:
     HIST-CHECK [<FunctionName>]: MATCH | MITIGATED | UNCLEAR — <one sentence citing exact code>
-  If MATCH → this is a confirmed vulnerability; write a FINDING below.
   If no annotations exist → write: HIST-CHECK: none
+
+  MATCH RULE — MANDATORY FINDING:
+    If HIST-CHECK verdict is MATCH → you MUST write a FINDING block immediately after the verdict line.
+    Do NOT continue to other checks without writing the FINDING first.
+    A MATCH without a corresponding FINDING block = an incomplete audit.
+
+  MITIGATED criteria — access control specifically:
+    MITIGATED requires an explicit caller check: msg.sender == owner/role, onlyOwner, onlyDAO, etc.
+    A bound/size check (e.g., array.length < N, amount > 0, index < limit) is NOT access control.
+    If the only check is a bound check and there is no caller authorization → mark MATCH, not MITIGATED.
 """
 
 
@@ -1434,6 +1481,8 @@ def build_round1_prompt(
     intent_block = f"\n=== CONTRACT INTENT ===\n{intent_summary}\n" if intent_summary else ""
     chain_block = f"\n{call_chain_block}\n" if call_chain_block else ""
     focus_block = f"\n{focus_directive}\n" if focus_directive else ""
+    domain_group = getattr(agent_profile, "domain_group", "general")
+    tracks_block = _build_independent_tracks_block(domain_group)
 
     if invariant_only:
         _cq = getattr(agent_profile, "core_question", "")
@@ -1509,7 +1558,7 @@ PROTOCOL INVARIANT ANALYSIS — mandatory before writing any FINDING:
 
 {step1_section}
 
-{cq_section2}{hint_section}{_INDEPENDENT_TRACKS_BLOCK}
+{cq_section2}{hint_section}{tracks_block}
 STEP 2 — FIND VIOLATIONS:
 {_HIST_INV_CHECK_BLOCK}
   For each invariant listed above, ask:
@@ -1599,6 +1648,15 @@ FUNCTION ATTRIBUTION FOR ORDERING BUGS:
     CONTRACT = the contract/library that DEFINES that function (not the caller's contract).
     Example: if Library.helper() contains a wrong variable assignment,
     write FUNCTION: helper, CONTRACT: Library — even if the caller is a different contract.
+
+  EXCEPTION — bugs in parent/auxiliary contracts (marked "// ─── X.sol (parent)"):
+    A parent contract's vulnerable internal function is only reachable through the PRIMARY
+    contract's public function. Attribute to the PRIMARY contract's PUBLIC caller, not to the
+    internal helper.
+    Test: "Which function does an external attacker CALL to trigger this bug?"
+    Example: CoreCollection.mintToken() calls ERC721Payable._handlePayment() which has
+    unchecked transferFrom → write FUNCTION: mintToken, CONTRACT: CoreCollection.
+    Reason: the fix (SafeERC20 or return-value check) is enforced at the caller level.
 
 CROSS-CALL SEQUENCING (user controls call order):
   Identify pairs: WRITER (updates position.feeGrowthInside / rewardDebt / sharePrice) and

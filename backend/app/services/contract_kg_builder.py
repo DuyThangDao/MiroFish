@@ -429,6 +429,28 @@ class ContractKGBuilder:
                 rpm_slot_file="/tmp/mirofish_hist_inv_1.json",
                 rpm_limit=rpm,
             ))
+        # Worker 2: LLM3 (vertex-ai-3)
+        key3 = getattr(_Config, "LLM3_VERTEX_AI_KEY_FILE", None)
+        url3 = getattr(_Config, "LLM3_BASE_URL", None)
+        if key3 and url3:
+            clients.append(LLMClient(
+                vertex_key_file=key3,
+                base_url=url3,
+                model=getattr(_Config, "LLM_MODEL_NAME", None),
+                rpm_slot_file="/tmp/mirofish_hist_inv_2.json",
+                rpm_limit=rpm,
+            ))
+        # Worker 3: LLM4 (vertex-ai-4)
+        key4 = getattr(_Config, "LLM4_VERTEX_AI_KEY_FILE", None)
+        url4 = getattr(_Config, "LLM4_BASE_URL", None)
+        if key4 and url4:
+            clients.append(LLMClient(
+                vertex_key_file=key4,
+                base_url=url4,
+                model=getattr(_Config, "LLM_MODEL_NAME", None),
+                rpm_slot_file="/tmp/mirofish_hist_inv_3.json",
+                rpm_limit=rpm,
+            ))
         if not clients:
             # Fallback: default LLM client
             clients.append(LLMClient(
