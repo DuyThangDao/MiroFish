@@ -86,7 +86,19 @@ OASIS simulations run as a separate subprocess to avoid Python GIL contention. C
 `run_benchmark.sh` gọi `run_contract_audit.py` (full 5-step pipeline), còn `simulate_e2e.py` là script audit đang dùng.
 
 Kết quả lưu vào `benchmark/web3bugs/agent-redesign/<contest_id>/sim_e2e_<run_label>/`.
-Contest metadata (gt_contracts, contracts_dir) tra trong `benchmark/benchmark_contests.json`.
+
+**⚠️ QUAN TRỌNG: Tất cả thông tin contest (contest_dir, contracts_dir, gt_contracts) phải lấy từ `benchmark/benchmark_contests.json` — KHÔNG tự đoán hay dùng path subdir tùy tiện.**
+Mỗi contest có thể có cấu trúc thư mục khác nhau (ví dụ contest 104: GT contracts nằm trong 3 subdirs khác nhau, phải dùng root `104/` làm `contracts_dir`).
+
+```python
+# Tra cứu contest metadata:
+import json
+contests = json.load(open('benchmark/benchmark_contests.json'))['contests']
+entry = next(x for x in contests if x['contest_id'] == '<contest_id>')
+# entry['contracts_dir']  → dùng cho --contracts-dir
+# entry['gt_contracts']   → dùng cho --gt-contracts
+# contest_dir luôn là /home/thangdd/repos/web3bugs/contracts/<contest_id>
+```
 
 ```bash
 cd /home/thangdd/repos/MiroFish/backend
