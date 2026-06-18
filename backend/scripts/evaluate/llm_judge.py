@@ -108,16 +108,17 @@ def _build_client_pool():
 
 _CLIENT_POOL: list = []
 _POOL_LOCK = __import__("threading").Lock()
+_CALL_COUNTER = __import__("itertools").count()
 
 
 def _get_client(worker_id: int = 0):
-    """Return the LLMClient assigned to this worker (round-robin over pool)."""
+    """Round-robin across all available clients on each call, ignoring worker_id."""
     global _CLIENT_POOL
     if not _CLIENT_POOL:
         with _POOL_LOCK:
             if not _CLIENT_POOL:
                 _CLIENT_POOL = _build_client_pool()
-    return _CLIENT_POOL[worker_id % len(_CLIENT_POOL)]
+    return _CLIENT_POOL[next(_CALL_COUNTER) % len(_CLIENT_POOL)]
 
 
 def _model() -> str:

@@ -250,10 +250,10 @@ DOMAIN_AGENTS = {
                        'token_specialist', 'reentrancy_specialist'],
     'access_reward':  ['access_escalator',  'clmm_specialist',        'state_machine_analyst', 'mev_analyst', 'appsec_hardener'],
     'economic':       ['defi_attacker',     'flash_loan_specialist',  'mev_analyst'],
-    'state_ordering': ['state_machine_analyst', 'appsec_researcher',  'logic_exploiter'],
+    'state_ordering': ['state_machine_analyst', 'appsec_researcher',  'logic_exploiter',      'param_abuse_auditor'],
     'admin_gov':      ['state_dependency_analyst', 'access_escalator', 'validation_checker',   'logic_exploiter'],
     'general':        ['defi_attacker',     'logic_exploiter',        'appsec_hardener',       'validation_checker',
-                       'token_specialist',  'governance_specialist'],
+                       'token_specialist',  'governance_specialist',  'param_abuse_auditor'],
 }
 
 # ─── Modifier inline expansion ────────────────────────────────────────────────
@@ -551,6 +551,8 @@ def dedup_pipeline(findings: list, full_source: str) -> list:
             "attack_path":       f.get("attack_path", ""),
             "submitters":        [],
             "description":       f.get("description", ""),
+            "agent_id":          f.get("agent_id", ""),
+            "source":            f.get("source", ""),
         }
         for i, f in enumerate(findings)
     }
@@ -796,6 +798,10 @@ def _run_chunk_dedup(cs: ChunkState):
 def _agent_task(cs: ChunkState, agent_id: str, agent_idx: int, profiles_map: dict, client) -> None:
     """Run one agent, append findings to chunk state, trigger dedup if last agent."""
     t2_f, t3_f = run_agent(agent_id, cs.ann_src, cs.label, agent_idx, cs.cname, profiles_map, client, aux_contracts=cs.aux_names)
+    for f in t2_f:
+        f['agent_id'] = agent_id
+    for f in t3_f:
+        f['agent_id'] = agent_id
     with cs.lock:
         cs.findings.extend(t2_f)
         cs.findings.extend(t3_f)

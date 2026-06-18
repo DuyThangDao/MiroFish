@@ -14,6 +14,7 @@ Findings JSON: audit_report.json field "findings" (or "consensus_vulns" for comp
 import argparse
 import json
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
@@ -21,7 +22,7 @@ from typing import Dict, List, Optional, Set, Tuple
 from llm_judge import judge_match
 from metrics import compute_metrics
 
-_EVAL_WORKERS = 4
+_EVAL_WORKERS = 3
 
 
 _KEYWORD_KEYWORDS = {
@@ -87,6 +88,7 @@ def _evaluate_one_gt(
 
     for pred in candidates:
         fid = pred.get("finding_id") or pred.get("title", "")[:30]
+        time.sleep(3)
         is_match, reason = judge_match(gt, pred, worker_id=worker_id)
         if verbose:
             lines.append(f"    [T1] '{fid[:40]}': {'YES' if is_match else 'NO'} — {reason}")
@@ -103,6 +105,7 @@ def _evaluate_one_gt(
 
     for pred in t2_cands:
         fid = pred.get("finding_id") or pred.get("title", "")[:30]
+        time.sleep(3)
         is_match, reason = judge_match(gt, pred, worker_id=worker_id)
         if verbose:
             lines.append(f"    [T2] '{fid[:40]}': {'YES' if is_match else 'NO'} — {reason}")
