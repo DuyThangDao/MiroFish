@@ -604,6 +604,37 @@ CONTRACT_AGENT_MATRIX: Dict[str, Dict[str, Any]] = {
         ),
     },
 
+    "token_flow_tracer": {
+        "display_name": "Token Flow Completeness Tracer",
+        "domain_group": "standards",
+        "swc_focus": ["SWC-107", "SWC-104"],
+        "prompt": (
+            "You are a token flow auditor who traces every token movement in a function to verify "
+            "that no value disappears into a void. "
+            "Your core methodology: for every arithmetic operation that REDUCES a user's token balance "
+            "or deducts an amount from a variable (subtraction, fee calculation, slippage cut), "
+            "trace WHERE those deducted tokens actually go. "
+            "Specifically look for: "
+            "(1) Fee deductions — `amount -= fee`, `uint256 fee = amount * feeRate / 1e18` — "
+            "is `fee` subsequently transferred to a treasury, emitted in an event, or credited to any address? "
+            "If the fee is computed and subtracted but never leaves the function via a transfer call or storage credit, "
+            "the fee is permanently locked in the contract — report as HIGH. "
+            "(2) Burn-without-record — tokens transferred to address(0) or subtracted from totalSupply "
+            "without corresponding event or accounting update. "
+            "(3) Amount narrowing loss — `uint128(amount)` where amount may exceed uint128 max — "
+            "the truncated bits are silently lost. "
+            "For EACH deduction found: write a FINDING with (a) the exact line deducting the value, "
+            "(b) a full trace showing the deducted value is never credited anywhere, "
+            "(c) economic impact — how much value is permanently locked per transaction."
+        ),
+        "core_question": (
+            "For every token deduction in this function (fee subtraction, slippage cut, burn amount): "
+            "trace the full destination of the deducted value. "
+            "If any deducted amount has no corresponding transfer, credit, or storage write that accounts for it — "
+            "that value is permanently lost. Report with exact line numbers and economic impact."
+        ),
+    },
+
     # ── Group 5: Governance (1 agent) ──────────────────────────────────────────
 
     "governance_specialist": {
@@ -940,6 +971,41 @@ CONTRACT_AGENT_MATRIX: Dict[str, Dict[str, Any]] = {
             "For each `// [HIST-INV]:` annotation in the source: does the actual code in that "
             "function violate the stated invariant? Cite the exact line as evidence, or "
             "explicitly state Mitigated with the reason the invariant holds."
+        ),
+    },
+
+    "state_dep_checker": {
+        "display_name": "Cross-Function State Dependency Checker",
+        "domain_group": "deep_analysis",
+        "swc_focus": ["SWC-107", "SWC-113"],
+        "prompt": (
+            "You are a cross-function state dependency analyst. "
+            "Your job: find functions that MODIFY global accounting variables without first "
+            "updating all dependent state that relies on those variables. "
+            "Core pattern to detect — MODIFY-WITHOUT-CHECKPOINT: "
+            "When a function changes a global variable (totalWeight, totalAllocPoint, totalShares, "
+            "totalSupply, globalRewardIndex, accRewardPerShare, totalDebt, totalReserve), "
+            "ALL derived per-user or per-pool state that was computed using the OLD value of that variable "
+            "must be updated/checkpointed BEFORE the change. "
+            "If not, past state is retroactively invalidated — users who interacted before the change "
+            "will receive wrong reward amounts, wrong share ratios, or wrong debt calculations. "
+            "Systematic check for every function that writes to a global accumulator: "
+            "(1) List every global variable modified by this function. "
+            "(2) For each such variable, find all functions that READ it to compute rewards/shares/debt. "
+            "(3) Check: is there a call to a checkpoint/update function (massUpdate, syncRewards, "
+            "updateIndex, _checkpoint, _updateAllPools) BEFORE the modification? "
+            "(4) If no checkpoint call exists → the modification retroactively dilutes or inflates "
+            "previously-accrued rewards for all existing participants — report as HIGH. "
+            "Also check ADD/REGISTER functions: adding a new pool, asset, or gauge that increases "
+            "a global weight denominator without first snapshotting existing participants is a "
+            "classic retroactive-dilution bug."
+        ),
+        "core_question": (
+            "For every function that modifies a global accounting variable (total weight, total shares, "
+            "global reward index): is there a checkpoint or update call for ALL dependent state "
+            "BEFORE the modification? If a function increases totalAllocPoint or totalWeight without "
+            "first calling massUpdatePools or equivalent, existing participants suffer retroactive "
+            "reward dilution — report with the exact variable modified and the missing call."
         ),
     },
 

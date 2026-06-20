@@ -275,7 +275,8 @@ class LLMClient:
                                  "rate" in str(e).lower() or
                                  "quota" in str(e).lower() or
                                  "resource_exhausted" in str(e).lower())
-                if is_rate_limit and attempt < max_retries - 1:
+                is_transient = ("502" in str(e) or "503" in str(e) or "504" in str(e))
+                if (is_rate_limit or is_transient) and attempt < max_retries - 1:
                     delay = base_delay * (2 ** attempt)
                     _logger.warning(
                         f"Rate limit hit (attempt {attempt+1}/{max_retries}). "

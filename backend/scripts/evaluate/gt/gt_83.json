@@ -1,0 +1,72 @@
+[
+  {
+    "h_id": "H-01",
+    "title": "MasterChef.add does not call massUpdatePools before adding new pool",
+    "description": "When a new pool is added via add(), the totalPoints weight is updated but existing pools are not updated first via massUpdatePools(). This means pool rewards are diluted retroactively — existing depositors lose rewards that should have accrued before the new pool was added with a higher totalPoints denominator.",
+    "function_name": "add",
+    "contract_name": "MasterChef"
+  },
+  {
+    "h_id": "H-02",
+    "title": "MasterChef.deposit permanently locks deposit fees",
+    "description": "In MasterChef.deposit(), a deposit fee is subtracted from the user's deposit amount. However, the fee amount is not credited to any recipient address or held in any accounting structure — it is effectively burned and permanently locked in the contract.",
+    "function_name": "deposit",
+    "contract_name": "MasterChef"
+  },
+  {
+    "h_id": "H-03",
+    "title": "Shelter.withdraw missing claimed check allows repeated draining of all funds",
+    "description": "The Shelter.withdraw function does not check whether the caller has already claimed a token. An attacker can call withdraw repeatedly to drain all tokens from the shelter because the claimed guard is never enforced before the transfer executes.",
+    "function_name": "withdraw",
+    "contract_name": "Shelter"
+  },
+  {
+    "h_id": "H-04",
+    "title": "ConvexStakingWrapper.deposit sends rewards to wrapper address instead of individual users",
+    "description": "When users deposit into ConvexStakingWrapper, the contract stakes on behalf of users via StakingRewards. Because msg.sender as seen by StakingRewards is the wrapper contract address (not the individual user), all earned rewards are attributed to the wrapper itself rather than to individual stakers.",
+    "function_name": "deposit",
+    "contract_name": "ConvexStakingWrapper"
+  },
+  {
+    "h_id": "H-05",
+    "title": "USDMPegRecovery internal balance tracking diverges from actual curveLP balances",
+    "description": "USDMPegRecovery tracks internal token balances independently of actual curveLP pool amounts. After LP trades or rebalancing operations occur externally, the actual curveLP value diverges from the internally tracked value. Users who deposited earlier may be unable to withdraw the correct amount, effectively locking funds in the contract.",
+    "function_name": "deposit",
+    "contract_name": "USDMPegRecovery"
+  },
+  {
+    "h_id": "H-06",
+    "title": "ConvexStakingWrapper._calcRewardIntegral stale balance causes underflow and frozen rewards",
+    "description": "In _calcRewardIntegral, reward.remaining is not updated globally across all pools and the balance used for reward calculation is stale. This causes arithmetic underflow or incorrect reward integral values, which can freeze reward distribution for all users in the affected pool.",
+    "function_name": "_calcRewardIntegral",
+    "contract_name": "ConvexStakingWrapper"
+  },
+  {
+    "h_id": "H-07",
+    "title": "Shelter.withdraw uses wrong claimed key allowing bypass of protection",
+    "description": "Shelter.withdraw records claimed[token][_to] = true (using the destination address) instead of claimed[token][msg.sender] = true (using the caller). An attacker can pass a different address as _to, which marks that address as claimed while the attacker's own claimed entry remains false, allowing repeated calls to drain funds.",
+    "function_name": "withdraw",
+    "contract_name": "Shelter"
+  },
+  {
+    "h_id": "H-08",
+    "title": "MasterChef.updatePool reads balanceOf(address(this)) which is always zero",
+    "description": "MasterChef.updatePool calculates lpSupply as IERC20(pool.lpToken).balanceOf(address(this)). However, LP tokens are held by depositor or staking contracts, not by the MasterChef itself. As a result lpSupply is always 0, causing the reward distribution calculation to produce incorrect results and effectively halting reward accrual.",
+    "function_name": "updatePool",
+    "contract_name": "MasterChef"
+  },
+  {
+    "h_id": "H-09",
+    "title": "ConvexStakingWrapper.deposit calls poolInfo on BaseRewardPool which does not implement it",
+    "description": "ConvexStakingWrapper stores convexPool[_pid] as the Convex crvRewards address (a BaseRewardPool). In deposit(), the wrapper calls convexPool[_pid].poolInfo(), but BaseRewardPool does not implement a poolInfo() function. Every call to deposit() reverts unconditionally, making the wrapper completely non-functional.",
+    "function_name": "deposit",
+    "contract_name": "ConvexStakingWrapper"
+  },
+  {
+    "h_id": "H-11",
+    "title": "ConvexStakingWrapper._calcRewardIntegral allows cross-pool reward stealing via unguarded getReward",
+    "description": "The _calcRewardIntegral function calls getReward() without access control scoped to a specific pool. An attacker can trigger getReward for an arbitrary pool, pulling reward tokens into the contract's shared balance. The global balance tracking then allows the attacker to claim reward tokens that belong to users of unrelated pools.",
+    "function_name": "_calcRewardIntegral",
+    "contract_name": "ConvexStakingWrapper"
+  }
+]

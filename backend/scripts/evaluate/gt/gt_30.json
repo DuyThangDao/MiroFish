@@ -1,0 +1,76 @@
+[
+  {
+    "h_id": "H-01",
+    "title": "Controller.setCap subtracts entire strategy balance instead of excess diff from vault balance",
+    "description": "In Controller.setCap(), when reducing a strategy's allocation, the code executes _vaultDetails[_vault].balance = _vaultDetails[_vault].balance.sub(_balance) where _balance is the full strategy balance. It should subtract only _diff (the excess above the new cap). This causes the vault balance to be severely underreported, leading to wrong share counts on deposit and wrong amounts on withdrawal. Users can also exploit this to receive inflated shares.",
+    "function_name": "setCap",
+    "contract_name": "Controller",
+    "patched_in_repo": true,
+    "patched_note": "Original bug: .sub(_balance). Fixed to .sub(_diff) in sponsor PR #1 (code-423n4/2021-09-yaxis#1). web3bugs repo contains patched version — bug does not exist in code agents analyze. Structurally impossible to find."
+  },
+  {
+    "h_id": "H-02",
+    "title": "Controller.setCap breaks vault balance tracking by subtracting wrong amount",
+    "description": "setCap incorrectly subtracts the full remaining strategy balance from _vaultDetails[_vault].balance instead of only the diff between the old balance and the new cap. The vault underreports its total value, which causes the assertion at Controller.sol#475 to fail when users attempt to withdraw, effectively locking funds in the strategy.",
+    "function_name": "setCap",
+    "contract_name": "Controller",
+    "patched_in_repo": true,
+    "patched_note": "Same root cause as H-01. Both describe the .sub(_balance) bug in setCap. Code in repo has .sub(_diff) — already patched. Confirmed via web3bugs/reports/30.md: 'Already fixed in code-423n4/2021-09-yaxis#1'."
+  },
+  {
+    "h_id": "H-03",
+    "title": "Manager.addToken has no safety check for duplicate tokens or tokens assigned to multiple vaults",
+    "description": "Manager.addToken() does not check whether a token already exists in the vault's token list or has already been assigned to another vault. A token added twice is double-counted in vault balance calculations. A token assigned to two vaults causes vaults[_token] to point only to the second vault, breaking value calculations in the first vault.",
+    "function_name": "addToken",
+    "contract_name": "Manager"
+  },
+  {
+    "h_id": "H-04",
+    "title": "Controller.withdraw does not revert when there is insufficient liquidity enabling share-burning with no payout",
+    "description": "When vault.withdraw() calls the Controller to source additional funds from strategies, the Controller does not revert if it cannot source the full requested amount. The user's shares are burned while they receive zero tokens. This also enables MEV sandwich attacks: an attacker deposits a different token, drains the target token from all vault strategies, then the victim's withdrawal burns shares and receives nothing.",
+    "function_name": "withdraw",
+    "contract_name": "Controller"
+  },
+  {
+    "h_id": "H-05",
+    "title": "Vault treats all tokens as equal value enabling no-slippage arbitrage and flashloan attacks",
+    "description": "Vault.deposit() mints shares proportional to raw token amount (_shares = _shares.add(_amount)) regardless of actual token value. Since users can deposit any accepted token and withdraw any other accepted token at equal face value, the vault functions as a zero-slippage exchange. If the vault accepts LP tokens like 3CRV alongside stablecoins, the price discrepancy enables flashloan-based arbitrage that drains depositor value.",
+    "function_name": "deposit",
+    "contract_name": "Vault"
+  },
+  {
+    "h_id": "H-06",
+    "title": "Vault.earn decreases share price due to token price mismatch in accounting between vault and controller",
+    "description": "When earn() is called on a DAI vault paired with NativeStrategyCurve3Crv, DAI is converted to 3CRV. The vault's balance() sums all token amounts by raw count, while the controller adds strategy value as the amount of the want token (3CRV). Since 3CRV price > 1 DAI but the accounting ignores this, the vault's reported total balance decreases after every earn() call, steadily diluting share value for all depositors.",
+    "function_name": "earn",
+    "contract_name": "Vault"
+  },
+  {
+    "h_id": "H-07",
+    "title": "Vault.balance mixes normalized and non-normalized amounts causing underreported vault value",
+    "description": "Vault.balance() adds two terms: balanceOfThis() which normalizes all token balances to 18 decimals, and IController.balanceOf() which returns raw non-normalized amounts. Adding a 6-decimal USDC raw amount to an 18-decimal normalized total causes severe underreporting of the vault's actual value, giving users wrong shares on deposit and wrong amounts on withdrawal.",
+    "function_name": "balance",
+    "contract_name": "Vault"
+  },
+  {
+    "h_id": "H-08",
+    "title": "Vault.withdraw mixes normalized and standard amounts enabling theft for non-18-decimal tokens",
+    "description": "Vault.withdraw computes _amount from balance() which is normalized to 18 decimals, then compares and subtracts against raw IERC20(_output).balanceOf(address(this)) in non-normalized form. For a 6-decimal token like USDC, the normalized _toWithdraw is 10^12 times inflated. An attacker withdrawing a tiny share count receives an enormous USDC payout, stealing tokens from other depositors.",
+    "function_name": "withdraw",
+    "contract_name": "Vault"
+  },
+  {
+    "h_id": "H-09",
+    "title": "Manager.removeToken breaks vault accounting and locks funds with no safety checks",
+    "description": "Manager.removeToken() removes a token from the vault's accepted token list with no safety preconditions. Calling it while the token is still deposited in the vault immediately drops balanceOfThis() to zero for that token while totalSupply remains unchanged, crashing the share price. All funds in that token are effectively locked, and _vaultDetails[_vault].balance tracking becomes permanently inaccurate.",
+    "function_name": "removeToken",
+    "contract_name": "Manager"
+  },
+  {
+    "h_id": "H-10",
+    "title": "Vault.balanceOfThis sums token amounts without price consideration enabling multi-token vault theft",
+    "description": "Vault.balanceOfThis() normalizes all token balances to 18 decimals but applies no price oracle — it assumes all accepted tokens have equal value. In a vault holding DAI at $1.05, USDC at $0.98, and USDT at $0.95, an attacker deposits 3M USDT and immediately withdraws 2M DAI plus 1M USDC worth substantially more than the deposited USDT value, stealing funds from other depositors.",
+    "function_name": "balanceOfThis",
+    "contract_name": "Vault"
+  }
+]

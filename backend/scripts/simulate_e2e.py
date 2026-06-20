@@ -86,6 +86,7 @@ _args = _parser.parse_args()
 
 CONTEST_ID    = _args.contest_id
 CONTRACTS_DIR = _args.contracts_dir
+CONTEST_DIR   = _args.contest_dir or _args.contracts_dir
 GT_CONTRACTS  = set(_args.gt_contracts)
 NO_INV        = _args.no_inv
 WORKERS       = _args.workers
@@ -248,12 +249,12 @@ DOMAIN_AGENTS = {
     'clmm_semantic':  ['clmm_specialist',   'defi_analyst',           'logic_exploiter'],
     'math_cast':      ['math_precision',    'invariant_breaker',      'logic_exploiter',       'evm_hardener',
                        'token_specialist', 'reentrancy_specialist'],
-    'access_reward':  ['access_escalator',  'clmm_specialist',        'state_machine_analyst', 'mev_analyst', 'appsec_hardener'],
+    'access_reward':  ['access_escalator',  'clmm_specialist',        'state_machine_analyst', 'mev_analyst', 'appsec_hardener', 'token_flow_tracer'],
     'economic':       ['defi_attacker',     'flash_loan_specialist',  'mev_analyst'],
     'state_ordering': ['state_machine_analyst', 'appsec_researcher',  'logic_exploiter',      'param_abuse_auditor'],
     'admin_gov':      ['state_dependency_analyst', 'access_escalator', 'validation_checker',   'logic_exploiter'],
     'general':        ['defi_attacker',     'logic_exploiter',        'appsec_hardener',       'validation_checker',
-                       'token_specialist',  'governance_specialist',  'param_abuse_auditor'],
+                       'token_specialist',  'governance_specialist',  'param_abuse_auditor',   'state_dep_checker'],
 }
 
 # ─── Modifier inline expansion ────────────────────────────────────────────────
@@ -374,6 +375,19 @@ def discover_contracts():
                 cname = fname.replace('.sol', '')
                 path  = os.path.join(root, fname)
                 contracts[cname] = (path, open(path, errors='replace').read())
+
+    # Fallback: find GT contracts missing from contracts_dir by searching contest_dir
+    missing_gt = GT_CONTRACTS - set(contracts.keys())
+    if missing_gt and CONTEST_DIR != CONTRACTS_DIR:
+        for root, dirs, files in os.walk(CONTEST_DIR):
+            dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+            for fname in files:
+                cname = fname.replace('.sol', '')
+                if cname in missing_gt and cname not in contracts:
+                    path = os.path.join(root, fname)
+                    contracts[cname] = (path, open(path, errors='replace').read())
+                    print(f'[discover] GT contract outside contracts_dir: {cname} → {path}')
+
     return contracts
 
 # ─── Auto-detect aux contracts via import analysis ────────────────────────────
@@ -602,11 +616,12 @@ _T3_COT_BLOCK = """\
 You are {agent_id} ({persona}).
 {system_prompt}
 
+{focus_directive}
 CONTRACT UNDER REVIEW:
 {source}
 
 === TASK ===
-Perform an independent structured reasoning sweep over every function in the source.
+Perform an independent structured reasoning sweep over the TARGET functions listed above.
 Do NOT reference any prior findings — this is a fresh, independent scan.
 
 For each function that contains a suspicious operation, write a TRACE block:
@@ -707,7 +722,7 @@ def parse_findings(text: str, default_contract: str, source: str = 'T2') -> list
 # ─── Run one agent on one chunk ────────────────────────────────────────────────
 def run_agent(agent_id: str, ann_source: str, chunk_label: str, agent_idx: int,
               contract_name: str, profiles_map: dict, client=None,
-              aux_contracts: list = None) -> tuple:
+              aux_contracts: list = None, fn_names: list = None) -> tuple:
     """Returns (t2_findings, t3_findings)."""
     out = os.path.join(OUT_DIR, f"{chunk_label.replace('/', '_')}_{agent_id}.txt")
 
@@ -731,14 +746,30 @@ def run_agent(agent_id: str, ann_source: str, chunk_label: str, agent_idx: int,
     stagger = agent_idx * 2 if WORKERS > 1 else 2 + agent_idx * 3
     time.sleep(stagger)
 
+    # Build focus directive — tells agents which contract/functions are the target
+    aux_list = ", ".join(aux_contracts) if aux_contracts else "none"
+    fn_list  = ", ".join(fn_names) if fn_names else "all"
+    focus_directive = (
+        f"⚠️  CHUNK SCOPE — PRIMARY audit target: {contract_name}.sol\n"
+        f"  TARGET FUNCTIONS : {fn_list}\n"
+        f"  AUXILIARY (available for exploration after targets): {aux_list}\n"
+        f"\n"
+        f"  ANALYSIS PROTOCOL:\n"
+        f"  1. Analyze all TARGET FUNCTIONS thoroughly first — spend as much time and\n"
+        f"     reasoning depth as needed on each before moving on.\n"
+        f"  2. After completing target function analysis, you may freely explore AUX\n"
+        f"     contracts for related vulnerabilities.\n"
+        f"  3. Attribute each finding to the contract where the bug actually lives."
+    )
+
     # T1: invariant extraction
-    t1_prompt = build_round1_prompt(profile, ann_source, invariant_only=True)
+    t1_prompt = build_round1_prompt(profile, ann_source, focus_directive=focus_directive, invariant_only=True)
     t1_resp   = llm_call(t1_prompt, client)
     t1_clean  = clean_inv(t1_resp)
     time.sleep(2)
 
     # T2: standard finding discovery
-    t2_prompt = build_round1_prompt(profile, ann_source, injected_invariants=t1_clean)
+    t2_prompt = build_round1_prompt(profile, ann_source, focus_directive=focus_directive, injected_invariants=t1_clean)
     t2_resp   = llm_call(t2_prompt, client)
     t2_findings = _filter_to_chunk_contract(parse_findings(t2_resp, contract_name, source='T2'), contract_name, aux_contracts)
     time.sleep(2)
@@ -748,6 +779,7 @@ def run_agent(agent_id: str, ann_source: str, chunk_label: str, agent_idx: int,
         agent_id=agent_id,
         persona=profile.persona,
         system_prompt=profile.system_prompt,
+        focus_directive=focus_directive,
         source=ann_source,
     )
     t3_resp     = llm_call(t3_prompt, client)
@@ -768,13 +800,14 @@ def run_agent(agent_id: str, ann_source: str, chunk_label: str, agent_idx: int,
 
 # ─── Per-chunk state (thread-safe) ────────────────────────────────────────────
 class ChunkState:
-    def __init__(self, label: str, cname: str, ann_src: str, agents: list, aux_names: list = None):
+    def __init__(self, label: str, cname: str, ann_src: str, agents: list, aux_names: list = None, fn_names: list = None):
         self.label      = label
         self.label_flat = label.replace('/', '_')
         self.cname      = cname
         self.ann_src    = ann_src
         self.agents     = agents
         self.aux_names  = aux_names or []  # list of aux contract names
+        self.fn_names   = fn_names or []   # target functions for this chunk
         self.lock       = threading.Lock()
         self.findings   = []
         self.agents_done   = 0
@@ -797,7 +830,7 @@ def _run_chunk_dedup(cs: ChunkState):
 
 def _agent_task(cs: ChunkState, agent_id: str, agent_idx: int, profiles_map: dict, client) -> None:
     """Run one agent, append findings to chunk state, trigger dedup if last agent."""
-    t2_f, t3_f = run_agent(agent_id, cs.ann_src, cs.label, agent_idx, cs.cname, profiles_map, client, aux_contracts=cs.aux_names)
+    t2_f, t3_f = run_agent(agent_id, cs.ann_src, cs.label, agent_idx, cs.cname, profiles_map, client, aux_contracts=cs.aux_names, fn_names=cs.fn_names)
     for f in t2_f:
         f['agent_id'] = agent_id
     for f in t3_f:
@@ -824,7 +857,7 @@ def _prepare_chunk_state(chunk: dict) -> ChunkState:
         print(f"\n{'='*65}")
         print(f"Chunk queued: {label}  |  {len(chunk['fn_names'])} fns  |  {src_lines} lines  [{mode_str}]", flush=True)
     aux_names = [a for a, _ in chunk.get('aux_names', [])]
-    return ChunkState(label, chunk['contract_name'], ann_src, chunk['agents'], aux_names)
+    return ChunkState(label, chunk['contract_name'], ann_src, chunk['agents'], aux_names, fn_names=chunk.get('fn_names', []))
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 print('\n' + '='*65)

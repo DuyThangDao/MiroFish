@@ -19,10 +19,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
-from llm_judge import judge_match
+from llm_judge import judge_match, judge_match_batch
 from metrics import compute_metrics
 
-_EVAL_WORKERS = 3
+_EVAL_WORKERS = 4
+_BATCH_SIZE = 10
+_WORKER_STARTED: set = set()  # tracks which workers have fired their first call
 
 
 _KEYWORD_KEYWORDS = {
@@ -76,6 +78,11 @@ def _evaluate_one_gt(
     gt_con = (gt.get("contract_name") or "").lower()
     lines: List[str] = []
 
+    # Stagger first call only: worker i waits i×15s so workers don't all burst at t=0
+    if worker_id not in _WORKER_STARTED:
+        _WORKER_STARTED.add(worker_id)
+        time.sleep(worker_id * 15)
+
     # ── Tier-1 ────────────────────────────────────────────────────────────────
     candidates = [
         f for f in findings
@@ -86,34 +93,36 @@ def _evaluate_one_gt(
         lines.append(f"\n[H] {h_id}: {gt.get('title','')[:60]}")
         lines.append(f"    location: {gt_con}.{gt_fn}  →  {len(candidates)} T1 candidates")
 
-    for pred in candidates:
-        fid = pred.get("finding_id") or pred.get("title", "")[:30]
-        time.sleep(3)
-        is_match, reason = judge_match(gt, pred, worker_id=worker_id)
-        if verbose:
-            lines.append(f"    [T1] '{fid[:40]}': {'YES' if is_match else 'NO'} — {reason}")
-        if is_match:
-            return (
-                {"h_id": h_id, "finding_id": fid, "tier": 1, "reason": reason},
-                lines,
-            )
+    for batch_start in range(0, len(candidates), _BATCH_SIZE):
+        batch = candidates[batch_start:batch_start + _BATCH_SIZE]
+        batch_results = judge_match_batch(gt, batch, worker_id=worker_id)
+        for pred, (is_match, reason) in zip(batch, batch_results):
+            fid = pred.get("finding_id") or pred.get("title", "")[:30]
+            if verbose:
+                lines.append(f"    [T1] '{fid[:40]}': {'YES' if is_match else 'NO'} — {reason}")
+            if is_match:
+                return (
+                    {"h_id": h_id, "finding_id": fid, "tier": 1, "reason": reason},
+                    lines,
+                )
 
     # ── Tier-2 ────────────────────────────────────────────────────────────────
     t2_cands = _tier2_candidates(findings, gt_fn, gt_con)
     if verbose and t2_cands:
         lines.append(f"    location: {gt_con}.{gt_fn}  →  {len(t2_cands)} T2 candidates")
 
-    for pred in t2_cands:
-        fid = pred.get("finding_id") or pred.get("title", "")[:30]
-        time.sleep(3)
-        is_match, reason = judge_match(gt, pred, worker_id=worker_id)
-        if verbose:
-            lines.append(f"    [T2] '{fid[:40]}': {'YES' if is_match else 'NO'} — {reason}")
-        if is_match:
-            return (
-                {"h_id": h_id, "finding_id": fid, "tier": 2, "reason": reason},
-                lines,
-            )
+    for batch_start in range(0, len(t2_cands), _BATCH_SIZE):
+        batch = t2_cands[batch_start:batch_start + _BATCH_SIZE]
+        batch_results = judge_match_batch(gt, batch, worker_id=worker_id)
+        for pred, (is_match, reason) in zip(batch, batch_results):
+            fid = pred.get("finding_id") or pred.get("title", "")[:30]
+            if verbose:
+                lines.append(f"    [T2] '{fid[:40]}': {'YES' if is_match else 'NO'} — {reason}")
+            if is_match:
+                return (
+                    {"h_id": h_id, "finding_id": fid, "tier": 2, "reason": reason},
+                    lines,
+                )
 
     return None, lines
 
@@ -131,9 +140,15 @@ def run_eval(gt_path: str, findings_path: str, verbose: bool = False) -> dict:
             pool.submit(_evaluate_one_gt, gt, findings, verbose, i % _EVAL_WORKERS): i
             for i, gt in enumerate(gt_bugs)
         }
+        done = 0
         for fut in as_completed(futures):
             i = futures[fut]
             results[i] = fut.result()
+            done += 1
+            detail, _ = results[i]
+            h_id = gt_bugs[i].get("h_id", "?")
+            status = f"MATCH → {detail['finding_id'][:35]}" if detail else "no match"
+            print(f"[{done}/{len(gt_bugs)}] {h_id}: {status}", flush=True)
 
     matched_h_ids: Set[str] = set()
     matched_finding_ids: Set[str] = set()

@@ -11,6 +11,7 @@ import re
 import sys
 import hashlib
 import json
+import time
 from typing import Tuple, Dict
 
 # Allow importing project modules when running from scripts/evaluate/
@@ -112,13 +113,17 @@ _CALL_COUNTER = __import__("itertools").count()
 
 
 def _get_client(worker_id: int = 0):
-    """Round-robin across all available clients on each call, ignoring worker_id."""
+    """Pin each worker_id to a specific client (worker 0 → key 0, worker 1 → key 1, …)."""
     global _CLIENT_POOL
     if not _CLIENT_POOL:
         with _POOL_LOCK:
             if not _CLIENT_POOL:
                 _CLIENT_POOL = _build_client_pool()
-    return _CLIENT_POOL[next(_CALL_COUNTER) % len(_CLIENT_POOL)]
+                print(f"[POOL] {len(_CLIENT_POOL)} clients: " +
+                      ", ".join(getattr(c, 'base_url', '?').split('projects/')[1].split('/')[0]
+                                for c in _CLIENT_POOL), flush=True)
+    idx = worker_id % len(_CLIENT_POOL)
+    return _CLIENT_POOL[idx]
 
 
 def _model() -> str:
@@ -175,6 +180,76 @@ Reason: (one sentence)"""
     result = (is_match, reason)
     _cache[key] = result
     return result
+
+
+def judge_match_batch(gt_bug: dict, candidates: list, worker_id: int = 0) -> list:
+    """
+    Batch judge N candidates against one GT bug in a single LLM call.
+    Returns list of (is_match, reason) for each candidate, in order.
+    Individual results are also cached for reuse.
+    """
+    # Check cache for all candidates first
+    keys = [
+        _cache_key(gt_bug.get("h_id", ""), gt_bug.get("description", ""),
+                   p.get("title", ""), p.get("description", ""))
+        for p in candidates
+    ]
+    if all(k in _cache for k in keys):
+        return [_cache[k] for k in keys]
+
+    cands_text = ""
+    for i, pred in enumerate(candidates):
+        cands_text += (
+            f"\n[{i+1}] Function: {pred.get('function_name','?')} in {pred.get('contract_name','?')}\n"
+            f"     Title: {pred.get('title','')}\n"
+            f"     Description: {pred.get('description','')}\n"
+            f"     Attack path: {pred.get('attack_path','')}\n"
+        )
+
+    prompt = f"""You are a security audit evaluator.
+
+GROUND TRUTH BUG:
+Function: {gt_bug.get('function_name','?')} in {gt_bug.get('contract_name','?')}
+Description: {gt_bug.get('description','')}
+
+PREDICTED FINDINGS — evaluate each one:
+{cands_text}
+For each finding numbered [1] to [{len(candidates)}], does it identify the same vulnerability as the ground truth?
+Answer one line per finding, exactly this format:
+[N]: YES | <one sentence reason>
+[N]: NO | <one sentence reason>"""
+
+    client = _get_client(worker_id)
+    print(f"[CALL] worker={worker_id} key={worker_id % len(_CLIENT_POOL)} n={len(candidates)}", flush=True)
+    text = client.chat(
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=4000,
+        temperature=0,
+        strip_think=False,
+    )
+    time.sleep(60)  # 1 call/min per worker key → 4 workers × 10 findings = 40 findings/min
+    text = _extract_visible(text)
+
+    results = []
+    for i in range(len(candidates)):
+        # Match [N]: YES/NO | reason
+        m = re.search(
+            rf'\[{i+1}\]\s*:\s*(YES|NO)\s*[|]?\s*(.+?)(?=\n\[{i+2}\]|\Z)',
+            text, re.DOTALL | re.IGNORECASE,
+        )
+        if m:
+            is_match = m.group(1).upper() == "YES"
+            reason = m.group(2).strip().split("\n")[0]
+        else:
+            # Fallback: search for [N] followed by YES/NO anywhere on that line
+            lm = re.search(rf'\[{i+1}\][^\n]*(YES|NO)', text, re.IGNORECASE)
+            is_match = bool(lm and lm.group(1).upper() == "YES")
+            reason = "parsed from batch response"
+        result = (is_match, reason)
+        _cache[keys[i]] = result
+        results.append(result)
+
+    return results
 
 
 def classify_swc(swc_id: str, predicted: dict, worker_id: int = 0) -> Tuple[bool, str]:

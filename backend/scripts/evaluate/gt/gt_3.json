@@ -1,0 +1,79 @@
+[
+  {
+    "h_id": "H-01",
+    "title": "Re-entrancy in MarginRouter.crossSwapExactTokensForTokens allows inflating balance",
+    "description": "crossSwapExactTokensForTokens calls UniswapStyleLib.getAmountsOut with attacker-controlled pair contracts to estimate output, credits the user via registerTrade, then calls _swapExactT4T which triggers pair.swap — allowing re-entrancy at that call site. The attacker re-enters with a real pair, the real swap completes and satisfies the balance check, but the outer call also credited the user via registerTrade. The user ends up credited twice the actual output amount. By repeating this, an attacker can steal all funds.",
+    "function_name": "crossSwapExactTokensForTokens",
+    "contract_name": "MarginRouter"
+  },
+  {
+    "h_id": "H-02",
+    "title": "Missing fromToken != toToken check in MarginRouter.crossSwapExactTokensForTokens enables withdrawal bypass",
+    "description": "crossSwapExactTokensForTokens does not check that tokens[0] != tokens[last]. An attacker passes the same token as both input and output with a fake pair contract that returns 0 output. The fund withdrawal happens before startingBalance is recorded in _swap, so the check endingBalance >= startingBalance + amounts[last] passes trivially (0 == 0). This bypasses the coolingOffPeriod withdrawal timelock, allowing immediate unauthorized fund extraction.",
+    "function_name": "crossSwapExactTokensForTokens",
+    "contract_name": "MarginRouter"
+  },
+  {
+    "h_id": "H-03",
+    "title": "Price feed can be manipulated via flash loans by calling PriceAware.getCurrentPriceInPeg",
+    "description": "Anyone can call PriceAware.getCurrentPriceInPeg with forceCurBlock=true to update the price feed. If the update window has passed, the price is computed by simulating a Uniswap-like trade using current reserves. An attacker can manipulate the reserves with a flash loan to produce almost arbitrary output amounts and thus prices. Manipulated prices break core functions: borrowing on margin, liquidations, and all collateral calculations.",
+    "function_name": "getCurrentPriceInPeg",
+    "contract_name": "PriceAware"
+  },
+  {
+    "h_id": "H-04",
+    "title": "Inconsistent usage of applyInterest causes wrong balance and interest calculations",
+    "description": "applyInterest is called inconsistently across the codebase — some callers add the return value to the original amount (bond.amount + applyInterest(bond.amount, ...)) treating it as returning only the accrued interest, while others assign it directly (balanceWithInterest = applyInterest(balance, ...)) treating it as returning the full balance with interest. This inconsistency causes wrong balances and interest calculations throughout the lending system.",
+    "function_name": "applyInterest",
+    "contract_name": "BaseLending"
+  },
+  {
+    "h_id": "H-05",
+    "title": "Wrong inequality in belowMaintenanceThreshold inverts liquidation logic",
+    "description": "The belowMaintenanceThreshold function in CrossMarginTrading uses the inequality 100 * holdings >= liquidationThresholdPercent * loan. Since holdings = margin + loan (always larger than loan alone), this condition is more likely to be true when a user is well-collateralized. The intended check requires the inverse: 100 * holdings <= liquidationThresholdPercent * loan. As a result, healthy accounts can be liquidated and underwater accounts cannot be liquidated.",
+    "function_name": "belowMaintenanceThreshold",
+    "contract_name": "CrossMarginTrading"
+  },
+  {
+    "h_id": "H-06",
+    "title": "registerTradeAndBorrow credits users twice by applying full outAmount after debt repayment",
+    "description": "registerTradeAndBorrow first uses outAmount to pay back any existing debt, then calls adjustAmounts with the full outAmount — crediting the user the same amount again as a deposit. The user pays back their debt AND receives outAmount as a new deposit, effectively being credited twice the outAmount. This profit can be withdrawn and repeated until the fund is drained.",
+    "function_name": "registerTradeAndBorrow",
+    "contract_name": "CrossMarginTrading"
+  },
+  {
+    "h_id": "H-07",
+    "title": "addHolding never sets account.holdsToken causing duplicate token entries and inflated balances",
+    "description": "addHolding checks hasHoldingToken (which reads account.holdsToken) before pushing to account.holdingTokens, but never sets account.holdsToken[token] = true after pushing. Each subsequent deposit of the same token fails the hasHoldingToken check and pushes it again, creating duplicate entries. getHoldingAmounts returns the full balance for each duplicate entry, inflating the reported balance. MarginRouter.crossCloseAccount uses these inflated amounts to withdraw funds, allowing an attacker to deposit one token X times and withdraw X times the actual amount.",
+    "function_name": "addHolding",
+    "contract_name": "CrossMarginAccounts"
+  },
+  {
+    "h_id": "H-08",
+    "title": "Rewards cannot be withdrawn from IncentiveDistribution because withdrawReward requires incentive reporter role",
+    "description": "Rewards are stored in accruedReward[recipient] where recipient is the margin trader's address, set via updateAccruedReward. However, withdrawReward enforces isIncentiveReporter(msg.sender), so only the incentive reporter contract can call it. Margin traders cannot call withdrawReward as themselves. Nobody can withdraw rewards from the contract.",
+    "function_name": "withdrawReward",
+    "contract_name": "IncentiveDistribution"
+  },
+  {
+    "h_id": "H-09",
+    "title": "lastUpdatedDay not initialized in IncentiveDistribution causing updateDayTotals to run out of gas",
+    "description": "lastUpdatedDay defaults to 0. When updateDayTotals is called, dayDiff = block.timestamp / (1 days) - lastUpdatedDay evaluates to approximately 18721 (days since epoch). The for loop iterates 18721 times updating currentDailyDistribution each iteration, always running out of gas. The entire IncentiveDistribution system is non-functional because updateDayTotals cannot complete.",
+    "function_name": "updateDayTotals",
+    "contract_name": "IncentiveDistribution"
+  },
+  {
+    "h_id": "H-10",
+    "title": "Lending.buyBond charges msg.sender twice by calling both depositFor and collectToken",
+    "description": "buyBond transfers the bond amount from msg.sender twice: first via Fund.depositFor(msg.sender, issuer, amount) and then via collectToken(issuer, msg.sender, amount). Both calls transfer tokens from msg.sender, so the buyer pays double the intended amount.",
+    "function_name": "buyBond",
+    "contract_name": "Lending"
+  },
+  {
+    "h_id": "H-11",
+    "title": "IncentiveDistribution.withdrawReward always reverts due to out-of-gas loop from uninitialized lastUpdatedDay",
+    "description": "withdrawReward internally calls updateDayTotals which loops dayDiff = nowDay - lastUpdatedDay times. Since lastUpdatedDay is uninitialized (0), dayDiff is approximately 18724, causing the loop to exhaust gas at around iteration 270 with a 9.5M gas limit. Additionally, the allTranches array iterated inside the loop is unbounded. withdrawReward is permanently broken and rewards can never be claimed.",
+    "function_name": "withdrawReward",
+    "contract_name": "IncentiveDistribution"
+  }
+]
