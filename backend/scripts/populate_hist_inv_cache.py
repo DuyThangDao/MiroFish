@@ -69,9 +69,10 @@ def main():
     print(f"Cache path:   {CACHE_PATH}")
     print(f"{'='*65}\n")
 
-    # 1. Flatten — y hệt main pipeline
-    print(f"[flatten] flattening contest dir...")
-    result = flatten_contest_dir(CONTEST_DIR, verbose=True, emit_manifest=True)
+    # 1. Flatten — no size limit (populate runs offline, cần đủ context cho tất cả contracts)
+    print(f"[flatten] flattening contest dir (no size limit)...")
+    result = flatten_contest_dir(CONTEST_DIR, verbose=True, emit_manifest=True,
+                                 max_chars=sys.maxsize)
     combined_source, manifest = result if isinstance(result, tuple) else (result, {})
     combined_source = manifest.get('in_scope_source') or combined_source
     print(f"[flatten] done — {len(combined_source):,} chars")

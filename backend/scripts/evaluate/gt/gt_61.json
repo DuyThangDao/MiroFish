@@ -1,0 +1,79 @@
+[
+  {
+    "h_id": "H-01",
+    "title": "In `CreditLine#_borrowTokensToLiquidate`, oracle is used wrong way",
+    "description": "Current implementation to get the price consults `IPriceOracle.getLatestPrice(_borrowAsset, _collateralAsset)`, but it should consult the inverse: `getLatestPrice(_collateralAsset, _borrowAsset)`. As a consequence, in `liquidate` the liquidator/lender can lose/gain funds as a result of this miscalculation.",
+    "function_name": "_borrowTokensToLiquidate",
+    "contract_name": "CreditLine"
+  },
+  {
+    "h_id": "H-02",
+    "title": "Wrong returns of `SavingsAccountUtil.depositFromSavingsAccount()` can cause fund loss",
+    "description": "The function `SavingsAccountUtil.savingsAccountTransfer()` does not return the result of `_savingsAccount.transfer()`, but returns `_amount` instead. As a result, `SavingsAccountUtil.depositFromSavingsAccount()` may not return the actual shares when price-per-share is not 1. The recorded `_sharesReceived` (baseLiquidityShares) can be wrong — too high — causing pool cancellation or liquidation to fail, locking user funds.",
+    "function_name": "depositFromSavingsAccount",
+    "contract_name": "SavingsAccountUtil"
+  },
+  {
+    "h_id": "H-03",
+    "title": "denial of service",
+    "description": "If the borrow token is address(0) (ether), and someone calls withdrawLiquidity, it calls SavingsAccountUtil.transferTokens which transfers msg.value (of the calling function withdrawLiquidity, not the actual amount) to msg.sender. The liquidity provided will be paid to themselves and their liquidity tokens will still be burned — they will never be able to get their funds back. The bug is in SavingsAccountUtil.transferTokens: wrong to use msg.value because it is the msg.value of the calling function.",
+    "function_name": "transferTokens",
+    "contract_name": "SavingsAccountUtil"
+  },
+  {
+    "h_id": "H-04",
+    "title": "Yearn token <> shares conversion decimal issue",
+    "description": "The yearn strategy `YearnYield` converts shares to tokens by doing `pricePerFullShare * shares / 1e18`, but Yearn's `getPricePerFullShare` is in `vault.decimals()` precision. The correct formula is `pricePerFullShare * shares / (10 ** vault.decimals())`. The token and shares conversions do not work correctly for underlying tokens that do not have 18 decimals, leading to too much or too little being paid out.",
+    "function_name": "getTokensForShares",
+    "contract_name": "YearnYield"
+  },
+  {
+    "h_id": "H-05",
+    "title": "Aave's share tokens are rebasing breaking current strategy code",
+    "description": "When depositing into Aave through `AaveYield.lockTokens`, the `sharesReceived` amount corresponds to the diff of `aToken` balance, which always equals the deposited amount since aave is a rebasing token (1 aToken = 1 underlying at deposit). This `sharesReceived` is cached as static in `balanceInShares`, not dynamically rebasing. However `getTokensForShares` uses a rebasing total share supply `IERC20(aToken).balanceOf(this)`. As Aave accrues interest, the denominator grows but user's cached shares do not — interest is not paid out to users.",
+    "function_name": "lockTokens",
+    "contract_name": "AaveYield"
+  },
+  {
+    "h_id": "H-06",
+    "title": "Anyone can liquidate credit line when autoLiquidation is false without supplying borrow tokens",
+    "description": "The `autoLiquidation` value is only used in one place in `liquidate`: inside `if (creditLineConstants[_id].autoLiquidation && _lender != msg.sender)`. If `autoLiquidation` is false, this block is skipped entirely — there is no further check that `msg.sender` must be the lender, and the liquidator does not have to supply the borrow tokens. Anyone can liquidate a non-autoLiquidation credit line and receive all the collateral without transferring borrow tokens, causing total loss to the lender.",
+    "function_name": "liquidate",
+    "contract_name": "CreditLine"
+  },
+  {
+    "h_id": "H-07",
+    "title": "SavingsAccount withdrawAll and switchStrategy can freeze user funds by ignoring possible strategy liquidity issues",
+    "description": "Full withdrawal and moving funds between strategies can lead to wrong accounting if the corresponding market (e.g. AaveYield) has tight liquidity. `withdrawAll` ignores the fact that some funds can remain in the strategy and deletes the user entry after one withdraw attempt — user gets partial withdrawal and has the accounting entry removed, while remaining funds are frozen. `switchStrategy` removes the old entry completely while adding lesser shares for `_tokensReceived` to the new strategy.",
+    "function_name": "withdrawAll",
+    "contract_name": "SavingsAccount"
+  },
+  {
+    "h_id": "H-08",
+    "title": "Possibility to drain SavingsAccount contract assets",
+    "description": "A malicious actor can manipulate `switchStrategy()` by passing a rogue strategy contract as `_currentStrategy`. The rogue contract implements `getSharesForTokens()` returning 0 (bypassing balance subtraction: 0-0=0), and `unlockTokens()` returning the full asset balance of the SavingsAccount contract. Because there is no check that `_currentStrategy` is a registered strategy (unlike `_newStrategy`), the attacker can drain the contract assets into a new valid strategy and collect the shares.",
+    "function_name": "switchStrategy",
+    "contract_name": "SavingsAccount"
+  },
+  {
+    "h_id": "H-09",
+    "title": "`PriceOracle` Does Not Filter Price Feed Outliers",
+    "description": "The `getLatestPrice` function returns prices from Chainlink or Uniswap regardless of their actual value, assuming a non-zero value is always valid. There is no validation against outliers, stale prices, or cross-oracle sanity checks. A malfunctioning or manipulated Chainlink oracle price will be passed directly to users, causing unintended liquidations and other consequences.",
+    "function_name": "getLatestPrice",
+    "contract_name": "PriceOracle"
+  },
+  {
+    "h_id": "H-10",
+    "title": "Wrong implementation of `NoYield.sol#emergencyWithdraw()`",
+    "description": "In `NoYield.emergencyWithdraw`, `received` is used before being assigned: `IERC20(_asset).safeTransfer(_wallet, received)` is called on line before `received = amount`. Since `received` is uninitialized (defaults to 0 in Solidity), `safeTransfer` transfers 0 tokens. The emergency withdrawal does not actually transfer any funds, making the emergency function non-functional.",
+    "function_name": "emergencyWithdraw",
+    "contract_name": "NoYield"
+  },
+  {
+    "h_id": "H-11",
+    "title": "Unable To Call `emergencyWithdraw` ETH in `NoYield` Contract",
+    "description": "The `emergencyWithdraw` function in `NoYield` treats ETH as address(0). However, the function calls `IERC20(_asset).balanceOf(address(this))` on `_asset` — when `_asset` is `address(0)` this external call reverts. As a result, the `onlyOwner` role can never withdraw ETH from the NoYield contract during an emergency, permanently locking any ETH held there.",
+    "function_name": "emergencyWithdraw",
+    "contract_name": "NoYield"
+  }
+]

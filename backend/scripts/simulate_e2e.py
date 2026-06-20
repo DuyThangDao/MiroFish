@@ -250,11 +250,11 @@ DOMAIN_AGENTS = {
     'math_cast':      ['math_precision',    'invariant_breaker',      'logic_exploiter',       'evm_hardener',
                        'token_specialist', 'reentrancy_specialist'],
     'access_reward':  ['access_escalator',  'clmm_specialist',        'state_machine_analyst', 'mev_analyst', 'appsec_hardener', 'token_flow_tracer'],
-    'economic':       ['defi_attacker',     'flash_loan_specialist',  'mev_analyst'],
-    'state_ordering': ['state_machine_analyst', 'appsec_researcher',  'logic_exploiter',      'param_abuse_auditor'],
+    'economic':       ['defi_attacker',     'flash_loan_specialist',  'mev_analyst',          'adversarial_param_checker'],
+    'state_ordering': ['state_machine_analyst', 'appsec_researcher',  'logic_exploiter',      'param_abuse_auditor',   'logic_verifier'],
     'admin_gov':      ['state_dependency_analyst', 'access_escalator', 'validation_checker',   'logic_exploiter'],
     'general':        ['defi_attacker',     'logic_exploiter',        'appsec_hardener',       'validation_checker',
-                       'token_specialist',  'governance_specialist',  'param_abuse_auditor',   'state_dep_checker'],
+                       'token_specialist',  'governance_specialist',  'adversarial_param_checker', 'logic_verifier'],
 }
 
 # ─── Modifier inline expansion ────────────────────────────────────────────────

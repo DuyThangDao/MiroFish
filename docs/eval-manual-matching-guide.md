@@ -133,6 +133,29 @@ Tên finding không đáng tin cậy, phải đọc description. Ví dụ: "Shar
 ### 4. GT có 0 T1 candidates
 Thường xảy ra với library functions (Ticks, DyDxMath, ...) hoặc function tên bị viết khác. Chuyển thẳng sang T2 search. Nếu T2 cũng 0 → confirmed MISS.
 
+### 6. Inheritance attribution mismatch (T1=0 nhưng bug thực sự đã được tìm thấy)
+**Tình huống**: GT attribute function cho top-level contract (e.g., `CrossMarginTrading`), nhưng finding attribute cho parent contract nơi function được *định nghĩa* (e.g., `CrossMarginAccounts`). T1=0 vì contract name không khớp, T2=0 vì text không mention GT contract.
+
+**Ví dụ thực tế (contest 3, H-05)**:
+- GT: `CrossMarginTrading.belowMaintenanceThreshold`
+- Finding: `CrossMarginAccounts.belowMaintenanceThreshold` — mô tả ĐÚNG bug (`>=` thay `<=`)
+- Thực tế: hàm được **định nghĩa** tại `CrossMarginAccounts.sol` (internal), kế thừa lên `CrossMarginTrading`
+- T1 miss vì `crossmarginaccounts ≠ crossmargintrading`, dù description đúng 100%
+
+**Cách xử lý khi T1=0 và T2=0**:
+1. Kiểm tra findings có `function_name` khớp GT nhưng `contract_name` khác không
+2. Nếu có → kiểm tra file source: hàm được **định nghĩa** ở contract nào?
+   ```bash
+   grep -rn "function <fn_name>" /path/to/contracts/ | grep -v "node_modules"
+   ```
+3. Nếu hàm định nghĩa ở parent contract AND finding attribute đúng parent → **count as TP**
+   - Ghi chú trong eval: "MATCH [T1-inheritance] — function defined in parent `ParentContract`, GT attributes to child `ChildContract`"
+4. Nếu không tìm thấy finding nào có function name khớp → confirmed MISS
+
+**Phân biệt hai loại miss**:
+- `T1=0 vì wrong contract (inheritance)` → kiểm tra source → có thể là TP ẩn
+- `T1=0 vì wrong function name` → T2 search → nếu vẫn 0 → MISS
+
 ### 5. Nhiều findings cùng mô tả một bug
 Với 40+ T1 candidates (vd: H-04 mint có 43 candidates), không cần đọc hết — đọc title + description 2-3 dòng đầu của mỗi finding, tìm keyword từ GT description.
 

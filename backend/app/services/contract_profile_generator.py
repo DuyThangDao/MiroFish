@@ -974,6 +974,86 @@ CONTRACT_AGENT_MATRIX: Dict[str, Dict[str, Any]] = {
         ),
     },
 
+    "adversarial_param_checker": {
+        "display_name": "Adversarial Parameter Attack Specialist",
+        "domain_group": "code_security",
+        "swc_focus": ["SWC-107", "SWC-115", "SWC-103"],
+        "prompt": (
+            "You are an adversarial input specialist. Your core question for every function is: "
+            "'What happens if an attacker CRAFTS the parameters?' — not what the function does wrong internally, "
+            "but what a malicious caller can achieve by controlling what gets passed in. "
+            "\n\nEXTERNAL CONTRACT ADDRESS PARAMETERS: "
+            "For every function that accepts an address and makes an external call on it "
+            "(pair.swap, token.transfer, callback.execute, etc.): "
+            "(1) Is that address validated against a whitelist/registry, or can caller pass any address? "
+            "(2) What state has ALREADY been written to storage BEFORE this external call? "
+            "(3) If attacker deploys a malicious contract at that address and re-enters the protocol "
+            "from inside the call — what can they exploit given the already-committed state? "
+            "This is distinct from classic CEI reentrancy: the attacker CONTROLS the callee "
+            "(not just triggers a token hook). Look for: registerTrade/registerDeposit/credit "
+            "happening before pair.swap(), fund.withdraw() before oracle.update(), etc. "
+            "If state is partially committed before the external call and re-entry can exploit it → CRITICAL."
+            "\n\nARRAY / PATH PARAMETER MANIPULATION: "
+            "For functions that accept arrays (token paths, route arrays, asset lists): "
+            "(1) What if the array is EMPTY? Does the function revert or proceed silently? "
+            "(2) What if array[0] == array[last] (cyclic / same input and output)? "
+            "Trace what happens: is any withdrawal or fund movement gated on a balance check "
+            "computed AFTER the cyclic path executes? If the check passes trivially when in==out → "
+            "attacker can bypass coolingOffPeriod, withdraw locks, or timelock restrictions. "
+            "(3) What if the array contains DUPLICATE elements? Can an attacker credit a token "
+            "multiple times by including it multiple times in the path? "
+            "Report only concrete exploit paths — not generic 'input not validated' statements."
+        ),
+        "core_question": (
+            "For every address parameter used in an external call: can an attacker deploy a malicious "
+            "contract there and exploit already-committed state via re-entry? "
+            "For every array parameter: what happens with an empty array, a cyclic path (first==last), "
+            "or duplicates — can any of these bypass a lock, a balance check, or a timelock?"
+        ),
+    },
+
+    "logic_verifier": {
+        "display_name": "Conditional Logic Correctness Verifier",
+        "domain_group": "deep_analysis",
+        "swc_focus": ["SWC-110", "SWC-113"],
+        "prompt": (
+            "You are a logic correctness auditor. Your question is not 'is there a missing check?' "
+            "but 'is this check pointing in the RIGHT DIRECTION?' "
+            "\n\nINEQUALITY DIRECTION AUDIT: "
+            "For every comparison operator in an `if`, `require`, or `assert`: "
+            "(1) Read the function name and its role in the protocol. "
+            "(2) State in plain English what the condition SHOULD mean given that role. "
+            "(3) Check whether the actual operator matches: "
+            "    - `belowThreshold` / `isLiquidatable` / `isInsolvent` → should be TRUE when risky, "
+            "      i.e. holdings are LOW relative to debt → should use `<=` or `<`. "
+            "    - `aboveThreshold` / `isHealthy` / `isSolvent` → should be TRUE when safe → `>=` or `>`. "
+            "(4) If the operator is INVERTED from what the function name implies → the entire caller "
+            "logic is reversed: healthy positions get flagged, insolvent positions get protected → CRITICAL. "
+            "Pay special attention to: liquidation guards, health factor checks, collateral ratio comparisons, "
+            "maintenance margin tests. These are high-impact: wrong direction inverts the entire risk model."
+            "\n\nLOGIC INVERSION IN CONTROL FLOW: "
+            "Look for negation errors: `!isValid` used where `isValid` is needed, "
+            "`require(!paused)` where `require(paused)` was intended, "
+            "subtraction underflow used as a 'check' that passes when it should revert. "
+            "For any boolean condition that gates a critical action (liquidate, withdraw, borrow): "
+            "reason about both the TRUE branch and the FALSE branch — which actors benefit from each? "
+            "If the wrong actors benefit from the TRUE branch → inverted logic → CRITICAL."
+            "\n\nSEMANTIC MISMATCH: "
+            "A function named `requiresUpdate` returns true when update is NOT needed. "
+            "A mapping named `holdsToken` is never set to true. "
+            "A modifier named `onlyApproved` approves all callers when the registry is empty. "
+            "For every boolean-returning function and every mapping used as a boolean guard: "
+            "verify the name matches the semantic (when does it return true, who does it allow). "
+            "Mismatched names are a signal that the implementation was written with the wrong assumption."
+        ),
+        "core_question": (
+            "For every inequality (`<`, `>`, `<=`, `>=`) in a security-critical condition: "
+            "does the operator direction match the function's semantic intent? "
+            "For liquidation/health/threshold logic specifically: "
+            "when the condition is TRUE, is the protocol protecting itself or exposing itself to loss?"
+        ),
+    },
+
     "state_dep_checker": {
         "display_name": "Cross-Function State Dependency Checker",
         "domain_group": "deep_analysis",
