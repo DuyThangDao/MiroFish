@@ -285,13 +285,9 @@ def _build_invariant_rag_hints(invariant_text: str, agent_id: str,
         return "", 0
     retriever = _get_rag_retriever()
     candidates = []  # (top_score, hint_block_str) — collect all, sort later
-    # Agents that write generic domain patterns (no contract names by design)
-    _M1_BYPASS_AGENTS = {"clmm_specialist"}
-
     for i, inv in enumerate(invariants):
         # M1: positive filter — skip invariants không liên quan đến target contracts
-        # Bypass for agents that intentionally write generic patterns (e.g. clmm_specialist)
-        if target_contracts and agent_id not in _M1_BYPASS_AGENTS:
+        if target_contracts:
             inv_lower = inv.lower()
             if not any(c.lower() in inv_lower for c in target_contracts):
                 logger.info(
@@ -612,8 +608,8 @@ def _annotate_source_with_hist_inv(source: str, inv_map: dict) -> str:
     return '\n'.join(result)
 
 
-# Agents in the standard flow that should receive filtered source (not full network_summary)
-_FILTERED_SOURCE_AGENTS: set[str] = {"clmm_specialist"}
+# Agents that receive filtered source (primary contract only) instead of full network_summary
+_FILTERED_SOURCE_AGENTS: set[str] = set()
 
 # Compiled regex for flexible INV-Mx line extraction (Fix C)
 
@@ -3470,106 +3466,8 @@ class CyberSessionOrchestrator:
             primary_contract = _pc_m.group(1) if _pc_m else ""
 
             try:
-                # ── code_similarity_auditor: HIST-INV Verifier (Phase 4) ─────
-                if profile.agent_id == "code_similarity_auditor":
-
-                    primary_source = _filter_source_to_primary(
-                        network_summary, primary_contract
-                    )
-
-                    # Turn 1: enumerate [HIST-INV] annotations + preliminary verdict
-                    turn1_prompt = _HIST_INV_VERIFIER_TURN1_PROMPT.replace(
-                        "{source}", primary_source
-                    )
-                    turn1_response = self.llm.chat(
-                        [{"role": "user", "content": turn1_prompt}],
-                        temperature=0.3,
-                        max_tokens=self._V2_R1_MAX_TOKENS,
-                        strip_think=True,
-                        extra_body={"google": {"thinking_config": {"thinking_budget": 0}}},
-                    )
-                    logger.info(
-                        f"[hist_verifier] Turn1 raw={len(turn1_response)}chars "
-                        f"primary={primary_contract}"
-                    )
-
-                    if "NO_ANNOTATIONS_FOUND" in turn1_response:
-                        logger.info("[hist_verifier] No [HIST-INV] annotations — skipping")
-                        return []
-
-                    # Parse flagged annotations (MATCH or UNCLEAR → needs Turn 2 verify)
-                    flagged = [
-                        (m.group(1).strip(), m.group(0))
-                        for m in _HIST_CHECK_RE.finditer(turn1_response)
-                        if m.group(2).upper() != "MITIGATED"
-                    ]
-                    logger.info(
-                        f"[hist_verifier] Turn1 flagged={len(flagged)} for batch verify"
-                    )
-                    if not flagged:
-                        return []
-
-                    # Turn 2: batch verify ≤5 annotations per call
-                    _BATCH_SIZE = 5
-                    all_batch_responses = []
-                    for batch_start in range(0, len(flagged), _BATCH_SIZE):
-                        batch = flagged[batch_start:batch_start + _BATCH_SIZE]
-                        batch_items = "\n\n".join(
-                            f"[{i + 1}] Function: {fn}\n{context[:600]}"
-                            for i, (fn, context) in enumerate(batch)
-                        )
-                        turn2_prompt = (
-                            _HIST_INV_VERIFIER_BATCH_PROMPT
-                            .replace("{batch_items}", batch_items)
-                            .replace("{source}", primary_source[:3000])
-                        )
-                        resp = self.llm.chat(
-                            [{"role": "user", "content": turn2_prompt}],
-                            temperature=0.3,
-                            max_tokens=2000,
-                            strip_think=True,
-                            extra_body={"google": {"thinking_config": {"thinking_budget": 0}}},
-                        )
-                        all_batch_responses.append(resp)
-                        logger.info(
-                            f"[hist_verifier] batch {batch_start // _BATCH_SIZE + 1} "
-                            f"resp={len(resp)}chars"
-                        )
-
-                    # Parse CONFIRMED findings from batch responses
-                    results = []
-                    for resp in all_batch_responses:
-                        for m in _CONFIRMED_LINE_RE.finditer(resp):
-                            fn_name     = m.group(2)
-                            evidence    = m.group(3)
-                            description = m.group(4).strip()
-                            title       = f"[HIST-INV] {fn_name}: {description[:80]}"
-                            results.append((
-                                primary_contract, fn_name, title, description,
-                                f"{fn_name}() violates annotated invariant",
-                                evidence, evidence,
-                            ))
-
-                    elapsed = time.time() - t0
-                    logger.info(
-                        f"[TIMING] Phase=v2 R1 agent={profile.agent_id} latency={elapsed:.1f}s "
-                        f"confirmed={len(results)}"
-                    )
-                    if _debug_dir:
-                        try:
-                            import pathlib
-                            pathlib.Path(_debug_dir).mkdir(parents=True, exist_ok=True)
-                            with open(os.path.join(_debug_dir, f"r1_{profile.agent_id}_t1.txt"), "w") as fh:
-                                fh.write(turn1_response)
-                            with open(os.path.join(_debug_dir, f"r1_{profile.agent_id}_t2.txt"), "w") as fh:
-                                fh.write("\n---\n".join(all_batch_responses))
-                        except Exception:
-                            pass
-
-                    return results[:3]   # safeguard: max 3 findings
-                # ── end code_similarity_auditor branch ───────────────────────
-
-                # Fix B: filter source for agents that should only see primary contract
+                # Filter source for agents that should only see primary contract
+                # (_FILTERED_SOURCE_AGENTS is empty by default; add agent IDs to opt in)
                 agent_source = (
                     _filter_source_to_primary(network_summary, primary_contract)
                     if profile.agent_id in _FILTERED_SOURCE_AGENTS

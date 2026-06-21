@@ -1003,6 +1003,8 @@ class ContractKGBuilder:
                 end = markers[i + 1].start() if i + 1 < len(markers) else len(source_code)
                 section = source_code[start:end]
                 local_fns = list(set(re.findall(r'\bfunction\s+([a-zA-Z_]\w*)\s*\(', section)))
+                if re.search(r'\bconstructor\s*\(', section):
+                    local_fns.append('constructor')
                 enriched = _enrich(contract_name, ContractKGBuilder._build_call_graph_entries(section, local_fns), section_src=section)
                 if enriched:
                     parts.append(f"[{contract_name}]\n" + "\n".join(enriched))
@@ -1044,7 +1046,7 @@ class ContractKGBuilder:
             'keccak256', 'sha256', 'ecrecover', 'addmod', 'mulmod',
             'require', 'assert', 'revert', 'emit', 'new', 'delete',
         })
-        fn_body_re = re.compile(r'function\s+(\w+)\s*\([^)]*\)[^{]*\{', re.MULTILINE)
+        fn_body_re = re.compile(r'(?:function\s+(\w+)|constructor)\s*\([^)]*\)[^{]*\{', re.MULTILINE)
         call_re = re.compile(r'\b(\w+)\s*\(')
         # variable.method( — catches stored contract-reference calls like uniswapRouter.swapExact...
         _dot_call_re = re.compile(r'\b([a-z][a-zA-Z0-9_]*)\s*\.\s*([a-zA-Z]\w*)\s*\(')
@@ -1055,7 +1057,7 @@ class ContractKGBuilder:
 
         entries: List[str] = []
         for i, m in enumerate(matches):
-            fn_name = m.group(1)
+            fn_name = m.group(1) or 'constructor'
             start = m.end()
             end = matches[i + 1].start() if i + 1 < len(matches) else len(source_code)
             body = source_code[start:end]
@@ -1171,6 +1173,8 @@ class ContractKGBuilder:
                 end = markers[i + 1].start() if i + 1 < len(markers) else len(source_code)
                 section = source_code[start:end]
                 local_fns = list(set(re.findall(r'\bfunction\s+([a-zA-Z_]\w*)\s*\(', section)))
+                if re.search(r'\bconstructor\s*\(', section):
+                    local_fns.append('constructor')
                 entries = ContractKGBuilder._build_call_graph_entries(section, local_fns)
                 vc = ContractKGBuilder._build_validator_coverage(section)
                 if entries:

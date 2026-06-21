@@ -232,7 +232,7 @@ FN_NAME_RULES = [
     (r'initialize|\binit\b|callback|settle|\bsync\b|deploy.?pool|'
      r'create.?pool|create.?position',                              'state_ordering'),
     (r'\bchange[A-Z]\w*|\bset(?:impl|contract|owner|governance|minter|treasury|'
-     r'engine|vault|nft|address|operator|role)\b|'
+     r'engine|vault|nft|address|operator|role|controller)\b|'
      r'\bmigrate\b|\bupgrade\b|transferOwn|renounceOwn|'
      r'proposal|votes?|curate|\blist[A-Z]|lock.?unit|unlock.?unit|exclu', 'admin_gov'),
 ]
@@ -244,17 +244,34 @@ def match_domain(fn_name: str) -> str:
             return domain
     return 'general'
 
-# ─── Domain → agents (Fix F: broader coverage per domain) ────────────────────
+# ─── Domain → agents (persona-based, domain expertise not pattern-matching) ──
 DOMAIN_AGENTS = {
-    'clmm_semantic':  ['clmm_specialist',   'defi_analyst',           'logic_exploiter'],
-    'math_cast':      ['math_precision',    'invariant_breaker',      'logic_exploiter',       'evm_hardener',
-                       'token_specialist', 'reentrancy_specialist'],
-    'access_reward':  ['access_escalator',  'clmm_specialist',        'state_machine_analyst', 'mev_analyst', 'appsec_hardener', 'token_flow_tracer'],
-    'economic':       ['defi_attacker',     'flash_loan_specialist',  'mev_analyst',          'adversarial_param_checker'],
-    'state_ordering': ['state_machine_analyst', 'appsec_researcher',  'logic_exploiter',      'param_abuse_auditor',   'logic_verifier'],
-    'admin_gov':      ['state_dependency_analyst', 'access_escalator', 'validation_checker',   'logic_exploiter'],
-    'general':        ['defi_attacker',     'logic_exploiter',        'appsec_hardener',       'validation_checker',
-                       'token_specialist',  'governance_specialist',  'adversarial_param_checker', 'logic_verifier'],
+    # CLMM tick/fee semantic functions — math-heavy + logic
+    'clmm_semantic':  ['quant_analyst',        'invariant_mathematician', 'program_logician',      'state_analyst',
+                       'boundary_analyst',     'formula_fidelity_auditor', 'data_provenance_analyst'],
+    # Arithmetic/computation functions (burn/mint/swap/calc) — math + accounting
+    'math_cast':      ['quant_analyst',        'numerical_analyst',      'invariant_mathematician', 'evm_safety_expert',
+                       'token_flow_expert',    'accounting_auditor',
+                       'overflow_safety_expert', 'boundary_analyst',    'state_ordering_expert',
+                       'formula_fidelity_auditor', 'data_provenance_analyst'],
+    # Reward/claim/deposit functions — asset accounting + economic
+    'access_reward':  ['token_flow_expert',    'accounting_auditor',     'asset_security_expert',
+                       'defi_security_researcher', 'economic_exploiter', 'temporal_attack_specialist',
+                       'authorization_boundary_analyst', 'protocol_state_machine_auditor'],
+    # Oracle/economic/flash functions — economic + integration
+    'economic':       ['defi_security_researcher', 'economic_exploiter', 'protocol_economist',    'oracle_security_expert',
+                       'temporal_attack_specialist'],
+    # Initialize/callback/create functions — state + integration
+    'state_ordering': ['program_logician',     'state_analyst',          'execution_tracer',      'integration_auditor',
+                       'state_ordering_expert', 'entry_point_hardener',  'data_provenance_analyst'],
+    # Admin/setter functions — access control + state
+    'admin_gov':      ['authorization_expert', 'threat_modeler',         'state_analyst',         'program_logician',
+                       'entry_point_hardener', 'authorization_boundary_analyst', 'protocol_state_machine_auditor'],
+    # Fallback — broad coverage across all domains
+    'general':        ['program_logician',     'state_analyst',          'execution_tracer',
+                       'quant_analyst',        'defi_security_researcher', 'token_flow_expert',
+                       'authorization_expert', 'integration_auditor',   'entry_point_hardener',
+                       'authorization_boundary_analyst', 'protocol_state_machine_auditor'],
 }
 
 # ─── Modifier inline expansion ────────────────────────────────────────────────
