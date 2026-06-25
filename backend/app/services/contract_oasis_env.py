@@ -1439,12 +1439,52 @@ def _build_independent_tracks_block(domain_group: str) -> str:
     block += _INDEPENDENT_TRACKS_BLOCK_SUFFIX
     return block
 
-_HIST_INV_CHECK_BLOCK = """\
+# domain_group → hist-inv domain tag (agents not in _AGENT_TO_HIST_TAG use this)
+_DOMAIN_GROUP_TO_HIST_TAG: dict = {
+    'math_numerics':         'arithmetic',
+    'asset_accounting':      'reserve',
+    'access_control_domain': 'access',
+    'integration_domain':    'reentrancy',
+    'economic_domain':       'general',
+    'state_logic':           'general',
+    'general':               'general',
+    'red_team_attacker':     'general',
+}
+
+# Per-agent overrides (take precedence over domain_group)
+_AGENT_TO_HIST_TAG: dict = {
+    'boundary_analyst':          'boundary',
+    'temporal_attack_specialist': 'temporal',
+    'callback_specialist':       'reentrancy',
+}
+
+
+def _get_agent_hist_tag(agent_profile: "ContractAgentProfile") -> str:
+    """Return the HIST-INV domain tag for a given agent profile."""
+    agent_id = getattr(agent_profile, 'agent_id', '')
+    if agent_id in _AGENT_TO_HIST_TAG:
+        return _AGENT_TO_HIST_TAG[agent_id]
+    domain_group = getattr(agent_profile, 'domain_group', 'general')
+    return _DOMAIN_GROUP_TO_HIST_TAG.get(domain_group, 'general')
+
+
+def _build_hist_inv_check_block(hist_tag: str) -> str:
+    """Build the HIST-INV CHECK block, filtered to the agent's domain tag."""
+    if hist_tag == 'general':
+        tag_filter = "  Process ALL annotated functions.\n"
+    else:
+        tag_filter = (
+            f"  Your domain tag is `{hist_tag}`. "
+            f"Process ONLY annotations tagged `[HIST-INV|{hist_tag}]` or `[HIST-INV|general]`.\n"
+            f"  Skip all other domain tags — do NOT output HIST-CHECK lines for them.\n"
+        )
+    return f"""\
 HIST-INV CHECK — run this BEFORE writing any FINDING:
-  Scan the source for `// [HIST-INV]:` comments (historical HIGH-severity pattern matches).
-  For EACH annotated function, output one verdict line:
+{tag_filter}
+  Scan the source for `// [HIST-INV|<tag>]` comments (historical HIGH-severity pattern matches).
+  For each annotated function in your domain, output one verdict line:
     HIST-CHECK [<FunctionName>]: MATCH | MITIGATED | UNCLEAR — <one sentence citing exact code>
-  If no annotations exist → write: HIST-CHECK: none
+  If no domain-relevant annotations exist → write: HIST-CHECK: none
 
   MATCH RULE — MANDATORY FINDING:
     If HIST-CHECK verdict is MATCH → you MUST write a FINDING block immediately after the verdict line.
@@ -1456,6 +1496,37 @@ HIST-INV CHECK — run this BEFORE writing any FINDING:
     A bound/size check (e.g., array.length < N, amount > 0, index < limit) is NOT access control.
     If the only check is a bound check and there is no caller authorization → mark MATCH, not MITIGATED.
 """
+
+
+_FOCUSED_STEP1_BLOCK = """\
+STEP 1 — DOMAIN INVARIANTS:
+  Based on your worldview above, list 2–3 invariants SPECIFIC to your domain.
+  Read the code looking ONLY for patterns relevant to your worldview.
+
+  Do NOT list invariants about overflow, reserve accounting, CEI, or access
+  control unless they are the direct mechanism of your domain. Other specialists
+  cover those — your value is finding what they miss.
+
+  Format: INV-1: <domain-specific invariant>, INV-2: ...\
+"""
+
+_FOCUSED_OUTPUT_GATE = """\
+=== OUTPUT GATE ===
+You are a DOMAIN SPECIALIST. Write FINDING blocks ONLY for vulnerabilities
+consistent with your worldview above. Bugs outside your domain are covered
+by other specialists — ignore them completely.\
+"""
+
+
+def _format_cq_sequential(cq: str) -> str:
+    """Split multi-part CQ '(1)...(2)...(3)...' into sequential [Q1]/[Q2]/[Q3] blocks."""
+    if not cq:
+        return ""
+    parts = re.split(r'\s*\(\d+\)\s*', cq.strip())
+    parts = [p.strip() for p in parts if p.strip()]
+    if len(parts) <= 1:
+        return cq.strip()
+    return "\n\n".join(f"[Q{i}] {p}" for i, p in enumerate(parts, 1))
 
 
 def build_round1_prompt(
@@ -1481,16 +1552,16 @@ def build_round1_prompt(
     intent_block = f"\n=== CONTRACT INTENT ===\n{intent_summary}\n" if intent_summary else ""
     chain_block = f"\n{call_chain_block}\n" if call_chain_block else ""
     focus_block = f"\n{focus_directive}\n" if focus_directive else ""
-    domain_group = getattr(agent_profile, "domain_group", "general")
-    tracks_block = _build_independent_tracks_block(domain_group)
+    _cq_raw = getattr(agent_profile, "core_question", "")
 
     if invariant_only:
-        _cq = getattr(agent_profile, "core_question", "")
+        _cq_fmt = _format_cq_sequential(_cq_raw)
         cq_section = (
             f"=== YOUR EPISTEMIC LENS ===\n"
-            f"Before generating invariants, anchor your perspective:\n"
-            f"{_cq}\n\n"
-        ) if _cq else ""
+            f"Address each question fully and in sequence — complete each before moving to the next:\n\n"
+            f"{_cq_fmt}\n\n"
+        ) if _cq_fmt else ""
+        step1_block = _FOCUSED_STEP1_BLOCK
         return f"""\
 === ROUND 1 — PHASE A: INVARIANT EXTRACTION ===
 You are {agent_profile.agent_id} ({agent_profile.domain_group}/{agent_profile.persona}).
@@ -1500,24 +1571,45 @@ You are {agent_profile.agent_id} ({agent_profile.domain_group}/{agent_profile.pe
 {context_summary}
 {chain_block}
 {cq_section}=== TASK: INVARIANT EXTRACTION ONLY ===
-{_STEP1_BLOCK}
+{step1_block}
 
 Output ONLY the numbered invariant list (INV-1, INV-2, ...). Do NOT write any FINDING block,
 violation analysis, or commentary. Violation analysis will happen in a separate step.
 """
 
-    step1_section = (
-        f"Your invariants from Phase A (starting point — also apply ALL independent checks below):\n{injected_invariants}\n"
-        if injected_invariants
-        else _STEP1_BLOCK
-    )
-    hint_section = f"{step2_hint}\n" if step2_hint else ""
-    _cq2 = getattr(agent_profile, "core_question", "")
-    cq_section2 = (
-        f"=== YOUR EPISTEMIC LENS ===\n"
-        f"Re-anchor your perspective before analyzing violations:\n"
-        f"{_cq2}\n\n"
-    ) if _cq2 else ""
+    if injected_invariants:
+        # T2 path: use domain invariants from T1 as the scan basis
+        scan_directives = (
+            f"Your domain invariants from Phase A — scan for violations of THESE specifically:\n"
+            f"{injected_invariants}"
+        )
+    elif _cq_raw:
+        # Direct scan with CQ: each sub-question becomes a scan directive
+        _cq_parts = re.split(r'\s*\(\d+\)\s*', _cq_raw.strip())
+        _cq_parts = [p.strip() for p in _cq_parts if p.strip()]
+        if len(_cq_parts) <= 1:
+            scan_directives = (
+                f"[Q1] {_cq_raw.strip()}\n"
+                f"  → Scan the source for this specific pattern.\n"
+                f"  → If a violation exists: write a FINDING block immediately."
+            )
+        else:
+            scan_directives = "\n\n".join(
+                f"[Q{i}] {q}\n"
+                f"  → Scan the source for this specific pattern.\n"
+                f"  → If a violation exists: write a FINDING block immediately."
+                for i, q in enumerate(_cq_parts, 1)
+            )
+    else:
+        # No CQ: worldview-driven scan
+        scan_directives = (
+            "Scan the source for vulnerabilities consistent with your worldview above.\n"
+            "Apply your worldview directly to identify violations of the conditions\n"
+            "your worldview states must hold.\n"
+            "Focus on patterns your worldview specifically names — ignore patterns outside it."
+        )
+
+    hist_inv_block = _build_hist_inv_check_block(_get_agent_hist_tag(agent_profile))
 
     return f"""\
 === ROUND 1 — INDEPENDENT DISCOVERY ===
@@ -1554,197 +1646,11 @@ LOCATION RULE — before writing FUNCTION: or VIOLATED_AT: in any EVIDENCE block
       Example: if mint() calls _getAmountsForLiquidity() and the bug is a typecast inside
       _getAmountsForLiquidity, write FUNCTION: _getAmountsForLiquidity — not FUNCTION: mint.
 
-PROTOCOL INVARIANT ANALYSIS — mandatory before writing any FINDING:
+DOMAIN-FOCUSED SCAN — analyze ONLY what your worldview directs:
 
-{step1_section}
+{scan_directives}
 
-{cq_section2}{hint_section}{tracks_block}
-STEP 2 — FIND VIOLATIONS:
-{_HIST_INV_CHECK_BLOCK}
-  For each invariant listed above, ask:
-  Q1: Is there any execution path (sequence of function calls) that can make this invariant false?
-  Q2: If yes — can an attacker control that path? Or does it only occur due to a logic bug?
-  Q3: If violated, what is the measurable impact?
-
-  If Q1 = YES → write a FINDING with:
-    EVIDENCE: INV: <invariant statement> | VIOLATED_AT: <fn()> | COUNTEREXAMPLE: <condition that causes violation>
-
-STEP 2B — PARAMETER GUARD SWEEP (mandatory, SEPARATE from HIST-CHECK above):
-  HIST-CHECK verifies historical annotations. This step verifies YOUR OWN INVs per function.
-  They are different — both are required.
-
-  For each INV of the form "<parameter X> must be Y" or "<X> must satisfy condition C":
-  → Find ALL functions where X appears in the signature
-  → For each function, output one PARAM-GUARD line:
-      PARAM-GUARD [INV-N/FunctionName]: ENFORCED — <quote the require/guard line>
-      PARAM-GUARD [INV-N/FunctionName]: MISSING — no require(<condition>) in body → write FINDING below
-
-  IMPORTANT: "Other functions enforce it" is NOT valid — each function must have its own guard.
-
-  EXAMPLE (do not skip similar patterns):
-    INV states "base must be VADER or USDV"
-    addLiquidity(address base, ...) → has require(base == USDV || base == VADER) → ENFORCED
-    _removeLiquidity(address base, ...) → has require(base == USDV || base == VADER) → ENFORCED
-    swap(address base, ...) → NO require checking base → MISSING → FINDING
-    mintSynth(address base, ...) → NO require checking base → MISSING → FINDING
-    (Even though addLiquidity enforces it, swap and mintSynth each need their own guard.)
-
-  For each PARAM-GUARD line marked MISSING, write a FINDING immediately below it.
-
-CAST & COMPARISON PRECISION — before writing any arithmetic finding, answer these questions:
-
-For every explicit narrowing cast (uint256→uint128, uint128→int128, uint256→int24, etc.):
-  Q1: What is the realistic MAX value of the input at this code point?
-      (Trace: is it a return value of getDx/getDy? A user-supplied amount? An uncapped product?)
-  Q2: Can that MAX exceed the target type's max? (uint128 max = 2^128-1, int128 max = 2^127-1)
-  Q3: For signed cast: what is -T(input) when input = type_max?
-      (Two's complement: -int128(2^128-1) = +1 — SIGN FLIP, not underflow)
-  If YES to Q2 or Q3 → write FINDING. CODE_ANCHOR = the cast line itself.
-
-For every strict inequality (a < b) or (a > b) at a range/tick/price boundary:
-  Q1: What does b represent — price range endpoint, tick boundary, fee threshold?
-  Q2: Is a == b INCLUDED or EXCLUDED by the current strict comparison?
-  Q3: Is that exclusion correct? (Check protocol intent / NatSpec / invariants)
-  If exclusion is wrong → write FINDING. CODE_ANCHOR = the comparison line.
-
-CAST CROSS-FUNCTION SCAN — after finding any cast-related vulnerability:
-  For each cast operator that produced a finding (e.g., int128(), uint128(), int24(), uint96()):
-  1. Scan ALL functions in the contract for the same cast operator — regardless of variable name
-  2. Apply Q1→Q3 to each instance found
-  3. If YES → write a separate FINDING per function (COVERAGE RULE)
-  Do NOT stop after the first function. Scan ALL functions equally — no exceptions.
-
-STATE UPDATE ORDERING — check EVERY function that modifies 2+ state variables:
-
-INTRA-FUNCTION (wrong update order within one function):
-  Signal: accumulator += delta / stateVar  then  stateVar = newValue  (accumulator used NEW value — wrong)
-  Or:     stateVar = newValue  then  accumulator += delta / stateVar  (same problem)
-  Correct: finish ALL computations that READ stateVar BEFORE overwriting it.
-  Common pattern: secondsPerLiquidity / rewardPerShare must snapshot liquidity BEFORE it changes.
-  EVIDENCE: SEQ: computeAccumulator() → updateLiquidity() via liquidityGlobal | ISSUE: accumulator uses post-change liquidity
-
-MANDATORY TRACE — for every function flagged by STATE UPDATE ORDERING:
-  Step 1: List ALL state-modifying lines IN ORDER as they appear in the function body:
-          `<line content>` → modifies: <variable_name>
-  Step 2: For each accumulator (secondsPerLiquidity, feeGrowthInside, rewardPerShare, rewardDebt):
-          Is this accumulator READ or UPDATED *after* the value it divides by
-          (liquidity, totalShares, totalSupply) has already been changed in the same function?
-  If YES → write FINDING. EVIDENCE: SEQ: <accumulator_line> → <liquidity_change_line>
-            via <accumulator_name> | ISSUE: accumulator computed using post-change denominator.
-
-FUNCTION ATTRIBUTION FOR ORDERING BUGS:
-  APPLIES ONLY when the bug is wrong CALL ORDER (SEQ: evidence type) — NOT when the bug
-  is wrong code (wrong variable, wrong operator, wrong logic) inside a called function.
-
-  For ordering bugs (SEQ: evidence):
-    FUNCTION = the outer function that CONTROLS the execution sequence.
-    CONTRACT = the contract containing that outer function.
-    Test: "If I fix this bug, which function's source code changes?" → that is the correct FUNCTION.
-    Example: if outer() calls updateAcc(stateVar) AFTER changing stateVar,
-    write FUNCTION: outer, CONTRACT: OuterContract.
-
-  For wrong-code bugs (CODE: or INV: evidence) inside a library/helper:
-    FUNCTION = the library/helper function containing the wrong line.
-    CONTRACT = the contract/library that DEFINES that function (not the caller's contract).
-    Example: if Library.helper() contains a wrong variable assignment,
-    write FUNCTION: helper, CONTRACT: Library — even if the caller is a different contract.
-
-  EXCEPTION — bugs in parent/auxiliary contracts (marked "// ─── X.sol (parent)"):
-    A parent contract's vulnerable internal function is only reachable through the PRIMARY
-    contract's public function. Attribute to the PRIMARY contract's PUBLIC caller, not to the
-    internal helper.
-    Test: "Which function does an external attacker CALL to trigger this bug?"
-    Example: CoreCollection.mintToken() calls ERC721Payable._handlePayment() which has
-    unchecked transferFrom → write FUNCTION: mintToken, CONTRACT: CoreCollection.
-    Reason: the fix (SafeERC20 or return-value check) is enforced at the caller level.
-
-CROSS-CALL SEQUENCING (user controls call order):
-  Identify pairs: WRITER (updates position.feeGrowthInside / rewardDebt / sharePrice) and
-                  READER (reads that field to compute user's payout: collect / claimReward / withdraw).
-  Ask: if user calls READER before WRITER has run → does READER use stale data → user overpaid?
-  EVIDENCE: SEQ: collect() → burn() via position.feeGrowthInside | ISSUE: collect reads stale value if called before burn
-
-STALENESS DIRECTION ANALYSIS — mandatory before writing OUTCOME for any cross-call finding:
-  Trace arithmetic direction BEFORE writing OUTCOME:
-  Case A: reward = global_accumulator - position.accumulator
-    → stale position.accumulator is LOWER → delta LARGER → user gets MORE than owed
-    → OUTCOME: excess claimed (overpayment) — do NOT write "fee loss"
-  Case B: reward = position.accumulator - baseline
-    → stale position.accumulator is HIGHER → delta SMALLER → user gets LESS
-    → OUTCOME: reward diluted (underpayment)
-  Always specify direction explicitly in OUTCOME.
-
-CONDITIONAL SYNC SKIP — additional staleness pattern:
-  Signal: function has branch `if (condition) {{ sync_state(); update_position_snapshot(); }}`
-  When branch is NOT taken → position snapshot is NOT updated → later reads return stale data.
-  Check: what state remains unsynced when the skip-sync branch executes?
-  EVIDENCE: MISSING: sync call AT: FunctionName() — for the branch that skips the sync.
-
-PARAMETER PROPAGATION IN WRAPPER CONTRACTS — proactive check, independent of other findings:
-  If any contract in scope acts as a WRAPPER/MANAGER delegating to an inner contract:
-  Step 1: In each external/public function, identify all address-type parameters.
-  Step 2: Trace each address parameter into every inner contract call that receives it.
-  Step 3: Read the inner function source — does it distribute assets for:
-    (A) only the caller's own position/account → safe
-    (B) ALL accumulated assets in a shared range / bucket / tranche → potential bug
-  Step 4 (only if B): Can any caller supply an arbitrary address?
-    If yes → attacker redirects other users' assets → HIGH severity access control bug.
-  EVIDENCE: CODE: <inner call line passing the address parameter>
-  ATTACK_PATH ACTOR: any caller / CALL: wrapper.fn(addr) → inner.fn(addr) /
-    STATE_CHANGE: inner distributes shared assets to attacker-controlled addr /
-    OUTCOME: attacker claims assets belonging to other users
-
-SECONDARY FUNCTION SWEEP — inspect these categories independently of invariants above:
-
-  ARITHMETIC SAFETY IN COMPUTATION FUNCTIONS:
-  Solidity 0.8+ reverts on overflow/underflow by default. Some protocols (Uniswap V3 forks,
-  concentrated liquidity) intentionally rely on wrapping arithmetic for fee/reward range math.
-  For every pure/view function that computes a difference of two accumulator values
-  (e.g. feeGrowthGlobal - feeGrowthBelow - feeGrowthAbove, rewardAccumulator - snapshot):
-    Q1: Can the subtrahend legitimately exceed the minuend due to wrapping semantics?
-        (e.g. tick crossing can cause feeGrowthBelow + feeGrowthAbove > feeGrowthGlobal)
-    Q2: Is the subtraction wrapped in an `unchecked {{}}` block?
-    If Q1=YES and Q2=NO → Solidity 0.8 reverts → all fee/reward claims permanently broken.
-    EVIDENCE: CODE: <the subtraction line missing unchecked>
-    ATTACK_PATH ACTOR: any user / CALL: <fn>() / STATE_CHANGE: arithmetic revert /
-      OUTCOME: pool or reward mechanism permanently DoS'd — all claims revert
-
-  INITIALIZATION PARAMETER VALIDATION:
-  For every initialize() / constructor() / setUp() function in scope:
-    Step 1: Identify all numeric input parameters (prices, ticks, ratios, rates).
-    Step 2: Check each against hard-coded contract bounds
-            (MIN_SQRT_RATIO, MAX_SQRT_RATIO, MIN_TICK, MAX_TICK, type(uint128).max, etc.).
-    Step 3: If parameter = 0 or out-of-bounds: does it cause permanent malfunction
-            (revert on first operation, wrong initial state, broken invariant from start)?
-    If validation missing → write FINDING.
-    EVIDENCE: MISSING: bounds check AT: initialize() | CODE_ANCHOR: the parameter usage line.
-
-MULTI-ANGLE EXHAUSTION — for every function where you found a finding, force 2 more checks:
-  (A) DIFFERENT CLASS: found arithmetic error → also check: can any caller invoke this?
-      Is there an update-ordering issue? A cross-call staleness path? A parameter abuse?
-      (e.g., burn(recipient) passes recipient externally → does pool.burn use it to send ALL tick fees?)
-  (B) INTERACTIONS: this function modifies State Variable X →
-      which other functions also read X? Can this function put X in a state that breaks
-      those functions' invariants for OTHER users?
-  Each distinct vulnerability class in the same function = separate FINDING.
-
-FINDING SPLITTING RULE — passive bug vs active exploit:
-  If a state variable X has BOTH:
-    (A) PASSIVE: X computed incorrectly by code logic regardless of any attacker
-        (ordering error, missing update, wrong formula)
-    (B) ACTIVE: attacker profits by timing transactions to exploit the incorrect X
-        (JIT attack, sandwich, front-run reward distribution)
-  → Write TWO separate FINDINGS:
-    Finding A — Implementation Bug:
-      FUNCTION: function where ordering/calculation error occurs (where fix changes code)
-      EVIDENCE: SEQ: or CODE: proving the logic error
-      ATTACK_PATH ACTOR: any user (no adversarial timing required)
-    Finding B — Economic Exploit:
-      FUNCTION: function attacker calls to extract profit
-      EVIDENCE: DESIGN: describing the mechanism abused
-      ATTACK_PATH ACTOR: attacker (requires deliberate timing)
-  Reason: different fix locations, different audit categories, different impact scope.
-  Pattern: any time-weighted accumulator with both an update-ordering bug and a JIT attack surface.
+{hist_inv_block}
 
 OUTPUT FORMAT — use ONLY the FINDING format below. No CLAIM, VALIDATE, CHALLENGE, CONFIRM, or DISMISS.
 
@@ -1815,7 +1721,9 @@ ATTACK_PATH rules — MANDATORY. All four subfields must be present:
 ✗ Bad (will be dropped by parser):
   ATTACK_PATH: An attacker can exploit this vulnerability to drain funds from the contract.
 
-Write ALL findings you can identify. Do not stop at the first one.
+{_FOCUSED_OUTPUT_GATE}
+
+Write ALL findings you can identify within your domain. Do not stop at the first one.
 
 ⚠ OUTPUT COMMITMENT: Begin writing FINDING blocks immediately after completing your analysis.
 Do NOT end your response without either FINDING blocks or the marker NO_FINDINGS_IN_DOMAIN.
@@ -2106,6 +2014,87 @@ If you are keeping your INVALID verdict, write:
 
 
 # ─── v2 Round Response Parsers ────────────────────────────────────────────────
+
+def build_t3_prompt(
+    agent_profile: "ContractAgentProfile",
+    ann_source: str,
+    focus_directive: str = "",
+) -> str:
+    """
+    Phase C — Domain-Focused Chain-of-Thought Sweep.
+
+    Replaces the generic _T3_COT_BLOCK with a worldview/CQ-driven CoT.
+    Agent traces ONLY patterns relevant to its domain.
+    """
+    _cq_raw = getattr(agent_profile, "core_question", "")
+    focus_block = f"\n{focus_directive}\n" if focus_directive else ""
+
+    if _cq_raw:
+        _cq_parts = re.split(r'\s*\(\d+\)\s*', _cq_raw.strip())
+        _cq_parts = [p.strip() for p in _cq_parts if p.strip()]
+        if len(_cq_parts) <= 1:
+            trace_directives = (
+                f"[Q1] {_cq_raw.strip()}\n"
+                f"  → For each function: trace whether this specific condition can occur.\n"
+                f"  → Write a TRACE block for every function where the answer is YES or UNCLEAR."
+            )
+        else:
+            trace_directives = "\n\n".join(
+                f"[Q{i}] {q}\n"
+                f"  → For each function: trace whether this specific condition can occur.\n"
+                f"  → Write a TRACE block for every function where the answer is YES or UNCLEAR."
+                for i, q in enumerate(_cq_parts, 1)
+            )
+    else:
+        trace_directives = (
+            "For each function: trace whether it violates any condition stated in your worldview.\n"
+            "Write a TRACE block for every function where you find a potential violation."
+        )
+
+    hist_inv_block = _build_hist_inv_check_block(_get_agent_hist_tag(agent_profile))
+
+    return f"""\
+=== ROUND 1 — PHASE C: DOMAIN-FOCUSED CoT SWEEP ===
+You are {agent_profile.agent_id} ({agent_profile.domain_group}/{agent_profile.persona}).
+{agent_profile.system_prompt}
+{focus_block}
+CONTRACT UNDER REVIEW:
+{ann_source}
+
+=== TASK ===
+Perform a structured chain-of-thought reasoning sweep WITHIN YOUR DOMAIN ONLY.
+Do NOT reference any prior findings — this is a fresh, independent scan.
+
+{trace_directives}
+
+For each suspicious operation, write a TRACE block:
+
+TRACE [{{function_name}}]:
+  OP: <the specific operation being examined>
+  CHAIN: <step-by-step: what values flow in → what computation → what state changes>
+  INVARIANT: <what property should hold here — based on your worldview>
+  VERDICT: BUG | SAFE | UNCLEAR
+
+After completing ALL TRACE blocks, write FINDING blocks ONLY for VERDICT=BUG
+AND consistent with your domain.
+
+FINDING: <title>
+CONTRACT: <name>
+FUNCTION: <name>
+SEVERITY: high | medium | low
+DESCRIPTION: <detailed explanation>
+CODE_ANCHOR: <copy the EXACT line verbatim from the source code above — no paraphrasing>
+ATTACK_PATH: <how an attacker exploits this>
+
+IMPORTANT — FUNCTION attribution:
+If the vulnerable line is inside a PRIVATE or INTERNAL helper called by the function
+you are tracing (e.g. `_getAmountsForLiquidity`, `_updateFees`):
+set FUNCTION to the PRIVATE HELPER's name — not the public caller.
+
+{hist_inv_block}
+{_FOCUSED_OUTPUT_GATE}
+"""
+
 
 def parse_round2_votes_from_text(
     text: str,

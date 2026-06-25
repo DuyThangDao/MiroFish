@@ -31,6 +31,8 @@ dependencies = [
     "anthropic>=0.96.0",
     "slither-analyzer",
     "json-repair",
+    "markdown",
+    "easydict",
 ]
 
 [project.optional-dependencies]

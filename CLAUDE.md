@@ -144,6 +144,12 @@ File `eval_result.txt` chứa toàn bộ output verbose (matched/missed H bugs +
 Flags đặt cứng trong script: `STOP_AFTER_DEDUP=true`, `RAG_ENABLED=true`.
 Đây là cách dùng chuẩn trong giai đoạn tăng recall (focus R1, bỏ R2 voting).
 
+**RT (red-team agents): tắt theo mặc định.** Thêm `--rt` chỉ khi user yêu cầu rõ ràng.
+
+**Dedup: tắt theo mặc định.** Không pass `--dedup` trừ khi user yêu cầu rõ ràng.
+
+**KG: tự build theo mặc định.** Không cần flag gì thêm — script tự detect và build KG nếu chưa có. Chỉ pass `--kg-file` khi user muốn dùng KG đã có sẵn.
+
 **HIST-INV cache — KHÔNG xóa trừ khi user xác nhận rõ ràng:**
 Cache nằm tại `benchmark/web3bugs/agent-redesign/<contest_id>/hist_inv_cache.json`.
 Cache này lưu kết quả LLM query cho từng function — deterministic, dùng lại được giữa các runs cùng contest.

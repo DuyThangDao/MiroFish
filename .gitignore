@@ -11,6 +11,7 @@ vertex-ai-1.json
 vertex-ai-2.json
 vertex-ai-3.json
 vertex-ai-4.json
+vertex-ai-5.json
 .env.local
 .env.*.local
 .env.development
@@ -69,3 +70,4 @@ data/
 
 /benchmark
 /GPTScan
+/scabench

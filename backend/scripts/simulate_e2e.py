@@ -48,15 +48,19 @@ KEY_FILE3  = os.getenv('LLM3_VERTEX_AI_KEY_FILE', '')
 BASE_URL3  = os.getenv('LLM3_BASE_URL', BASE_URL)
 KEY_FILE4  = os.getenv('LLM4_VERTEX_AI_KEY_FILE', '')
 BASE_URL4  = os.getenv('LLM4_BASE_URL', BASE_URL)
+KEY_FILE5  = os.getenv('LLM5_VERTEX_AI_KEY_FILE', '')
+BASE_URL5  = os.getenv('LLM5_BASE_URL', BASE_URL)
 llm = _make_client(KEY_FILE, BASE_URL)
 _extra = []
 if KEY_FILE2: _extra.append(_make_client(KEY_FILE2, BASE_URL2))
 if KEY_FILE3: _extra.append(_make_client(KEY_FILE3, BASE_URL3))
 if KEY_FILE4: _extra.append(_make_client(KEY_FILE4, BASE_URL4))
+if KEY_FILE5: _extra.append(_make_client(KEY_FILE5, BASE_URL5))
 llm_pool = [llm] + _extra
+_pool_idx = {id(c): i for i, c in enumerate(llm_pool)}  # client id → key index for logging
 print(f"[setup] llm_pool = {len(llm_pool)} client(s)")
 
-from app.services.contract_oasis_env import build_round1_prompt
+from app.services.contract_oasis_env import build_round1_prompt, build_t3_prompt
 from app.services.contract_profile_generator import ContractExpertProfileGenerator as Gen
 from app.services.cyber_session_orchestrator import _annotate_source_with_hist_inv, CyberSessionOrchestrator
 from app.services.contract_hist_inv_cache import HistInvCache
@@ -80,8 +84,12 @@ _parser.add_argument('--primary-contract',  default='',     help='Path to primar
 _parser.add_argument('--cache-path',        default='',     help='Override hist_inv_cache.json path')
 _parser.add_argument('--no-inv',   action='store_true',     help='Disable HIST-INV injection (pure self-reasoning)')
 _parser.add_argument('--workers',  type=int, default=1,     help='Global parallel workers across all chunks (default: 1)')
-_parser.add_argument('--dedup',    action='store_true',     help='Run per-chunk dedup after all agents of a chunk complete')
-_parser.add_argument('--out-dir',  default='',              help='Override output directory')
+_parser.add_argument('--dedup',        action='store_true',  help='Run per-chunk dedup after all agents of a chunk complete')
+_parser.add_argument('--out-dir',      default='',           help='Override output directory')
+_parser.add_argument('--single-agent', default='',           help='If set, every chunk runs with exactly this one agent (ablation mode)')
+_parser.add_argument('--rt',            action='store_true',  help='Enable red-team (RT) attacker agents (disabled by default)')
+_parser.add_argument('--max-fns-per-chunk', type=int, default=0, help='Max functions per (domain×contract) chunk; 0=no limit (default: 0)')
+_parser.add_argument('--full-aux',     action='store_true',  help='Include full aux contract source instead of only directly-called functions')
 _args = _parser.parse_args()
 
 CONTEST_ID    = _args.contest_id
@@ -91,6 +99,10 @@ GT_CONTRACTS  = set(_args.gt_contracts)
 NO_INV        = _args.no_inv
 WORKERS       = _args.workers
 DEDUP_ENABLED = _args.dedup
+SINGLE_AGENT  = _args.single_agent.strip() or None
+NO_RT             = not _args.rt
+MAX_FNS_PER_CHUNK = _args.max_fns_per_chunk  # 0 = no limit
+FULL_AUX          = _args.full_aux
 SKIP_DIRS     = {'interfaces', 'test', 'workInProgress', 'flat', 'mocks', 'mock', 'node_modules', 'artifacts'}
 
 _inv_tag     = 'no_inv' if NO_INV else 'with_inv'
@@ -216,11 +228,13 @@ print(f"[INV_MAP] {len(INV_MAP)} functions annotated (no custom slugs)")
 FN_NAME_RULES = [
     (r'\btick\b|range.?fee|fee.?growth|nearest.?tick|sqrt.?ratio|'
      r'seconds.?per|range.?seconds|get.?price.?and',               'clmm_semantic'),
-    (r'\bburn|\bmint|\bswap|flash.?swap|'
+    # LP position lifecycle (mint/burn) — arithmetic + economic + temporal perspectives needed
+    (r'\bburn\b|\bmint\b|add.?liquidity|remove.?liquidity',         'liquidity_mutation'),
+    (r'\bswap|flash.?swap|'
      r'get\w*amount|amount.?for|get.?amounts|'
      r'_update.?position|_update.?fees|_update.?seconds|'
      r'_get.?amounts|_compute.?liquidity|get.?reserves|'
-     r'add.?liquidity|remove.?liquidity|liquidity.?delta|'
+     r'liquidity.?delta|'
      r'\bcalc',                                                      'math_cast'),
     (r'\bclaim\b|reward|reclaim|subscribe|distribute|'
      r'add.?incentive|remove.?incentive|get.?reward|get.?incentive|'
@@ -248,30 +262,50 @@ def match_domain(fn_name: str) -> str:
 DOMAIN_AGENTS = {
     # CLMM tick/fee semantic functions — math-heavy + logic
     'clmm_semantic':  ['quant_analyst',        'invariant_mathematician', 'program_logician',      'state_analyst',
-                       'boundary_analyst',     'formula_fidelity_auditor', 'data_provenance_analyst'],
-    # Arithmetic/computation functions (burn/mint/swap/calc) — math + accounting
+                       'boundary_analyst',     'data_provenance_analyst',
+                       'arithmetic_exploiter'],
+    # LP position lifecycle (mint/burn) — arithmetic + economic + temporal
+    'liquidity_mutation': ['quant_analyst',        'numerical_analyst',      'invariant_mathematician', 'evm_safety_expert',
+                           'token_flow_expert',    'accounting_auditor',     'boundary_analyst',
+                           'data_provenance_analyst', 'overflow_safety_expert', 'entry_point_hardener',
+                           'economic_exploiter',   'temporal_attack_specialist', 'defi_security_researcher',
+                           'arithmetic_exploiter'],
+    # Arithmetic/computation functions (swap/calc/amounts) — math + accounting
     'math_cast':      ['quant_analyst',        'numerical_analyst',      'invariant_mathematician', 'evm_safety_expert',
-                       'token_flow_expert',    'accounting_auditor',
-                       'overflow_safety_expert', 'boundary_analyst',    'state_ordering_expert',
-                       'formula_fidelity_auditor', 'data_provenance_analyst'],
+                       'token_flow_expert',    'accounting_auditor',     'boundary_analyst',
+                       'data_provenance_analyst', 'resource_exhaustion_analyst',
+                       'overflow_safety_expert', 'entry_point_hardener',
+                       'arithmetic_exploiter'],
     # Reward/claim/deposit functions — asset accounting + economic
     'access_reward':  ['token_flow_expert',    'accounting_auditor',     'asset_security_expert',
                        'defi_security_researcher', 'economic_exploiter', 'temporal_attack_specialist',
-                       'authorization_boundary_analyst', 'protocol_state_machine_auditor'],
+                       'authorization_boundary_analyst', 'protocol_state_machine_auditor',
+                       'flash_loan_attacker',  'trusted_insider'],
     # Oracle/economic/flash functions — economic + integration
     'economic':       ['defi_security_researcher', 'economic_exploiter', 'protocol_economist',    'oracle_security_expert',
-                       'temporal_attack_specialist'],
+                       'temporal_attack_specialist',
+                       'flash_loan_attacker',  'timing_manipulator'],
     # Initialize/callback/create functions — state + integration
     'state_ordering': ['program_logician',     'state_analyst',          'execution_tracer',      'integration_auditor',
-                       'state_ordering_expert', 'entry_point_hardener',  'data_provenance_analyst'],
+                       'entry_point_hardener', 'data_provenance_analyst', 'callback_specialist',
+                       'state_hijacker'],
     # Admin/setter functions — access control + state
-    'admin_gov':      ['authorization_expert', 'threat_modeler',         'state_analyst',         'program_logician',
-                       'entry_point_hardener', 'authorization_boundary_analyst', 'protocol_state_machine_auditor'],
+    'admin_gov':      ['threat_modeler',       'state_analyst',          'program_logician',
+                       'entry_point_hardener', 'authorization_boundary_analyst', 'absent_guard_detector',
+                       'protocol_state_machine_auditor',
+                       'trusted_insider'],
     # Fallback — broad coverage across all domains
     'general':        ['program_logician',     'state_analyst',          'execution_tracer',
                        'quant_analyst',        'defi_security_researcher', 'token_flow_expert',
-                       'authorization_expert', 'integration_auditor',   'entry_point_hardener',
-                       'authorization_boundary_analyst', 'protocol_state_machine_auditor'],
+                       'integration_auditor',  'entry_point_hardener',  'authorization_boundary_analyst',
+                       'absent_guard_detector', 'protocol_state_machine_auditor',
+                       'state_hijacker',       'trusted_insider'],
+}
+
+# Agent IDs that produce 'RT' findings (adversarial attacker profiles)
+_RED_TEAM_AGENT_IDS = {
+    'arithmetic_exploiter', 'flash_loan_attacker', 'state_hijacker',
+    'timing_manipulator',   'trusted_insider',
 }
 
 # ─── Modifier inline expansion ────────────────────────────────────────────────
@@ -342,6 +376,11 @@ def extract_contract_header(source: str) -> str:
         depth += opens - closes
     return '\n'.join(result)
 
+def _extract_called_fns(primary_src: str, aux_src: str) -> list:
+    """Return function names defined in aux_src that are directly called in primary_src."""
+    aux_fns = re.findall(r'\bfunction\s+(\w+)\s*[\(\{]', aux_src)
+    return [fn for fn in aux_fns if re.search(rf'\b{re.escape(fn)}\s*\(', primary_src)]
+
 def extract_functions(source: str, fn_names: list) -> str:
     lines = source.split('\n')
     result, i = [], 0
@@ -364,7 +403,7 @@ def extract_functions(source: str, fn_names: list) -> str:
     return '\n'.join(result)
 
 def build_chunk_source(contract_name: str, source: str, fn_names: list,
-                       aux_contracts: list = None) -> str:
+                       aux_contracts: list = None, full_aux: bool = False) -> str:
     modifiers = _extract_modifiers(source)
     header = extract_contract_header(source)
     fns    = extract_functions(source, fn_names)
@@ -378,8 +417,18 @@ def build_chunk_source(contract_name: str, source: str, fn_names: list,
     ]
     if aux_contracts:
         for aux_name, aux_src in aux_contracts:
-            parts.append(f"\n// ─── {aux_name}.sol (auxiliary) ─────────────────────")
-            parts.append(aux_src)
+            if full_aux:
+                parts.append(f"\n// ─── {aux_name}.sol (auxiliary — full source) ─────────")
+                parts.append(aux_src)
+            else:
+                called = _extract_called_fns(fns, aux_src)
+                aux_header = extract_contract_header(aux_src)
+                parts.append(f"\n// ─── {aux_name}.sol (auxiliary — called fns: {called or 'none'}) ─────────")
+                parts.append(aux_header.rstrip())
+                if called:
+                    parts.append("    // ... (other functions omitted)")
+                    parts.append(extract_functions(aux_src, called))
+                parts.append("}")
     return '\n'.join(parts)
 
 # ─── Discover all sol files ───────────────────────────────────────────────────
@@ -512,32 +561,48 @@ def build_chunks(contracts: dict, aux_map: dict) -> list:
         if parents:
             print(f"[Fix E] {cname}: injecting parent source(s): {[p for p,_ in parents]}")
 
-        # Small contract with no cross-contract deps: include full source
-        if not aux and len(src) < 30_000 and not aux_map.get(cname):
-            full_src = f"// ─── {cname}.sol ─────────────────────────────────────────────────\n{src}"
-            for pname, psrc in parents:
-                full_src += f"\n\n// ─── {pname}.sol (parent) ─────────────────────────────────────────\n{psrc}"
+        all_aux = aux + parents
+
+        # Split fns into sub-chunks of at most MAX_FNS_PER_CHUNK (0 = no limit)
+        if MAX_FNS_PER_CHUNK > 0 and len(fns) > MAX_FNS_PER_CHUNK:
+            fn_groups = [fns[i:i + MAX_FNS_PER_CHUNK] for i in range(0, len(fns), MAX_FNS_PER_CHUNK)]
+        else:
+            fn_groups = [fns]
+
+        n_groups = len(fn_groups)
+        for grp_idx, grp_fns in enumerate(fn_groups):
+            sub_label = f" ({grp_idx+1}/{n_groups})" if n_groups > 1 else ""
+
+            # Small contract with no cross-contract deps: include full source (only when single group)
+            if not aux and len(src) < 30_000 and not aux_map.get(cname) and n_groups == 1:
+                full_src = f"// ─── {cname}.sol ─────────────────────────────────────────────────\n{src}"
+                for pname, psrc in parents:
+                    full_src += f"\n\n// ─── {pname}.sol (parent) ─────────────────────────────────────────\n{psrc}"
+                _agents = [SINGLE_AGENT] if SINGLE_AGENT else DOMAIN_AGENTS.get(dom, DOMAIN_AGENTS['general'])
+                chunks.append({
+                    'domain':        dom,
+                    'contract_name': cname,
+                    'source':        full_src,
+                    'fn_names':      grp_fns,
+                    'aux_names':     [(pname, None) for pname, _ in parents],
+                    'agents':        _agents,
+                    'sub_label':     sub_label,
+                })
+                continue
+
+            # Function-extraction mode
+            chunk_source = build_chunk_source(cname, src, grp_fns, all_aux or None, full_aux=FULL_AUX)
+            _agents = [SINGLE_AGENT] if SINGLE_AGENT else DOMAIN_AGENTS.get(dom, DOMAIN_AGENTS['general'])
             chunks.append({
                 'domain':        dom,
                 'contract_name': cname,
-                'source':        full_src,
-                'fn_names':      fns,
-                'aux_names':     [(pname, None) for pname, _ in parents],
-                'agents':        DOMAIN_AGENTS.get(dom, DOMAIN_AGENTS['general']),
+                'source':        chunk_source,
+                'fn_names':      grp_fns,
+                'aux_names':     [(a_name, None) for a_name, _ in all_aux],
+                'agents':        _agents,
+                'sub_label':     sub_label,
             })
-            continue
 
-        # Function-extraction mode: parents go through aux_contracts pipeline
-        all_aux = aux + parents
-        chunk_source = build_chunk_source(cname, src, fns, all_aux or None)
-        chunks.append({
-            'domain':        dom,
-            'contract_name': cname,
-            'source':        chunk_source,
-            'fn_names':      fns,
-            'aux_names':     [(a_name, None) for a_name, _ in all_aux],
-            'agents':        DOMAIN_AGENTS.get(dom, DOMAIN_AGENTS['general']),
-        })
     return chunks
 
 # ─── Profiles (auto-detect primary contract if not specified) ─────────────────
@@ -615,9 +680,14 @@ def llm_call(prompt: str, client=None) -> str:
                 continue
             return _strip(content)
         except Exception as e:
-            if '429' in str(e) or 'rate' in str(e).lower():
-                wait = 30 * (attempt + 1)
-                with _LOCK: print(f"    [rate {wait}s]", flush=True)
+            err_str = str(e).lower()
+            is_rate   = '429' in str(e) or 'rate' in err_str
+            is_conn   = any(k in err_str for k in ('connection', 'timeout', 'connect error', 'read error', 'network'))
+            if is_rate or is_conn:
+                wait = 15 * (attempt + 1) if is_conn else 30 * (attempt + 1)
+                key_idx = _pool_idx.get(id(_client), '?')
+                tag = 'conn' if is_conn else 'rate'
+                with _LOCK: print(f"    [{tag} retry {attempt+1}/5, wait {wait}s key={key_idx}]", flush=True)
                 time.sleep(wait)
             else:
                 raise
@@ -628,6 +698,101 @@ def clean_inv(t1: str) -> str:
     return '\n'.join(lines) or t1[:400]
 
 # ─── T3: Chain-of-thought independent sweep ───────────────────────────────────
+# ─── Red-team attack flow (RT1 → RT2 → RT3) ─────────────────────────────────
+# Thay thế T1→T2→T3 cho attacker agents: mindset là adversary, không phải defender.
+
+_RT1_SURFACE_BLOCK = """\
+=== ATTACK SURFACE INVENTORY ===
+You are {agent_id} ({persona}).
+{system_prompt}
+
+{focus_directive}
+CONTRACT UNDER REVIEW:
+{source}
+
+=== TASK ===
+You are an attacker scanning for entry points — NOT an auditor looking for violations.
+Do NOT ask "what should hold?" Ask "what can I control, and what breaks when I abuse it?"
+
+For each TARGET function, enumerate attack surfaces:
+
+SURFACE [{{function_name}}]:
+  INPUT: <parameter or calldata you control as an external caller>
+  WORST_CASE: <value you would choose to maximize harm — zero, max, your own address, etc.>
+  ASSUMPTION_BROKEN: <what does the developer assume about this input that you can violate?>
+  PRE_STATE: <any on-chain state you can manipulate BEFORE calling this function>
+  CALLBACKS: <any external call inside this function you could intercept or replace>
+
+Be exhaustive. A missed surface here means a missed exploit later.
+If a function has no external-facing attack surface worth noting, write: SURFACE [function]: NONE
+"""
+
+_RT2_EXPLOIT_BLOCK = """\
+=== EXPLOIT CONSTRUCTION ===
+You are {agent_id} ({persona}).
+{system_prompt}
+
+{focus_directive}
+CONTRACT UNDER REVIEW:
+{source}
+
+=== ATTACK SURFACES (from prior scan) ===
+{rt1_surfaces}
+
+=== TASK ===
+For each attack surface above, determine whether it enables a real exploit.
+Target outcomes: theft of tokens/ETH, permanent DoS, privilege escalation,
+state corruption that benefits you at the expense of others.
+
+Discard surfaces that lead nowhere. For surfaces that DO produce an exploit:
+
+FINDING: <title>
+CONTRACT: <name>
+FUNCTION: <name>
+SEVERITY: high | medium | low
+DESCRIPTION: <what the developer assumed; what you do instead; the resulting harm>
+CODE_ANCHOR: <copy the EXACT vulnerable line verbatim from the source — no paraphrasing>
+ATTACK_PATH: <concrete sequence: caller → function(args) → intermediate state → final outcome>
+"""
+
+_RT3_BACKWARD_BLOCK = """\
+=== ADVERSARIAL BACKWARD TRACE ===
+You are {agent_id} ({persona}).
+{system_prompt}
+
+{focus_directive}
+CONTRACT UNDER REVIEW:
+{source}
+
+=== TASK ===
+Independent sweep — do NOT reference any prior findings. Fresh adversarial eyes only.
+
+For each TARGET function: assume you already have a profitable outcome (drained tokens,
+bypassed a check, permanent DoS). Work BACKWARD — what sequence of calls and inputs
+would produce it?
+
+ATTACK_TRACE [{{function_name}}]:
+  GOAL: <profitable outcome you want>
+  PRECONDITION: <state that must exist before your first call>
+  SEQUENCE: <call 1 with inputs → result; call 2 with inputs → result; ...>
+  OUTCOME: <what you gain>
+  FEASIBILITY: EXPLOIT | PARTIAL | INFEASIBLE
+
+After ALL ATTACK_TRACE blocks, write FINDING blocks ONLY for EXPLOIT traces:
+
+FINDING: <title>
+CONTRACT: <name>
+FUNCTION: <name>
+SEVERITY: high | medium | low
+DESCRIPTION: <detailed explanation>
+CODE_ANCHOR: <copy the EXACT vulnerable line verbatim from the source>
+ATTACK_PATH: <how an attacker exploits this>
+
+IMPORTANT — FUNCTION attribution rule:
+If the vulnerable line is inside a private/internal helper called by the traced function,
+set FUNCTION to the helper's name — not the public caller.
+"""
+
 _T3_COT_BLOCK = """\
 === ROUND 1 — PHASE C: CHAIN-OF-THOUGHT VERIFICATION SWEEP ===
 You are {agent_id} ({persona}).
@@ -746,10 +911,16 @@ def run_agent(agent_id: str, ann_source: str, chunk_label: str, agent_idx: int,
     # Resume: nếu file đã có → parse lại, không gọi LLM
     if os.path.exists(out):
         text = open(out).read()
-        t2_m = re.search(r'=== T2 \(standard\) ===\n(.*?)(?====)', text, re.DOTALL)
-        t3_m = re.search(r'=== T3 \(CoT sweep\) ===\n(.*?)$',    text, re.DOTALL)
-        t2_f = _filter_to_chunk_contract(parse_findings(t2_m.group(1) if t2_m else '', contract_name, source='T2'), contract_name, aux_contracts)
-        t3_f = _filter_to_chunk_contract(parse_findings(t3_m.group(1) if t3_m else '', contract_name, source='T3'), contract_name, aux_contracts)
+        if agent_id in _RED_TEAM_AGENT_IDS:
+            r2_m = re.search(r'=== RT2 \(exploit\) ===\n(.*?)(?====)', text, re.DOTALL)
+            r3_m = re.search(r'=== RT3 \(backward trace\) ===\n(.*?)$', text, re.DOTALL)
+            t2_f = _filter_to_chunk_contract(parse_findings(r2_m.group(1) if r2_m else '', contract_name, source='RT'), contract_name, aux_contracts)
+            t3_f = _filter_to_chunk_contract(parse_findings(r3_m.group(1) if r3_m else '', contract_name, source='T3'), contract_name, aux_contracts)
+        else:
+            t2_m = re.search(r'=== T2 \(standard\) ===\n(.*?)(?====)', text, re.DOTALL)
+            t3_m = re.search(r'=== T3 \(CoT sweep\) ===\n(.*?)$',      text, re.DOTALL)
+            t2_f = _filter_to_chunk_contract(parse_findings(t2_m.group(1) if t2_m else '', contract_name, source='T2'), contract_name, aux_contracts)
+            t3_f = _filter_to_chunk_contract(parse_findings(t3_m.group(1) if t3_m else '', contract_name, source='T3'), contract_name, aux_contracts)
         with _LOCK:
             print(f"    [{chunk_label}/{agent_id}] RESUMED  T2={len(t2_f)} T3={len(t3_f)}", flush=True)
         return t2_f, t3_f
@@ -779,41 +950,84 @@ def run_agent(agent_id: str, ann_source: str, chunk_label: str, agent_idx: int,
         f"  3. Attribute each finding to the contract where the bug actually lives."
     )
 
-    # T1: invariant extraction
-    t1_prompt = build_round1_prompt(profile, ann_source, focus_directive=focus_directive, invariant_only=True)
-    t1_resp   = llm_call(t1_prompt, client)
-    t1_clean  = clean_inv(t1_resp)
-    time.sleep(2)
+    if agent_id in _RED_TEAM_AGENT_IDS:
+        # ── Attacker flow: RT1 (surface scan) → RT2 (exploit construction) → RT3 (backward trace) ──
+        # Strip HIST-INV annotations — attackers scan for surfaces independently,
+        # not guided by defender hints.
+        _HIST_INV_RE = re.compile(r'[ \t]*//[ \t]*\[HIST-INV\][^\n]*\n?')
+        rt_source = _HIST_INV_RE.sub('', ann_source)
 
-    # T2: standard finding discovery
-    t2_prompt = build_round1_prompt(profile, ann_source, focus_directive=focus_directive, injected_invariants=t1_clean)
-    t2_resp   = llm_call(t2_prompt, client)
-    t2_findings = _filter_to_chunk_contract(parse_findings(t2_resp, contract_name, source='T2'), contract_name, aux_contracts)
-    time.sleep(2)
+        rt1_prompt = _RT1_SURFACE_BLOCK.format(
+            agent_id=agent_id,
+            persona=profile.persona,
+            system_prompt=profile.system_prompt,
+            focus_directive=focus_directive,
+            source=rt_source,
+        )
+        rt1_resp = llm_call(rt1_prompt, client)
+        time.sleep(2)
 
-    # T3: independent CoT sweep (fresh, no T2 findings injected)
-    t3_prompt = _T3_COT_BLOCK.format(
-        agent_id=agent_id,
-        persona=profile.persona,
-        system_prompt=profile.system_prompt,
-        focus_directive=focus_directive,
-        source=ann_source,
-    )
-    t3_resp     = llm_call(t3_prompt, client)
-    t3_findings = _filter_to_chunk_contract(parse_findings(t3_resp, contract_name, source='T3'), contract_name, aux_contracts)
+        rt2_prompt = _RT2_EXPLOIT_BLOCK.format(
+            agent_id=agent_id,
+            persona=profile.persona,
+            system_prompt=profile.system_prompt,
+            focus_directive=focus_directive,
+            source=rt_source,
+            rt1_surfaces=rt1_resp[:3000],
+        )
+        rt2_resp     = llm_call(rt2_prompt, client)
+        rt2_findings = _filter_to_chunk_contract(parse_findings(rt2_resp, contract_name, source='RT'), contract_name, aux_contracts)
+        time.sleep(2)
 
-    total = time.time() - t0
-    n2, n3 = len(t2_findings), len(t3_findings)
-    with _LOCK:
-        print(f"    [{chunk_label}/{agent_id}] {total:.1f}s  T2={n2} T3={n3} FINDINGs", flush=True)
+        rt3_prompt = _RT3_BACKWARD_BLOCK.format(
+            agent_id=agent_id,
+            persona=profile.persona,
+            system_prompt=profile.system_prompt,
+            focus_directive=focus_directive,
+            source=rt_source,
+        )
+        rt3_resp     = llm_call(rt3_prompt, client)
+        rt3_findings = _filter_to_chunk_contract(parse_findings(rt3_resp, contract_name, source='T3'), contract_name, aux_contracts)
 
-    with open(out, 'w') as f:
-        f.write(f"Chunk: {chunk_label}  Agent: {agent_id}  Time: {total:.1f}s\n\n")
-        f.write(f"{'='*60}\n=== T1 ===\n{t1_resp}\n\n")
-        f.write(f"{'='*60}\n=== T2 (standard) ===\n{t2_resp}\n\n")
-        f.write(f"{'='*60}\n=== T3 (CoT sweep) ===\n{t3_resp}\n")
+        total = time.time() - t0
+        with _LOCK:
+            print(f"    [{chunk_label}/{agent_id}] {total:.1f}s  RT2={len(rt2_findings)} RT3={len(rt3_findings)} FINDINGs", flush=True)
 
-    return t2_findings, t3_findings
+        with open(out, 'w') as f:
+            f.write(f"Chunk: {chunk_label}  Agent: {agent_id}  Time: {total:.1f}s\n\n")
+            f.write(f"{'='*60}\n=== RT1 (attack surfaces) ===\n{rt1_resp}\n\n")
+            f.write(f"{'='*60}\n=== RT2 (exploit) ===\n{rt2_resp}\n\n")
+            f.write(f"{'='*60}\n=== RT3 (backward trace) ===\n{rt3_resp}\n")
+
+        return rt2_findings, rt3_findings
+
+    else:
+        # ── Defender flow: T1 (invariants) → T2 (findings) → T3 (CoT sweep) ──
+        t1_prompt = build_round1_prompt(profile, ann_source, focus_directive=focus_directive, invariant_only=True)
+        t1_resp   = llm_call(t1_prompt, client)
+        t1_clean  = clean_inv(t1_resp)
+        time.sleep(2)
+
+        t2_prompt = build_round1_prompt(profile, ann_source, focus_directive=focus_directive, injected_invariants=t1_clean)
+        t2_resp   = llm_call(t2_prompt, client)
+        t2_findings = _filter_to_chunk_contract(parse_findings(t2_resp, contract_name, source='T2'), contract_name, aux_contracts)
+        time.sleep(2)
+
+        t3_prompt = build_t3_prompt(profile, ann_source, focus_directive=focus_directive)
+        t3_resp     = llm_call(t3_prompt, client)
+        t3_findings = _filter_to_chunk_contract(parse_findings(t3_resp, contract_name, source='T3'), contract_name, aux_contracts)
+
+        total = time.time() - t0
+        with _LOCK:
+            print(f"    [{chunk_label}/{agent_id}] {total:.1f}s  T2={len(t2_findings)} T3={len(t3_findings)} FINDINGs", flush=True)
+
+        with open(out, 'w') as f:
+            f.write(f"Chunk: {chunk_label}  Agent: {agent_id}  Time: {total:.1f}s\n\n")
+            f.write(f"{'='*60}\n=== T1 ===\n{t1_resp}\n\n")
+            f.write(f"{'='*60}\n=== T2 (standard) ===\n{t2_resp}\n\n")
+            f.write(f"{'='*60}\n=== T3 (CoT sweep) ===\n{t3_resp}\n")
+
+        return t2_findings, t3_findings
 
 # ─── Per-chunk state (thread-safe) ────────────────────────────────────────────
 class ChunkState:
@@ -829,14 +1043,32 @@ class ChunkState:
         self.findings   = []
         self.agents_done   = 0
         self.agents_total  = len(agents)
+        self.t_start    = time.time()
         self.raw_path   = os.path.join(OUT_DIR, f"{self.label_flat}_chunk_raw.json")
         self.dedup_path = os.path.join(OUT_DIR, f"{self.label_flat}_chunk_dedup.json")
 
+_TIMING_LOG = os.path.join(OUT_DIR, 'chunk_timings.jsonl')
+
+def _log_chunk_timing(cs: ChunkState, elapsed_s: float):
+    entry = {
+        "chunk":        cs.label,
+        "contract":     cs.cname,
+        "agents":       cs.agents_total,
+        "fns":          len(cs.fn_names),
+        "elapsed_s":    round(elapsed_s, 1),
+        "findings_raw": len(cs.findings),
+    }
+    with _LOCK:
+        with open(_TIMING_LOG, 'a') as fh:
+            fh.write(json.dumps(entry) + '\n')
+
 def _save_chunk_raw(cs: ChunkState):
+    elapsed = time.time() - cs.t_start
     data = {"chunk": cs.label, "findings_count": len(cs.findings), "findings": cs.findings}
     json.dump(data, open(cs.raw_path, 'w'), indent=2, ensure_ascii=False)
+    _log_chunk_timing(cs, elapsed)
     with _LOCK:
-        print(f"  [{cs.label}] → {len(cs.findings)} raw findings → {cs.raw_path}", flush=True)
+        print(f"  [{cs.label}] → {len(cs.findings)} raw findings | {elapsed:.0f}s → {cs.raw_path}", flush=True)
 
 def _run_chunk_dedup(cs: ChunkState):
     deduped = dedup_pipeline(list(cs.findings), FULL_GT_SOURCE)
@@ -863,7 +1095,8 @@ def _agent_task(cs: ChunkState, agent_id: str, agent_idx: int, profiles_map: dic
             _global_executor.submit(_run_chunk_dedup, cs)
 
 def _prepare_chunk_state(chunk: dict) -> ChunkState:
-    label    = f"{chunk['domain']}/{chunk['contract_name']}"
+    sub_label = chunk.get('sub_label', '')
+    label    = f"{chunk['domain']}/{chunk['contract_name']}{sub_label}"
     base_src = chunk['source'] if NO_INV else _annotate_source_with_hist_inv(chunk['source'], INV_MAP)
     cg_contracts = [chunk['contract_name']] + [a for a, _ in chunk.get('aux_names', [])]
     cg_block = _get_call_graph_block(cg_contracts)
@@ -913,22 +1146,30 @@ chunks = build_chunks(contracts, aux_map)
 print(f"\nChunks to simulate ({len(chunks)} total — GT contracts only):")
 for c in chunks:
     aux_str = f" +aux={c['aux_names']}" if c['aux_names'] else ""
-    print(f"  [{c['domain']}] {c['contract_name']}: {c['fn_names']}{aux_str}")
+    sub_str = c.get('sub_label', '')
+    print(f"  [{c['domain']}] {c['contract_name']}{sub_str}: {c['fn_names']}{aux_str}")
 
 t_start = time.time()
 
 # Prepare all chunk states (source annotation, print headers) before submitting tasks
 chunk_states = [_prepare_chunk_state(c) for c in chunks]
 
+# Recalculate agents_total excluding skipped RT agents so is_last triggers correctly
+if NO_RT:
+    for cs in chunk_states:
+        cs.agents_total = sum(1 for a in cs.agents if a not in _RED_TEAM_AGENT_IDS)
+
 # Global executor shared between agent tasks and dedup tasks
 total_tasks = sum(cs.agents_total for cs in chunk_states)
-print(f"\n[exec] {total_tasks} agent tasks across {len(chunk_states)} chunks | workers={WORKERS} | dedup={'on' if DEDUP_ENABLED else 'off'}", flush=True)
+print(f"\n[exec] {total_tasks} agent tasks across {len(chunk_states)} chunks | workers={WORKERS} | dedup={'on' if DEDUP_ENABLED else 'off'} | rt={'off' if NO_RT else 'on'}", flush=True)
 
 _global_executor = ThreadPoolExecutor(max_workers=WORKERS)
 agent_futures = {}
 task_counter = 0
 for cs in chunk_states:
     for idx, agent_id in enumerate(cs.agents):
+        if NO_RT and agent_id in _RED_TEAM_AGENT_IDS:
+            continue
         client = llm_pool[task_counter % len(llm_pool)]
         f = _global_executor.submit(_agent_task, cs, agent_id, idx, profiles_map, client)
         agent_futures[f] = f"{cs.label}/{agent_id}"

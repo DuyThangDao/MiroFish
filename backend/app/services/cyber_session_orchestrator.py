@@ -553,9 +553,51 @@ def _filter_source_to_primary(
     return filtered
 
 
+_HIST_INV_DOMAIN_KEYWORDS: dict = {
+    'arithmetic': [
+        'cast', 'overflow', 'underflow', 'uint128', 'int128', 'uint64', 'uint96',
+        'unchecked', 'unsafe', 'truncat', 'narrowing', 'negat', 'sign flip',
+        'arithmetic', 'downcast', 'precision', 'rounding',
+    ],
+    'boundary': [
+        'boundary', '< vs <=', 'off-by-one', 'exclusive', 'inclusive',
+        'tick range', 'price range', 'comparison', 'strict inequality',
+        'lower tick', 'upper tick', 'range boundary',
+    ],
+    'reserve': [
+        'reserve', 'balance', 'accounting', 'desync', 'not decremented',
+        'principal', 'fee only', 'reserve0', 'reserve1', 'token balance',
+        'liquidity accounting',
+    ],
+    'temporal': [
+        'timing', 'jit', 'flash loan', 'front-run', 'sandwich', 'temporal',
+        'cross-block', 'subscribe', 'claim reward', 'mint-subscribe',
+        'time-weighted', 'seconds per liquidity',
+    ],
+    'reentrancy': [
+        'reentrancy', 'reentrant', 'cei', 'check-effects-interact',
+        'external call', 'callback', 'onerc', 'fallback',
+    ],
+    'access': [
+        'access control', 'onlyowner', 'msg.sender', 'authorization',
+        'permission', 'privilege', 'unauthorized', 'caller check',
+    ],
+}
+
+
+def _classify_hist_inv_domain(inv_text: str) -> str:
+    """Classify a HIST-INV invariant text into a domain tag using keyword matching."""
+    text_lower = inv_text.lower()
+    for domain, keywords in _HIST_INV_DOMAIN_KEYWORDS.items():
+        for kw in keywords:
+            if kw in text_lower:
+                return domain
+    return 'general'
+
+
 def _annotate_source_with_hist_inv(source: str, inv_map: dict) -> str:
     """
-    Inject `// [HIST-INV]: ...` comment directly above each function definition
+    Inject `// [HIST-INV|<domain>]: ...` comment directly above each function definition
     that has a hist_inv entry in inv_map.
 
     inv_map: (contract_name, fn_name) -> hist_inv string
@@ -591,8 +633,9 @@ def _annotate_source_with_hist_inv(source: str, inv_map: dict) -> str:
             if not inv and not current_contract:
                 inv = next((v for (c, f), v in inv_map.items() if f == fn_name), "")
             if inv:
-                prefix1 = f"{indent}// [HIST-INV]: "
-                prefixN = f"{indent}//             "
+                domain_tag = _classify_hist_inv_domain(inv)
+                prefix1 = f"{indent}// [HIST-INV|{domain_tag}]: "
+                prefixN = f"{indent}//" + " " * (len(prefix1) - len(indent) - 2)
                 wrapped = _tw.wrap(
                     inv, width=96,
                     initial_indent=prefix1,
