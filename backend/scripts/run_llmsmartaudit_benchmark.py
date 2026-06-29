@@ -283,13 +283,15 @@ def _process_one(contest_id: str, contract_name: str, contracts_dir: Path,
 
 
 # ── Process one contest ────────────────────────────────────────────────────────
-def process_contest(contest_id: str, workers: int = 4) -> dict:
+def process_contest(contest_id: str, workers: int = 4,
+                    only_contracts: list | None = None) -> dict:
     cfg = CONTEST_CONFIG[contest_id]
+    target_contracts = only_contracts if only_contracts else cfg["gt_contracts"]
     n_keys = len(VERTEX_KEYS)
-    actual_workers = min(workers, len(cfg["gt_contracts"]), n_keys)
+    actual_workers = min(workers, len(target_contracts), n_keys)
     print(f"\n{'='*60}")
     print(f"Contest {contest_id}: {cfg['name']}")
-    print(f"GT contracts: {cfg['gt_contracts']}")
+    print(f"Target contracts: {target_contracts}")
     print(f"Workers: {actual_workers}  Keys: {n_keys}")
     print(f"{'='*60}")
 
@@ -301,12 +303,33 @@ def process_contest(contest_id: str, workers: int = 4) -> dict:
     out_dir = OUT_ROOT / contest_id
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # Load existing findings_all.json to preserve already-completed contracts
+    findings_all_path = out_dir / "findings_all.json"
+    existing = {}
+    if findings_all_path.exists() and only_contracts:
+        try:
+            prev = json.loads(findings_all_path.read_text())
+            for c in prev.get("contracts", []):
+                existing[c["contract_name"]] = c
+        except Exception:
+            pass
+
     all_findings = []
     contract_results = []
 
+    # Include already-completed contracts from existing run
+    if only_contracts and existing:
+        prev_data = json.loads(findings_all_path.read_text()) if findings_all_path.exists() else {}
+        for f in prev_data.get("findings", []):
+            if f.get("contract_name") not in only_contracts:
+                all_findings.append(f)
+        for c in prev_data.get("contracts", []):
+            if c["contract_name"] not in only_contracts:
+                contract_results.append(c)
+
     with ThreadPoolExecutor(max_workers=actual_workers) as ex:
         futures = {}
-        for i, contract_name in enumerate(cfg["gt_contracts"]):
+        for i, contract_name in enumerate(target_contracts):
             key_file, base_url = VERTEX_KEYS[i % n_keys]
             fut = ex.submit(_process_one, contest_id, contract_name,
                             contracts_dir, out_dir, key_file, base_url)
@@ -347,6 +370,8 @@ def main():
     parser.add_argument("--contest-id", help="Single contest (e.g. 104)")
     parser.add_argument("--all", action="store_true", help="All contests")
     parser.add_argument("--workers", type=int, default=4, help="Parallel workers (default 4)")
+    parser.add_argument("--only-contracts", nargs="+", metavar="CONTRACT",
+                        help="Only run these contracts (preserves other contracts in findings_all.json)")
     args = parser.parse_args()
 
     if not args.contest_id and not args.all:
@@ -369,7 +394,8 @@ def main():
         if cid not in CONTEST_CONFIG:
             print(f"Unknown contest_id: {cid}. Available: {sorted(CONTEST_CONFIG)}")
             continue
-        result = process_contest(cid, workers=args.workers)
+        result = process_contest(cid, workers=args.workers,
+                                  only_contracts=args.only_contracts)
         print(f"\nContest {cid} done: {result.get('total_findings', 'ERROR')} findings total")
 
     print("\nAll done.")
