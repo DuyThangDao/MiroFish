@@ -1,41 +1,40 @@
 """
-Run GPTScan on all 9 benchmark contests and filter findings to GT contracts only.
+Run GPTScan on web3bugs benchmark contests with parallel workers.
+Each worker uses a different Vertex AI key (round-robin LLM1–LLM4).
+
+Output: benchmark/web3bugs/gptscan/<contest_id>/
+  findings_<Contract>.json   per-contract result
+  findings_all.json          aggregated
 
 Usage:
     cd /home/thangdd/repos/MiroFish/backend
     source .venv/bin/activate
-    python scripts/run_gptscan_benchmark.py --contest-id 5
-    python scripts/run_gptscan_benchmark.py --all
-
-Output:
-    benchmark/web3bugs/gptscan/<contest_id>/gptscan_findings_filtered.json
-
-Requirements:
-    - LLM5_VERTEX_AI_KEY_FILE and LLM5_BASE_URL must be set in .env (MiroFish root)
-    - GPTScan venv at GPTScan/.venv must be set up
+    python scripts/run_gptscan_benchmark.py --contest-id 35
+    python scripts/run_gptscan_benchmark.py --all --workers 4
 """
 
 import argparse
 import json
 import os
+import shutil
 import subprocess
-import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-WEB3BUGS_ROOT = Path("/home/thangdd/repos/web3bugs/contracts")
-GPTSCAN_SRC = REPO_ROOT / "GPTScan/src"
-GPTSCAN_PYTHON = REPO_ROOT / "GPTScan/.venv/bin/python"
-OUT_ROOT = REPO_ROOT / "benchmark/web3bugs/gptscan"
+REPO_ROOT      = Path(__file__).resolve().parents[2]
+GPTSCAN_ROOT   = REPO_ROOT / "GPTScan/src"
+VENV_PYTHON    = REPO_ROOT / "backend/.venv/bin/python"
 BENCHMARK_JSON = REPO_ROOT / "benchmark/benchmark_contests.json"
+OUT_ROOT       = REPO_ROOT / "benchmark/web3bugs/gptscan"
 
-# Load .env from repo root
-def load_env(env_path: Path) -> dict:
+
+# ── Load .env ─────────────────────────────────────────────────────────────────
+def _load_env(path: Path) -> dict:
     env = {}
-    if not env_path.exists():
+    if not path.exists():
         return env
-    for line in env_path.read_text().splitlines():
+    for line in path.read_text().splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
@@ -43,218 +42,149 @@ def load_env(env_path: Path) -> dict:
         env[k.strip()] = v.strip()
     return env
 
-ENV_VARS = load_env(REPO_ROOT / ".env")
+_ENV = _load_env(REPO_ROOT / ".env")
 
-# Load contest config from benchmark_contests.json (single source of truth)
-def _load_contest_config() -> dict:
-    data = json.loads(BENCHMARK_JSON.read_text())
-    configs = {}
-    for entry in data["contests"]:
-        cid = str(entry["contest_id"])
-        configs[cid] = {
-            "name": entry.get("name", f"Contest {cid}"),
-            "contracts_dir": Path(entry["contracts_dir"]),
-            "gt_contracts": entry["gt_contracts"],
-        }
-    return configs
+# Round-robin across LLM1–LLM4 keys
+# LLM1 uses LLM_VERTEX_AI_KEY_FILE / LLM_BASE_URL
+# LLM2–4 use LLM{N}_VERTEX_AI_KEY_FILE / LLM{N}_BASE_URL
+_KEY_SLOTS = [
+    ("LLM_VERTEX_AI_KEY_FILE",  "LLM_BASE_URL"),
+    ("LLM2_VERTEX_AI_KEY_FILE", "LLM2_BASE_URL"),
+    ("LLM3_VERTEX_AI_KEY_FILE", "LLM3_BASE_URL"),
+    ("LLM4_VERTEX_AI_KEY_FILE", "LLM4_BASE_URL"),
+]
 
-CONTEST_CONFIG = _load_contest_config()
-
-
-def build_env(base_env: dict) -> dict:
-    """Build subprocess env: inherit current env + LLM5 vertex vars from .env."""
-    env = os.environ.copy()
-    for key in ("LLM5_VERTEX_AI_KEY_FILE", "LLM5_BASE_URL"):
-        if key in base_env:
-            env[key] = base_env[key]
-    return env
+VERTEX_KEYS: list = []
+for kf_var, bu_var in _KEY_SLOTS:
+    kf = _ENV.get(kf_var)
+    bu = _ENV.get(bu_var) or _ENV.get("LLM_BASE_URL")
+    if kf and bu:
+        VERTEX_KEYS.append((kf, bu))
 
 
-def extract_contract_name(file_path: str) -> str:
-    """Extract contract name from file path: /abs/path/Vault.sol -> Vault"""
-    return Path(file_path).stem
+# ── Per-file runner ────────────────────────────────────────────────────────────
+def _run_one(contract_name: str, sol_file: Path, out_dir: Path, key_file: str, base_url: str) -> dict:
+    output_file = out_dir / f"findings_{contract_name}.json"
+    log_file    = out_dir / f"{contract_name}.log"
+
+    with tempfile.TemporaryDirectory(prefix=f"gptscan_{contract_name}_") as tmpdir:
+        shutil.copy(sol_file, tmpdir)
+
+        env = os.environ.copy()
+        env["PYTHONPATH"]         = str(GPTSCAN_ROOT)
+        env["VERTEX_AI_KEY_FILE"] = key_file
+        env["VERTEX_BASE_URL"]    = base_url
+
+        cmd = [
+            str(VENV_PYTHON), str(GPTSCAN_ROOT / "main.py"),
+            "-s", tmpdir,
+            "-o", str(output_file),
+        ]
+
+        try:
+            with open(log_file, "w") as lf:
+                result = subprocess.run(
+                    cmd, env=env, stdout=lf, stderr=subprocess.STDOUT,
+                    cwd=str(GPTSCAN_ROOT), timeout=900,
+                )
+            if output_file.exists():
+                data = json.loads(output_file.read_text())
+                n = len(data.get("results", []))
+                print(f"  [done] {contract_name}: {n} findings (key={Path(key_file).stem})")
+                return {"contract": contract_name, "status": "ok", "findings": data.get("results", []), "raw": data}
+            else:
+                print(f"  [warn] {contract_name}: no output (rc={result.returncode})")
+                return {"contract": contract_name, "status": "no_output", "findings": []}
+        except subprocess.TimeoutExpired:
+            print(f"  [timeout] {contract_name}")
+            return {"contract": contract_name, "status": "timeout", "findings": []}
+        except Exception as e:
+            print(f"  [error] {contract_name}: {e}")
+            return {"contract": contract_name, "status": "error", "error": str(e), "findings": []}
 
 
-def normalize_findings(raw_json: dict, gt_contracts: list, contracts_dir: Path) -> list:
-    """
-    Filter GPTScan results to GT contracts only and normalize format.
+# ── Contest runner ─────────────────────────────────────────────────────────────
+def process_contest(contest_id: str, workers: int = 4) -> list:
+    contests = json.loads(BENCHMARK_JSON.read_text())["contests"]
+    entry = next((x for x in contests if str(x["contest_id"]) == contest_id), None)
+    if not entry:
+        raise ValueError(f"Contest {contest_id} not found in benchmark_contests.json")
 
-    Each result entry:
-      {
-        "code": "rule-name",
-        "title": "...",
-        "contract_name": "Vault",
-        "function_a_file": "/abs/path/Vault.sol",
-        "function_a_start": 42,
-        "function_a_end": 58,
-        "function_b_file": null or "/abs/path/...",
-        "function_b_start": null or N,
-        "function_b_end": null or N,
-        "description": "...",
-      }
-    """
-    gt_lower = {c.lower() for c in gt_contracts}
-    results = []
-
-    for item in raw_json.get("results", []):
-        affected = item.get("affectedFiles", [])
-        if not affected:
-            continue
-
-        file_a = affected[0].get("filePath", "")
-        contract_a = extract_contract_name(file_a)
-
-        # Filter: primary contract must be in GT contracts
-        if contract_a.lower() not in gt_lower:
-            continue
-
-        entry = {
-            "code": item.get("code", ""),
-            "title": item.get("title", ""),
-            "description": item.get("description", ""),
-            "contract_name": contract_a,
-            "function_a_file": file_a,
-            "function_a_start": affected[0].get("range", {}).get("start", {}).get("line"),
-            "function_a_end": affected[0].get("range", {}).get("end", {}).get("line"),
-            "function_b_file": None,
-            "function_b_start": None,
-            "function_b_end": None,
-            "function_b_contract": None,
-        }
-
-        if len(affected) > 1:
-            file_b = affected[1].get("filePath", "")
-            entry["function_b_file"] = file_b
-            entry["function_b_contract"] = extract_contract_name(file_b)
-            entry["function_b_start"] = affected[1].get("range", {}).get("start", {}).get("line")
-            entry["function_b_end"] = affected[1].get("range", {}).get("end", {}).get("line")
-
-        results.append(entry)
-
-    return results
-
-
-def run_gptscan(contracts_dir: Path, out_json: Path, env: dict, log_file: Path = None) -> bool:
-    """Run GPTScan as subprocess from GPTScan/src directory."""
-    cmd = [
-        str(GPTSCAN_PYTHON), "main.py",
-        "-s", str(contracts_dir),
-        "-o", str(out_json),
-        "-k", "dummy",   # ignored; Vertex AI uses env var auth
-    ]
-    print(f"  Running: {' '.join(cmd)}")
-    print(f"  CWD: {GPTSCAN_SRC}")
-    print(f"  VERTEX_KEY: {env.get('LLM5_VERTEX_AI_KEY_FILE', '(not set)')}")
-    if log_file:
-        print(f"  Console log: {log_file}")
-
-    # Stream output to log file (Rich console output is visible in real-time)
-    fout = open(log_file, "w") if log_file else subprocess.DEVNULL
-    try:
-        result = subprocess.run(
-            cmd,
-            cwd=str(GPTSCAN_SRC),
-            env=env,
-            stdout=fout,
-            stderr=fout,
-            timeout=7200,  # 2h max per contest
-        )
-    finally:
-        if log_file:
-            fout.close()
-
-    if result.returncode != 0:
-        print(f"  ERROR: GPTScan exited {result.returncode}")
-        return False
-
-    if not out_json.exists():
-        print(f"  ERROR: output file not created")
-        return False
-
-    return True
-
-
-def process_contest(contest_id: str) -> dict:
-    cfg = CONTEST_CONFIG[contest_id]
-    print(f"\n{'='*60}")
-    print(f"Contest {contest_id}: {cfg['name']}")
-    print(f"{'='*60}")
-
-    contracts_dir = cfg["contracts_dir"]
-    if not contracts_dir.exists():
-        print(f"  ERROR: contracts_dir not found: {contracts_dir}")
-        return {"contest_id": contest_id, "error": "contracts_dir not found"}
-
+    contracts_dir = Path(entry["contracts_dir"])
+    gt_contracts  = entry["gt_contracts"]
     out_dir = OUT_ROOT / contest_id
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    raw_json_path = out_dir / "gptscan_raw.json"
-    log_path = out_dir / "gptscan_console.log"
-    env = build_env(ENV_VARS)
+    contest_root = Path("/home/thangdd/repos/web3bugs/contracts") / contest_id
+    sol_files = []
+    for name in gt_contracts:
+        sol = contracts_dir / f"{name}.sol"
+        if not sol.exists():
+            # Fallback: recursive search in contest root
+            hits = list(contest_root.rglob(f"{name}.sol"))
+            # Prefer non-artifacts paths
+            hits = [h for h in hits if "artifact" not in str(h)] or hits
+            sol = hits[0] if hits else None
+        if sol and sol.exists():
+            sol_files.append((name, sol))
+        else:
+            print(f"  [skip] {name}.sol not found")
 
-    ok = run_gptscan(contracts_dir, raw_json_path, env, log_file=log_path)
-    if not ok:
-        return {"contest_id": contest_id, "error": "gptscan failed"}
+    if not sol_files:
+        raise ValueError(f"No GT .sol files found for contest {contest_id}")
 
-    raw = json.load(open(raw_json_path))
-    total_raw = len(raw.get("results", []))
-    print(f"  Raw findings: {total_raw}")
+    n_keys = len(VERTEX_KEYS)
+    actual_workers = min(workers, len(sol_files))
+    print(f"\nContest {contest_id} ({entry.get('name', '')}): {len(sol_files)} GT files, {actual_workers} workers, {n_keys} keys")
 
-    filtered = normalize_findings(raw, cfg["gt_contracts"], contracts_dir)
-    print(f"  Filtered findings (GT contracts only): {len(filtered)}")
+    all_results = []
+    with ThreadPoolExecutor(max_workers=actual_workers) as ex:
+        futures = {}
+        for i, (name, sol_file) in enumerate(sol_files):
+            key_file, base_url = VERTEX_KEYS[i % n_keys]
+            fut = ex.submit(_run_one, name, sol_file, out_dir, key_file, base_url)
+            futures[fut] = name
 
-    # Count by rule
-    by_rule = {}
-    for f in filtered:
-        by_rule[f["code"]] = by_rule.get(f["code"], 0) + 1
+        for fut in as_completed(futures):
+            all_results.append(fut.result())
 
-    output = {
+    all_findings = []
+    for r in all_results:
+        for f in r.get("findings", []):
+            f["_contract_source"] = r["contract"]
+            all_findings.append(f)
+
+    agg = {
         "contest_id": contest_id,
-        "name": cfg["name"],
-        "gt_contracts": cfg["gt_contracts"],
-        "total_raw": total_raw,
-        "total_findings": len(filtered),
-        "by_rule": by_rule,
-        "findings": filtered,
+        "total_findings": len(all_findings),
+        "per_contract": all_results,
+        "findings": all_findings,
     }
+    agg_file = out_dir / "findings_all.json"
+    agg_file.write_text(json.dumps(agg, indent=2))
+    print(f"  → {len(all_findings)} total findings → {agg_file}")
+    return all_results
 
-    out_file = out_dir / "gptscan_findings_filtered.json"
-    json.dump(output, open(out_file, "w"), indent=2)
-    print(f"  Saved {len(filtered)} findings → {out_file}")
-    return output
 
-
-def main():
+# ── Entry point ────────────────────────────────────────────────────────────────
+if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run GPTScan benchmark on web3bugs contests")
-    parser.add_argument("--contest-id", help="Run single contest (e.g. 5)")
-    parser.add_argument("--all", action="store_true", help="Run all 9 contests")
+    parser.add_argument("--contest-id", help="Single contest ID")
+    parser.add_argument("--all", action="store_true", help="Run all contests")
+    parser.add_argument("--workers", type=int, default=4, help="Parallel workers (default: 4)")
     args = parser.parse_args()
 
-    if not args.contest_id and not args.all:
+    if not VERTEX_KEYS:
+        print("ERROR: No Vertex AI keys in .env (need LLM_VERTEX_AI_KEY_FILE + LLM_BASE_URL)")
+        raise SystemExit(1)
+
+    print(f"Loaded {len(VERTEX_KEYS)} Vertex AI keys: {[Path(k).stem for k, _ in VERTEX_KEYS]}")
+
+    if args.all:
+        contests = json.loads(BENCHMARK_JSON.read_text())["contests"]
+        for entry in contests:
+            process_contest(str(entry["contest_id"]), args.workers)
+    elif args.contest_id:
+        process_contest(args.contest_id, args.workers)
+    else:
         parser.print_help()
-        sys.exit(1)
-
-    if not GPTSCAN_PYTHON.exists():
-        print(f"ERROR: GPTScan venv python not found at {GPTSCAN_PYTHON}")
-        sys.exit(1)
-
-    missing_keys = [k for k in ("LLM5_VERTEX_AI_KEY_FILE", "LLM5_BASE_URL") if k not in ENV_VARS]
-    if missing_keys:
-        print(f"ERROR: missing env vars in .env: {missing_keys}")
-        sys.exit(1)
-
-    target_ids = list(CONTEST_CONFIG.keys()) if args.all else [args.contest_id]
-
-    for cid in target_ids:
-        if cid not in CONTEST_CONFIG:
-            print(f"Unknown contest_id: {cid}. Available: {list(CONTEST_CONFIG.keys())}")
-            continue
-        result = process_contest(cid)
-        total = result.get("total_findings", "ERROR")
-        print(f"\nContest {cid} done: {total} filtered findings")
-
-    print("\nAll done.")
-
-
-if __name__ == "__main__":
-    main()

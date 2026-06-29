@@ -89,7 +89,7 @@ _parser.add_argument('--out-dir',      default='',           help='Override outp
 _parser.add_argument('--single-agent', default='',           help='If set, every chunk runs with exactly this one agent (ablation mode)')
 _parser.add_argument('--rt',            action='store_true',  help='Enable red-team (RT) attacker agents (disabled by default)')
 _parser.add_argument('--max-fns-per-chunk', type=int, default=0, help='Max functions per (domain×contract) chunk; 0=no limit (default: 0)')
-_parser.add_argument('--full-aux',     action='store_true',  help='Include full aux contract source instead of only directly-called functions')
+_parser.add_argument('--no-full-aux',  action='store_true',  help='Use only directly-called functions from aux contracts instead of full source (default: full aux)')
 _args = _parser.parse_args()
 
 CONTEST_ID    = _args.contest_id
@@ -102,7 +102,7 @@ DEDUP_ENABLED = _args.dedup
 SINGLE_AGENT  = _args.single_agent.strip() or None
 NO_RT             = not _args.rt
 MAX_FNS_PER_CHUNK = _args.max_fns_per_chunk  # 0 = no limit
-FULL_AUX          = _args.full_aux
+FULL_AUX          = not _args.no_full_aux
 SKIP_DIRS     = {'interfaces', 'test', 'workInProgress', 'flat', 'mocks', 'mock', 'node_modules', 'artifacts'}
 
 _inv_tag     = 'no_inv' if NO_INV else 'with_inv'
