@@ -1,8 +1,8 @@
 """
 Contract Expert Profile Generator — Smart Contract Audit.
 
-Tạo 20 Tier 1 agent profiles (Epistemic Lens approach).
-  Persona = Identity + Worldview + Core Question (không dùng pattern checklist)
+Generates 20 Tier 1 agent profiles (Epistemic Lens approach).
+  Persona = Identity + Worldview + Core Question (no pattern checklist)
 
 6 domain groups:
   code_security   → appsec_researcher, appsec_hardener, evm_exploiter,
@@ -901,7 +901,7 @@ CONTRACT_ATTACKER_PROFILES: Dict[str, Dict[str, Any]] = {}
 
 @dataclass
 class ContractAgentProfile:
-    """Profile cho 1 agent trong OASIS Contract Audit Room."""
+    """Profile for one agent in the OASIS Contract Audit Room."""
     user_id:       int
     agent_id:      str          # flat agent key, e.g. "appsec_researcher"
     tier:          int          # 1 = domain expert
@@ -938,7 +938,7 @@ class ContractAgentProfile:
 # ─── Generator ────────────────────────────────────────────────────────────────
 
 class ContractExpertProfileGenerator:
-    """Tạo 19 Tier 1 agent profiles (Epistemic Lens) cho Contract Audit Room."""
+    """Generate 19 Tier 1 agent profiles (Epistemic Lens) for the Contract Audit Room."""
 
     def __init__(self, llm_client: Optional[LLMClient] = None):
         self.llm = llm_client or LLMClient()

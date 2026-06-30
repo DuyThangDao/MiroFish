@@ -32,7 +32,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 WEB3BUGS_ROOT = Path("/home/thangdd/repos/web3bugs/contracts")
 LLMSA_ROOT = REPO_ROOT / "LLMSmartAudit"
 WAREHOUSE_DIR = LLMSA_ROOT / "WareHouse"

@@ -3,13 +3,13 @@ HIST cache — persist RAG-derived annotation titles per function.
   File: hist_inv_cache.json
   Key: sha256(contract_name + "::" + fn_name)[:16]
   Value: { fn_name, rag_query, inv_text, rag_title, rag_score, cg_entry, timestamp }
-  Invalidation: khi đổi OP/ST query logic hoặc RAG DB thay đổi.
+  Invalidation: when OP/ST query logic changes or the RAG DB is updated.
 
 HIST-INV stmts cache — persist synthesized invariant statements per function.
-  File: hist_inv_stmts.json  (cùng thư mục với hist_inv_cache.json)
+  File: hist_inv_stmts.json  (same directory as hist_inv_cache.json)
   Key: same sha256 key
   Value: { contract_name, fn_name, hist_inv, timestamp }
-  Invalidation: khi đổi synthesis prompt. Có thể rebuild độc lập từ hist_inv_cache.
+  Invalidation: when the synthesis prompt changes. Can be rebuilt independently from hist_inv_cache.
 """
 
 import hashlib
@@ -105,10 +105,10 @@ class HistInvStmtsCache:
     """
     HIST-INV synthesized statements cache — hist_inv_stmts.json.
 
-    Tách riêng khỏi HistInvCache để:
-    - Tái sử dụng HIST titles cũ khi chỉ cần rebuild stmts
-    - Xóa stmts độc lập khi đổi synthesis prompt mà không mất HIST
-    - Backfill từ hist_inv_cache.json hiện có mà không cần chạy lại KG build
+    Kept separate from HistInvCache so that:
+    - Old HIST titles can be reused when only stmts need rebuilding
+    - Stmts can be deleted independently when the synthesis prompt changes without losing HIST
+    - Can be backfilled from an existing hist_inv_cache.json without re-running the KG build
 
     Same key generation as HistInvCache.entry_key().
     """
@@ -144,7 +144,7 @@ class HistInvStmtsCache:
 
     @staticmethod
     def stmts_path_from_hist_cache_path(hist_cache_path: str) -> str:
-        """Derive stmts file path từ hist_inv_cache.json path."""
+        """Derive the stmts file path from the hist_inv_cache.json path."""
         return str(Path(hist_cache_path).parent / "hist_inv_stmts.json")
 
     def get(self, key: str) -> Optional[str]:

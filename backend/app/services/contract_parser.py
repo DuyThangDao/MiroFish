@@ -1,8 +1,8 @@
 """
-Solidity Contract Parser — Đề tài 10 (Smart Contract Audit).
+Solidity Contract Parser — Smart Contract Audit.
 
-Parse Solidity source code → ContractEntity dùng LLM extraction + regex static scan.
-Strategy: LLM-based extraction (không cần Solidity compiler / toolchain phức tạp).
+Parse Solidity source code → ContractEntity using LLM extraction + regex static scan.
+Strategy: LLM-based extraction (no Solidity compiler or complex toolchain required).
 """
 
 import re
@@ -116,7 +116,7 @@ class ContractParser:
     1. Static regex scan — fast, deterministic, extracts SWC candidates + boolean flags.
     2. LLM-based extraction — for structured ContractFunction + ContractStateVar.
 
-    Không cần Solidity compiler / solc toolchain — LLM đủ tốt để extract structure.
+    No Solidity compiler or solc toolchain needed — LLM is sufficient for structure extraction.
     """
 
     def __init__(self, llm_client: Optional[LLMClient] = None):
@@ -199,9 +199,9 @@ class ContractParser:
 
     def parse_from_text_description(self, description: str) -> ContractEntity:
         """
-        Khi không có source code — chỉ có mô tả bằng text.
-        LLM tạo ContractEntity từ description.
-        Dùng cho testing với dataset không có full source (e.g., SmartBugs text descriptions).
+        When no source code is available — only a text description.
+        LLM creates a ContractEntity from the description.
+        Used for testing with datasets that lack full source (e.g., SmartBugs text descriptions).
         """
         logger.info(f"Parsing from text description ({len(description)} chars)")
 

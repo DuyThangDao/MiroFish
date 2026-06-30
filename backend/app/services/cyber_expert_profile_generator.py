@@ -1,11 +1,11 @@
 """
 Cyber Expert Profile Generator — Multi-Expert Panel (Direction B)
 
-Tạo 18 agent profiles:
-  Tầng 1 (13): Domain Group × Mindset Persona matrix
-  Tầng 2 (5) : Attacker Profile agents
+Generates 18 agent profiles:
+  Tier 1 (13): Domain Group × Mindset Persona matrix
+  Tier 2 (5) : Attacker Profile agents
 
-Profiles được inject vào OASIS Security Review Room.
+Profiles are injected into the OASIS Security Review Room.
 """
 
 import json
@@ -230,8 +230,8 @@ ATTACKER_PROFILES: Dict[str, Dict[str, Any]] = {
 @dataclass
 class CyberAgentProfile:
     """
-    Profile cho 1 agent trong OASIS Security Review Room.
-    Compatible với OasisAgentProfile format.
+    Profile for one agent in the OASIS Security Review Room.
+    Compatible with the OasisAgentProfile format.
     """
     user_id: int
     agent_id: str          # unique string: "net_offensive", "apt"
@@ -239,16 +239,16 @@ class CyberAgentProfile:
     domain_group: str      # "network_security" | "appsec" | ... | "attacker"
     persona: str           # "offensive" | "apt" | "insider_threat" | ...
     display_name: str      # "Network Security — Offensive"
-    system_prompt: str     # full system prompt inject vào OASIS
-    bio: str               # short bio cho OASIS profile
-    ttp_focus: List[str]   # TTP IDs agent này biết nhiều nhất
-    tools_known: List[str] # security tools agent này quen thuộc
+    system_prompt: str     # full system prompt injected into OASIS
+    bio: str               # short bio for the OASIS profile
+    ttp_focus: List[str]   # TTP IDs this agent knows best
+    tools_known: List[str] # security tools this agent is familiar with
     # metadata
-    motivation: Optional[str] = None   # chỉ cho Tier 2
-    skill_level: Optional[str] = None  # chỉ cho Tier 2
+    motivation: Optional[str] = None   # Tier 2 only
+    skill_level: Optional[str] = None  # Tier 2 only
 
     def to_oasis_format(self) -> Dict[str, Any]:
-        """Convert sang format tương thích OASIS (Reddit/Twitter style)."""
+        """Convert to OASIS-compatible format (Reddit/Twitter style)."""
         return {
             "user_id": self.user_id,
             "username": self.agent_id,
@@ -274,7 +274,7 @@ class CyberAgentProfile:
 
 class CyberExpertProfileGenerator:
     """
-    Tạo 18 agent profiles cho Multi-Expert Panel.
+    Generate 18 agent profiles for the Multi-Expert Panel.
     Tier 1: Domain Expert Matrix (13 agents)
     Tier 2: Attacker Profiles (5 agents)
     """
@@ -289,11 +289,11 @@ class CyberExpertProfileGenerator:
         graph_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        Tạo toàn bộ 18 agent profiles.
+        Generate all 18 agent profiles.
 
         Args:
-            network_summary: mô tả ngắn về hạ tầng mạng (inject vào system prompt)
-            graph_id: Zep graph ID để agent có thể tham chiếu
+            network_summary: short description of the network infrastructure (injected into system prompt)
+            graph_id: Zep graph ID for agents to reference
 
         Returns:
             {
@@ -370,7 +370,7 @@ class CyberExpertProfileGenerator:
         self, network_summary: str, graph_id: Optional[str]
     ) -> List[CyberAgentProfile]:
         profiles = []
-        user_id = 100  # Tier 2 bắt đầu từ 100 để không trùng với Tier 1
+        user_id = 100  # Tier 2 starts at 100 to avoid collision with Tier 1
         for profile_key, profile_cfg in ATTACKER_PROFILES.items():
             agent_id = f"attacker_{profile_key}"
             system_prompt = self._build_attacker_system_prompt(

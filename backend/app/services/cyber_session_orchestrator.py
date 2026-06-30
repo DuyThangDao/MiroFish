@@ -1,13 +1,13 @@
 """
 Cyber Session Orchestrator — Multi-Expert Panel (Direction B)
 
-Điều phối 3-phase OASIS session:
-  Phase A (rounds 1–3): Intra-group — domain experts thảo luận nội bộ
+Orchestrates the 3-phase OASIS session:
+  Phase A (rounds 1–3): Intra-group — domain experts discuss internally
   Phase B (rounds 4–7): Cross-group — domain experts challenge nhau
-  Phase C (rounds 8–10): Attacker — 5 attacker profiles phản biện
+  Phase C (rounds 8–10): Attacker — 5 attacker profiles challenge findings
 
-Mỗi round: gọi LLM cho từng agent active → parse findings → lưu trạng thái
-Không dùng OASIS subprocess (tương thích với môi trường không có OASIS cài sẵn).
+Each round: call LLM for each active agent → parse findings → persist state
+Does not use OASIS subprocess (compatible with environments without OASIS installed).
 """
 
 import os
@@ -109,7 +109,7 @@ _FIELD_RE = _re_rag.compile(
 _SCORE_INJECT_THRESHOLD     = 0.68
 _SCORE_SHOW_THRESHOLD       = 0.65
 _SCORE_INJECT_THRESHOLD_INV = 0.65  # lowered: 0.70 was blocking ~60% of relevant patterns (range 0.576–0.737)
-_MAX_RAG_INJECT_PER_AGENT   = 4     # raised: after FIX-1/2 loại noise, không còn distractor effect
+_MAX_RAG_INJECT_PER_AGENT   = 4     # raised: after FIX-1/2 eliminated noise, no longer causes distractor effect
 _inv_cache: dict[str, tuple] = {}   # key → (score, hint_block); session-level semantic dedup
 _inv_cache_lock = threading.Lock()
 
@@ -189,10 +189,10 @@ def build_rag_query(title: str, description: str) -> str:
 
 
 def _normalize_inv_key(inv: str, target_contracts: list[str]) -> str:
-    """Cache key cho INV semantic dedup.
+    """Cache key for INV semantic dedup.
 
-    Dùng build_rag_query để strip fn sigs, CamelCase, dotted refs trước khi lấy 8 words đầu.
-    Đảm bảo 2 INVs cùng concept (khác word order) map về cùng key.
+    Uses build_rag_query to strip fn sigs, CamelCase, and dotted refs before taking the first 8 words.
+    Ensures two INVs with the same concept (different word order) map to the same key.
     """
     inv_lower = inv.lower()
     matched_contract = next(
@@ -211,9 +211,9 @@ def _extract_independent_targets(network_summary: str, primary: str) -> list[str
 
 
 def _extract_callee_coverage_block(network_summary: str) -> str:
-    """Parse CALL GRAPH từ network_summary → INTERNAL FUNCTION TARGETS block.
+    """Parse the CALL GRAPH section from network_summary → INTERNAL FUNCTION TARGETS block.
 
-    For per-contract CALL GRAPH format (với [ContractName] headers), preserves
+    For per-contract CALL GRAPH format (with [ContractName] headers), preserves
     contract attribution in output. For flat format (single contract), uses
     existing behavior. External calls ([EXTERNAL:]) are stripped from callee lists.
     """
@@ -286,7 +286,7 @@ def _build_invariant_rag_hints(invariant_text: str, agent_id: str,
     retriever = _get_rag_retriever()
     candidates = []  # (top_score, hint_block_str) — collect all, sort later
     for i, inv in enumerate(invariants):
-        # M1: positive filter — skip invariants không liên quan đến target contracts
+        # M1: positive filter — skip invariants not related to target contracts
         if target_contracts:
             inv_lower = inv.lower()
             if not any(c.lower() in inv_lower for c in target_contracts):
@@ -294,7 +294,7 @@ def _build_invariant_rag_hints(invariant_text: str, agent_id: str,
                     f"[RAG] agent={agent_id} inv={i+1} → skip (not about primary target)"
                 )
                 continue
-        # FIX-3: semantic dedup — reuse cache nếu cùng concept đã được query trong session này
+        # FIX-3: semantic dedup — reuse cache if the same concept was already queried this session
         cache_key = _normalize_inv_key(inv, target_contracts or [])
         with _inv_cache_lock:
             if cache_key in _inv_cache:
@@ -327,7 +327,7 @@ def _build_invariant_rag_hints(invariant_text: str, agent_id: str,
         with _inv_cache_lock:
             _inv_cache[cache_key] = (top_score, "\n".join(block))
         candidates.append((top_score, "\n".join(block)))
-    # Inject top-N by score — giữ highest-confidence hints, bỏ borderline
+    # Inject top-N by score — keep highest-confidence hints, drop borderline ones
     candidates.sort(key=lambda x: x[0], reverse=True)
     hints = [b for _, b in candidates[:_MAX_RAG_INJECT_PER_AGENT]]
     return "\n\n".join(hints), len(hints)
@@ -357,7 +357,7 @@ def _build_code_similarity_rag_hints(
 ) -> tuple[str, int]:
     """
     RAG track cho code_similarity_auditor.
-    Query dựa trên FUNC blocks từ Turn 1 mechanics analysis (không phải INV statements).
+    Query based on FUNC blocks from Turn 1 mechanics analysis (not INV statements).
     """
     retriever = _get_rag_retriever()
 
@@ -404,7 +404,7 @@ def _build_code_similarity_rag_hints(
     hints: list[str] = []
     rag_calls = 0
 
-    for block_text in func_blocks[:3]:  # cap: 3 functions tối đa
+    for block_text in func_blocks[:3]:  # cap at 3 functions
         text = block_text.strip()
         if len(text) < 40:
             continue
@@ -468,10 +468,10 @@ _MULTI_TARGET_WARN_RE = _re_rag.compile(
 
 def _rewrite_header_for_scope(header: str, primary_contract: str) -> str:
     """
-    Thay thế multi-target warning block + tất cả dòng TARGET N trong header
-    bằng scope declaration cho primary_contract.
+    Replace the multi-target warning block and all TARGET N lines in the header
+    with a scope declaration for primary_contract.
 
-    Nếu header không có TARGET declarations → trả về nguyên vẹn.
+    If the header has no TARGET declarations, return it unchanged.
     """
     if not _TARGET_LINE_RE.search(header):
         return header
@@ -494,16 +494,16 @@ def _filter_source_to_primary(
     exclude_peripheral_suffixes: bool = True,
 ) -> str:
     """
-    Lọc network_summary để chỉ giữ lại source của primary contract
-    và các math library dependencies. Loại bỏ các non-primary target contracts.
+    Filter network_summary to retain only the source of the primary contract
+    and math library dependencies. Removes non-primary target contracts.
 
-    Logic hoàn toàn generic — không hardcode tên contract:
-    1. Đọc danh sách tất cả TARGETs từ header của network_summary
-    2. Non-primary targets = tất cả TARGETs trừ primary_contract
-    3. Exclude file sections có tên khớp với non-primary target
+    Fully generic logic — no hardcoded contract names:
+    1. Read the list of all TARGETs from the network_summary header
+    2. Non-primary targets = all TARGETs except primary_contract
+    3. Exclude file sections whose name matches a non-primary target
     4. Optionally exclude peripheral "Related contracts" theo suffix (Manager, Helper)
-    5. Giữ lại tất cả sections còn lại (primary + math libs)
-    6. Rewrite header để chỉ declare primary target (tránh hallucination)
+    5. Retain all remaining sections (primary + math libs)
+    6. Rewrite header to declare only the primary target (prevents hallucination)
     """
     _PERIPHERAL_SUFFIXES = ("manager", "helper")
 
@@ -839,8 +839,8 @@ _rate_limiter = _RateLimiter()
 
 class CyberSessionOrchestrator:
     """
-    Orchestrate toàn bộ 3-phase vulnerability analysis session.
-    Dùng LLM trực tiếp thay vì OASIS subprocess (portable hơn).
+    Orchestrate a full 3-phase vulnerability analysis session.
+    Uses LLM directly instead of an OASIS subprocess (more portable).
     """
 
     def __init__(
@@ -863,7 +863,7 @@ class CyberSessionOrchestrator:
             logger.info("LLMClientPool: 2 Vertex AI accounts active, pool_size=2")
         else:
             self.llm = LLMClient()
-        # boost_llm dùng cho expensive operations (Phase C attacker reasoning)
+        # boost_llm used for expensive operations (Phase C attacker reasoning)
         self.boost_llm = boost_llm_client or self._try_build_boost_client()
         self.env_builder = CyberOasisEnvBuilder()
         self.task_manager = TaskManager()
@@ -879,8 +879,8 @@ class CyberSessionOrchestrator:
         manifest: Optional[Dict[str, Any]] = None,
     ) -> str:
         """
-        Khởi chạy session trong background thread.
-        Returns task_id để frontend poll.
+        Start session in a background thread.
+        Returns task_id for the frontend to poll.
 
         Args:
             mode: "network_security" (default) | "contract_audit"
@@ -908,9 +908,9 @@ class CyberSessionOrchestrator:
 
     def build_network_context_from_zep(self, graph_id: str) -> str:
         """
-        Query Zep KG → tóm tắt hạ tầng để inject vào agent prompts.
-        Trả về text mô tả: hosts, zones, CVEs, security controls, critical assets.
-        Dùng thay cho việc caller phải tự build network_summary.
+        Query Zep KG → summarize infrastructure for injection into agent prompts.
+        Returns descriptive text: hosts, zones, CVEs, security controls, critical assets.
+        Use instead of having the caller build network_summary themselves.
         """
         try:
             from ..utils.zep_paging import fetch_all_nodes, fetch_all_edges
@@ -984,8 +984,8 @@ class CyberSessionOrchestrator:
 
     def build_contract_context_from_zep(self, graph_id: str) -> str:
         """
-        Query Zep KG → tóm tắt contract entity để inject vào agent prompts.
-        Dùng ContractKGBuilder.build_context_summary() nếu có, fallback về Zep raw query.
+        Query Zep KG → summarize contract entity for injection into agent prompts.
+        Uses ContractKGBuilder.build_context_summary() if available, falls back to raw Zep query.
         """
         try:
             from .contract_kg_builder import ContractKGBuilder
@@ -1011,7 +1011,7 @@ class CyberSessionOrchestrator:
 
     @staticmethod
     def load_session_state(session_id: str) -> Optional[Dict[str, Any]]:
-        """Load persisted session state. Returns None nếu không tìm thấy."""
+        """Load persisted session state. Returns None if not found."""
         path = os.path.join(
             Config.UPLOAD_FOLDER, "cyber_sessions", session_id, "state.json"
         )
@@ -1021,7 +1021,7 @@ class CyberSessionOrchestrator:
             return json.load(f)
 
     def _append_feed_post(self, session_id: str, post: Dict[str, Any]):
-        """Append 1 feed post (agent response) vào feed.jsonl của session."""
+        """Append one feed post (agent response) to the session feed.jsonl."""
         session_dir = self._session_dir(session_id)
         os.makedirs(session_dir, exist_ok=True)
         path = os.path.join(session_dir, "feed.jsonl")
@@ -1030,7 +1030,7 @@ class CyberSessionOrchestrator:
 
     @staticmethod
     def load_feed(session_id: str) -> List[Dict[str, Any]]:
-        """Load feed posts từ session."""
+        """Load feed posts for a session."""
         path = os.path.join(
             Config.UPLOAD_FOLDER, "cyber_sessions", session_id, "feed.jsonl"
         )
@@ -1063,7 +1063,7 @@ class CyberSessionOrchestrator:
         try:
             self.task_manager.update_task(
                 task_id, status=TaskStatus.PROCESSING,
-                progress=5, message="Khởi tạo session..."
+                progress=5, message="Initializing session..."
             )
 
             # Pick env_builder and phase function based on mode
@@ -1125,7 +1125,7 @@ class CyberSessionOrchestrator:
             # RC-3 Two-step Phase C: computed after round 7, injected into Phase C rounds
             phase_c_review_list = ""
 
-            # v1: Chạy 10 rounds
+            # v1: run 10 rounds
             for round_num in range(1, TOTAL_ROUNDS + 1):
                 phase = get_phase(round_num)
                 progress = 5 + int((round_num - 1) / TOTAL_ROUNDS * 85)
@@ -1175,7 +1175,7 @@ class CyberSessionOrchestrator:
 
             session_state.current_phase = "done"
 
-            # P8: Attacker gate — finalize confidence với net vote ratio sau Phase C
+            # P8: Attacker gate — finalize confidence using net vote ratio after Phase C
             if mode == "contract_audit":
                 self._apply_attacker_gate(session_state)
 
@@ -1215,10 +1215,10 @@ class CyberSessionOrchestrator:
         phase_c_review_list: str = "",
     ):
         """
-        Chạy 1 round: dispatcher cho two-stage (Phase A/B contract_audit) hoặc single-stage.
+        Run one round: dispatcher for two-stage (Phase A/B contract_audit) or single-stage.
 
         Two-stage: Stage 1 (free-form analysis + CLAIMs) → Stage 2 (FINDINGs + CHALLENGE/VALIDATE).
-        Single-stage: Phase C attackers và network_security mode dùng luồng cũ.
+        Single-stage: Phase C attackers and network_security mode use the legacy path.
         """
         if env_builder is None:
             env_builder = self.env_builder
@@ -1308,7 +1308,7 @@ class CyberSessionOrchestrator:
         max_workers: int,
     ):
         """
-        Luồng single-stage gốc — dùng cho Phase C, network_security, và TWO_STAGE_ROUNDS=false.
+        Original single-stage path — used for Phase C, network_security, and TWO_STAGE_ROUNDS=false.
         """
         def _call_one(profile):
             """Single agent call — thread-safe (no shared mutable state written here)."""
@@ -1427,9 +1427,9 @@ class CyberSessionOrchestrator:
         max_workers: int,
     ) -> List[Dict[str, Any]]:
         """
-        Stage 1: tất cả tier-1 agents viết free-form analysis song song.
-        max_tokens=STAGE1_MAX_TOKENS (default 400) — ngắn hơn, không parse FINDING.
-        Returns: list of stage1 post dicts (saved to feed.jsonl với stage=1).
+        Stage 1: all tier-1 agents write free-form analysis in parallel.
+        max_tokens=STAGE1_MAX_TOKENS (default 400) — shorter responses, no FINDING parsing.
+        Returns: list of stage1 post dicts (saved to feed.jsonl with stage=1).
         """
         def _call_stage1(profile):
             import time as _time
@@ -1514,8 +1514,8 @@ class CyberSessionOrchestrator:
     ):
         """
         Stage 2: structured findings (FINDING/SEMANTIC_FINDING) + CHALLENGE/VALIDATE.
-        prior_context đã bao gồm feed_context từ Stage 1.
-        Sau parse findings, gọi _parse_challenge_validate() với stage1_claims.
+        prior_context already includes feed_context from Stage 1.
+        After parsing findings, calls _parse_challenge_validate() with stage1_claims.
         """
         # P4: Designated skeptic — 1 offensive tier-1 agent per round
         import random as _random
@@ -1556,7 +1556,7 @@ class CyberSessionOrchestrator:
             )
             return profile, gap_context, response
 
-        # Stage 2 có thể cần delay dài hơn Stage 1 nếu STAGE2_MAX_TOKENS lớn
+        # Stage 2 may need a longer delay than Stage 1 when STAGE2_MAX_TOKENS is large
         submit_delay = float(os.environ.get("LLM_STAGE2_SUBMIT_DELAY_S",
                                             os.environ.get("LLM_SUBMIT_DELAY_S", "1.0")))
         results = []
@@ -1625,8 +1625,8 @@ class CyberSessionOrchestrator:
         max_tokens: Optional[int] = None,
         stage: int = 0,
     ) -> str:
-        """Gọi LLM cho 1 agent và trả về response text."""
-        # Chọn LLM (boost cho attacker Phase C)
+        """Call LLM for one agent and return the response text."""
+        # pick LLM client (boost for Phase C attackers)
         llm = self.boost_llm if (profile.tier == 2 and phase == "C") else self.llm
 
         if mode == "contract_audit":
@@ -1642,11 +1642,11 @@ class CyberSessionOrchestrator:
             user_content = (
                 f"{phase_instruction}\n\n"
                 f"=== DISCUSSION SO FAR ===\n{prior_context}\n\n"
-                "⚠ FORMAT ENFORCEMENT — bắt buộc:\n"
-                "Dòng ĐẦU TIÊN của response phải là tag [ATTACKER_XXX].\n"
-                "KHÔNG được viết bất kỳ câu phân tích nào trước tag đầu tiên.\n"
-                "Mỗi claim trong UNVERIFIED CLAIMS LIST trên phải có 1 block riêng.\n"
-                "Bắt đầu response của bạn ngay bây giờ với [ATTACKER_CONFIRM/DISMISS/EXPLOIT]:"
+                "⚠ FORMAT ENFORCEMENT — mandatory:\n"
+                "The FIRST line of your response must be an [ATTACKER_XXX] tag.\n"
+                "Do NOT write any analysis text before the first tag.\n"
+                "Each claim in the UNVERIFIED CLAIMS LIST above must have its own block.\n"
+                "Begin your response now with [ATTACKER_CONFIRM/DISMISS/EXPLOIT]:"
             )
         else:
             user_content = (
@@ -1752,9 +1752,9 @@ class CyberSessionOrchestrator:
         review_list: str,
     ) -> Optional[Dict[str, Any]]:
         """
-        Fix B: khi parse_from_text() trả None (agent viết narrative không có tag),
-        gọi LLM call ngắn để extract quyết định CONFIRM/DISMISS từ text đó.
-        Trả None nếu extract thất bại.
+        Fix B: when parse_from_text() returns None (agent wrote narrative without a tag),
+        make a short LLM call to extract the CONFIRM/DISMISS decision from that text.
+        Returns None if extraction fails.
         """
         if len(narrative_text.strip()) < 80:
             return None
@@ -1822,7 +1822,7 @@ class CyberSessionOrchestrator:
             ContractAttackerAction = cm["attacker_action"]
             action = ContractAttackerAction.parse_from_text(text)
             if not action:
-                # Fix B: rescue pass — extract từ narrative nếu không có tag
+                # Fix B: rescue pass — extract from narrative when no tag is found
                 action = self._rescue_attacker_action(text, phase_c_review_list)
             if not action:
                 # Still check for SEMANTIC_FINDING in attacker post
@@ -1885,7 +1885,7 @@ class CyberSessionOrchestrator:
         action_type = action["action_type"]
 
         if action_type == AttackerAction.ADD_PATH:
-            # Tạo finding mới do attacker đề xuất
+            # new finding proposed by attacker
             finding_id = f"af_{uuid.uuid4().hex[:8]}"
             af = AttackerFinding(
                 finding_id=finding_id,
@@ -1900,7 +1900,7 @@ class CyberSessionOrchestrator:
             session_state.attacker_findings.append(asdict(af))
             logger.debug(f"Attacker NEW finding [{finding_id}] by {profile.agent_id}")
         else:
-            # Gắn corroboration vào finding đã có (match bằng title keyword)
+            # attach corroboration to an existing finding (matched by title keyword)
             self._attach_corroboration(
                 action=action,
                 attacker_profile=profile.persona,
@@ -1916,8 +1916,8 @@ class CyberSessionOrchestrator:
         mode: str = "network_security",
     ):
         """
-        Parse GAP declarations từ expert agent post và lưu vào session state.
-        Gaps sẽ được route đến domain groups phù hợp trong round tiếp theo.
+        Parse GAP declarations from an expert agent post and save them to session state.
+        Gaps will be routed to the appropriate domain groups in the next round.
         """
         if mode == "contract_audit":
             cm = _get_contract_modules()
@@ -1943,8 +1943,8 @@ class CyberSessionOrchestrator:
 
     def _mark_gaps_as_routed(self, session_state: CyberSessionState):
         """
-        Sau khi tất cả agents trong round đã được xử lý, đánh dấu các pending gaps
-        là đã được inject (routed=True). Chúng sẽ không xuất hiện trong round tiếp theo.
+        After all agents in the round have been processed, mark pending gaps
+        as injected (routed=True). They will not appear in the next round.
         """
         for gap in session_state.gap_registry:
             if not gap.get("routed", False):
@@ -1962,18 +1962,18 @@ class CyberSessionOrchestrator:
         stage1_claims: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         """
-        Build context từ Stage 1 posts của round hiện tại để inject vào Stage 2 prompt.
+        Build context from Stage 1 posts of the current round for injection into the Stage 2 prompt.
 
-        DRY: Khối CLAIM dựng từ cùng list stage1_claims đã parse bởi _parse_stage1_claims().
-        Không re-parse regex ở đây — một nguồn regex duy nhất.
-        Khi implement: truyền [] thay None khi parse trả về list rỗng → hành vi nhất quán.
+        DRY: CLAIM block is built from the same list that _parse_stage1_claims() already parsed.
+        No regex re-parsing here — single source of truth.
+        Implementation note: pass [] instead of None when parse returns an empty list → consistent behavior.
         """
         if not stage1_posts:
             return ""
 
         cap = self._STAGE1_FEED_CHARS_PER_POST
 
-        # Khối 1: summary truncated — cho reasoning context
+        # Block 1: truncated summary — provides reasoning context
         lines = [f"=== STAGE 1 ANALYSIS — Round {round_num} ({len(stage1_posts)} experts) ==="]
         lines.append("(Summaries — truncated for token budget)\n")
         for post in stage1_posts:
@@ -1985,7 +1985,7 @@ class CyberSessionOrchestrator:
             lines.append(f"[{domain}/{persona}]: {content}")
             lines.append("")
 
-        # Khối 2: CLAIM lines — FULL text từ stage1_claims đã parse (không truncate)
+        # Block 2: CLAIM lines — FULL text from parsed stage1_claims (no truncation)
         if stage1_claims:
             lines.append(
                 f"=== STAGE 1 CLAIMS — Round {round_num} "
@@ -2005,9 +2005,9 @@ class CyberSessionOrchestrator:
         stage1_posts: List[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
         """
-        Extract CLAIM: tags từ Stage 1 posts.
-        CLAIMs được dùng làm target cho CHALLENGE/VALIDATE trong Stage 2.
-        Không phải expert_findings — không qua consensus engine.
+        Extract CLAIM: tags from Stage 1 posts.
+        CLAIMs are used as targets for CHALLENGE/VALIDATE in Stage 2.
+        Not expert_findings — not processed by the consensus engine.
         """
         _claim_re = re.compile(r'(?i)^CLAIM\s*:\s*(.+)$', re.MULTILINE)
         claims = []
@@ -2032,14 +2032,14 @@ class CyberSessionOrchestrator:
         stage1_claims: Optional[List[Dict[str, Any]]] = None,
     ):
         """
-        Parse CHALLENGE_FINDING và VALIDATE_FINDING từ Stage 2 response.
+        Parse CHALLENGE_FINDING and VALIDATE_FINDING from a Stage 2 response.
 
         Target priority:
-          1. Stage 1 CLAIMs (same round — giải quyết ordering trap)
-          2. expert_findings từ round trước (đã commit)
+          1. Stage 1 CLAIMs (same round — resolves the ordering trap)
+          2. expert_findings from previous rounds (already committed)
 
-        P1: Sau khi CLAIM match, fuzzy-link sang expert_finding cùng round (Jaccard ≥ 0.15).
-        P6: Guard — bỏ qua VALIDATE nếu CLAIM là phủ định ("not vulnerable", v.v.).
+        P1: After CLAIM match, fuzzy-link to expert_finding from same round (Jaccard ≥ 0.15).
+        P6: Guard — skip VALIDATE if CLAIM is a negation ("not vulnerable", etc.).
         """
         _CHALLENGE_RE = re.compile(
             r'(?i)^CHALLENGE_FINDING\s*:\s*(.+?)$\s*^REASON\s*:\s*(.+?)(?=^[A-Z_]+\s*:|$)',
@@ -2072,7 +2072,7 @@ class CyberSessionOrchestrator:
                         best_j, best_c = j, c
                 if best_j >= 0.30:
                     return ("claim", best_c)
-            # Priority 2: expert_findings từ round cũ (đã commit) — Jaccard ≥ 0.30
+            # Priority 2: expert_findings from previous rounds (committed) — Jaccard ≥ 0.30
             best_f, best_j = None, 0.0
             for f in session_state.expert_findings:
                 if f.get("round_number", 0) < round_num:
@@ -2084,14 +2084,14 @@ class CyberSessionOrchestrator:
             return (None, None)
 
         def _claim_is_negative(claim: dict) -> bool:
-            """P6: True nếu CLAIM phủ định vulnerability — không propagate VALIDATE."""
+            """P6: True if CLAIM negates a vulnerability — do not propagate VALIDATE."""
             text_n = _normalize(claim.get("title", "") + " " + claim.get("content", ""))
             _TITLE_NEG = ("not vulnerable", "no risk", "is safe", "is not exploitable",
                           "cannot be exploited", "miscategorized", "false positive",
                           "not a vulnerability", "no vulnerability")
             if any(s in text_n for s in _TITLE_NEG):
                 return True
-            # Kiểm tra mệnh đề "because <reason>" bắt đầu bằng negation
+            # Check "because <reason>" clause that starts with negation
             idx = text_n.find(" because ")
             if idx != -1:
                 reason = text_n[idx + 9:].strip()
@@ -2102,7 +2102,7 @@ class CyberSessionOrchestrator:
             return False
 
         def _fuzzy_link_claim_to_finding(claim: dict):
-            """P1: Tìm expert_finding cùng round có title overlap cao nhất với CLAIM."""
+            """P1: Find the expert_finding from the same round with the highest title overlap with CLAIM."""
             claim_tokens = set(_normalize(claim.get("title", "")).split())
             if not claim_tokens:
                 return None
@@ -2139,7 +2139,7 @@ class CyberSessionOrchestrator:
                 "round":      round_num,
             }
             target.setdefault("challenged_by", []).append(entry)
-            # Confidence penalty chỉ áp lên expert_findings (claims không có confidence)
+            # Confidence penalty applies only to expert_findings (claims do not carry confidence)
             if kind == "finding" and profile.domain_group != target.get("author_domain"):
                 target["confidence"] = max(0.1, target.get("confidence", 0.5) - 0.10)
             logger.debug(
@@ -2153,14 +2153,14 @@ class CyberSessionOrchestrator:
             if target is None:
                 continue
 
-            # P6: skip nếu CLAIM là phủ định
+            # P6: skip if CLAIM is a negation
             if kind == "claim" and _claim_is_negative(target):
                 logger.debug(
                     f"VALIDATE [{profile.agent_id}] skipped — negative CLAIM '{title_fragment[:60]}'"
                 )
                 continue
 
-            # P1: fuzzy-link CLAIM → expert_finding cùng round
+            # P1: fuzzy-link CLAIM → expert_finding from same round
             if kind == "claim":
                 linked = _fuzzy_link_claim_to_finding(target)
                 if linked is not None:
@@ -2182,10 +2182,10 @@ class CyberSessionOrchestrator:
 
     def _apply_attacker_gate(self, session_state: CyberSessionState, n_attackers: int = 5):
         """
-        P8: Post-Phase-C attacker gate — áp dụng 1 lần sau khi Phase C kết thúc.
+        P8: Post-Phase-C attacker gate — applied once after Phase C ends.
 
-        Dùng last_vote per attacker (dedup) để tính net ratio thay vì cộng dồn
-        từng flat delta. Tránh bias khi cùng profile vote nhiều lần.
+        Uses the last vote per attacker (dedup) to compute the net ratio instead of accumulating
+        each flat delta. Avoids bias when the same profile votes multiple times.
 
         net_ratio = (confirms - dismisses) / n_attackers ∈ [-1, 1]
           ≤ -0.4  → majority DISMISS → confidence × 0.70
@@ -2195,7 +2195,7 @@ class CyberSessionOrchestrator:
             corrs = finding.get("attacker_corroborations", [])
             if not corrs:
                 continue
-            # Lấy vote cuối cùng của mỗi attacker profile
+            # take the last vote from each attacker profile
             last_vote: Dict[str, str] = {}
             for c in corrs:
                 last_vote[c["profile_id"]] = c["action"]
@@ -2222,7 +2222,7 @@ class CyberSessionOrchestrator:
         session_state: CyberSessionState,
     ):
         """
-        Gắn attacker corroboration vào matching expert findings.
+        Attach attacker corroboration to matching expert findings.
 
         RC-3b: per-function matching — [ATTACKER_DISMISS SWC-101 transfer()] only
                applies to findings where BOTH swc_id AND function match.
@@ -2311,8 +2311,8 @@ class CyberSessionOrchestrator:
 
     def _build_prior_context(self, session_state: CyberSessionState, mode: str = "network_security") -> str:
         """
-        Build text summary của các findings đã có để inject vào tiếp theo.
-        Giới hạn độ dài để không overflow context window.
+        Build a text summary of existing findings for injection into subsequent rounds.
+        Length-limited to avoid overflowing the context window.
 
         Includes Published Registry (Solution A for Weakness #4):
         agents see unique titles already reported → instructed to CHALLENGE
@@ -2402,20 +2402,20 @@ class CyberSessionOrchestrator:
     # ─── Helpers ──────────────────────────────────────────────────────────────
 
     def _initial_confidence_for_severity(self, severity: str) -> float:
-        """Initial confidence dựa trên severity từ expert agent."""
+        """Initial confidence derived from severity provided by the expert agent."""
         return {"critical": 0.70, "high": 0.60, "medium": 0.50, "low": 0.40, "info": 0.30}.get(
             severity.lower(), 0.50
         )
 
     def _try_build_boost_client(self):
-        """Thử dùng BOOST LLM config nếu có, fallback về primary LLM.
+        """Try to build the boost LLM client from BOOST config; fall back to primary LLM.
 
-        Mode A — Claude trên Vertex AI:
+        Mode A — Claude on Vertex AI:
           BOOST_VERTEX_CLAUDE_REGION set + BOOST_MODEL_NAME=claude-*
-        Mode B — Gemini Pro trên Vertex AI (cùng endpoint, đổi model):
-          BOOST_MODEL_NAME=google/... (không set BOOST_VERTEX_CLAUDE_REGION)
-          → Dùng LLMClientPool 2 accounts nếu LLM2_* được set
-        Mode C — Anthropic API key riêng:
+        Mode B — Gemini Pro on Vertex AI (same endpoint, different model):
+          BOOST_MODEL_NAME=google/... (BOOST_VERTEX_CLAUDE_REGION not set)
+          → Use LLMClientPool with 2 accounts if LLM2_* is configured
+        Mode C — Separate Anthropic API key:
           BOOST_API_KEY set
         """
         try:
@@ -2427,7 +2427,7 @@ class CyberSessionOrchestrator:
                                or getattr(Config, "LLM_VERTEX_AI_KEY_FILE", None))
 
             if claude_region and boost_model:
-                # Mode A: Claude trên Vertex AI — single client (Claude không có multi-account pool)
+                # Mode A: Claude on Vertex AI — single client (Claude does not support multi-account pool)
                 return LLMClient(
                     model=boost_model,
                     vertex_key_file=vertex_key_file,
@@ -2439,8 +2439,8 @@ class CyberSessionOrchestrator:
                 return LLMClient(api_key=boost_key, base_url=boost_url, model=boost_model)
 
             if boost_model and boost_model != Config.LLM_MODEL_NAME:
-                # Mode B: Vertex AI, đổi model sang Pro
-                # Dùng pool 2 accounts nếu LLM2_* được cấu hình
+                # Mode B: Vertex AI, switch to Pro model
+                # Use 2-account pool if LLM2_* is configured
                 client1 = LLMClient(
                     base_url=boost_url or Config.LLM_BASE_URL,
                     model=boost_model,
@@ -2879,7 +2879,7 @@ class CyberSessionOrchestrator:
 
     @staticmethod
     def _is_valid_reject(vote: dict) -> bool:
-        """REJECT valid chỉ khi COUNTER_TYPE thuộc 4 loại hợp lệ và COUNTER ≥ 20 chars."""
+        """REJECT is valid only when COUNTER_TYPE is one of the 4 valid types and COUNTER is ≥ 20 chars."""
         valid_types = {"PHANTOM", "ACCESS_BLOCKED", "NO_STATE_CHANGE", "NO_IMPACT"}
         counter_type = vote.get("counter_type", "").strip().upper()
         counter      = vote.get("counter", "").strip()
@@ -2950,7 +2950,7 @@ class CyberSessionOrchestrator:
 
         return final
 
-    # ── Sequential Anchor Dedup (Bước 1 static + Bước 2 LLM) ─────────────────
+    # ── Sequential Anchor Dedup (Step 1 static + Step 2 LLM) ──────────────────────
 
     @classmethod
     def _pick_primary(cls, group: list) -> tuple:
@@ -2971,7 +2971,7 @@ class CyberSessionOrchestrator:
     @classmethod
     def _static_anchor_dedup(cls, candidate_pool: dict) -> dict:
         """
-        Bước 1: group by (contract, function, normalize(code_anchor)).
+        Step 1: group by (contract, function, normalize(code_anchor)).
         Same anchor → same bug → merge. No LLM needed.
         """
         from collections import defaultdict as _dd
@@ -3249,7 +3249,7 @@ class CyberSessionOrchestrator:
 
     def _llm_anchor_dedup(self, candidate_pool: dict, source_code: str) -> dict:
         """
-        Bước 2: LLM dedup for functions with ≥2 findings after static dedup.
+        Step 2: LLM dedup for functions with ≥2 findings after static dedup.
         CODE groups by (contract, function) statically; LLM only receives pre-assembled
         groups and outputs MERGE/KEEP_SEPARATE — does not search or filter itself.
         ~11 LLM calls for contest 35, runs in parallel with LLM_DEDUP_WORKERS workers.
@@ -3452,7 +3452,7 @@ class CyberSessionOrchestrator:
         return result_pool
 
     def _run_anchor_dedup(self, candidate_pool: dict, source_code: str) -> dict:
-        """Sequential dedup entry point: Bước 1 (semi-static) → Bước 2 (LLM)."""
+        """Sequential dedup entry point: Step 1 (semi-static) → Step 2 (LLM)."""
         after_static = self._semi_static_anchor_dedup(candidate_pool, source_code)
         after_llm = self._llm_anchor_dedup(after_static, source_code)
         return after_llm
@@ -3484,7 +3484,7 @@ class CyberSessionOrchestrator:
           requires at least one Solidity-specific code marker or a named function
           that survived RC-1 token filtering.
         """
-        # FIX-3: reset session-level dedup cache cho mỗi audit run mới
+        # FIX-3: reset session-level dedup cache for each new audit run
         global _inv_cache
         _inv_cache = {}
         max_workers = int(os.environ.get("LLM_MAX_WORKERS", "1"))
@@ -3545,7 +3545,7 @@ class CyberSessionOrchestrator:
                     )
 
                 # [Phase 2] INV → RAG removed: circular reasoning + semantic mismatch.
-                # HIST-INV build (solodit_op) đã inject knowledge vào source annotations trước R1.
+                # HIST-INV build (solodit_op) already injected knowledge into source annotations before R1.
                 step2_hint = ""
 
                 # Strip think block before injecting into Turn 2 (clean display, save context)

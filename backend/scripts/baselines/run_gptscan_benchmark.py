@@ -22,7 +22,7 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-REPO_ROOT      = Path(__file__).resolve().parents[2]
+REPO_ROOT      = Path(__file__).resolve().parents[3]
 GPTSCAN_ROOT   = REPO_ROOT / "GPTScan/src"
 VENV_PYTHON    = REPO_ROOT / "backend/.venv/bin/python"
 BENCHMARK_JSON = REPO_ROOT / "benchmark/benchmark_contests.json"

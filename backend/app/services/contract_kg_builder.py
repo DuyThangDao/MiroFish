@@ -1,8 +1,8 @@
 """
-Contract Knowledge Graph Builder — Đề tài 10 (Smart Contract Audit).
+Contract Knowledge Graph Builder — Smart Contract Audit.
 
-Build Zep KG từ ContractEntity.
-Thay thế NetworkTopologyBuilder trong Hướng B — reuse GraphBuilderService pattern.
+Build a Zep KG from a ContractEntity.
+Replaces NetworkTopologyBuilder from Direction B — reuses the GraphBuilderService pattern.
 
 KG structure:
   Node types: Contract, Function, StateVar, ExternalDep
@@ -127,13 +127,13 @@ CONTRACT_AUDIT_ONTOLOGY: Dict[str, Any] = {
 
 class ContractKGBuilder:
     """
-    Build Zep KG từ ContractEntity.
-    Thay thế NetworkTopologyBuilder trong Hướng B.
+    Build a Zep KG from a ContractEntity.
+    Replaces NetworkTopologyBuilder from Direction B.
 
     Workflow:
     1. ContractParser.parse_from_source() → ContractEntity
     2. _store_to_zep() — episodic text + structured facts → Zep graph
-    3. build_context_summary() — query Zep → tóm tắt inject vào tất cả agents
+    3. build_context_summary() — query Zep → summary injected into all agents
     """
 
     def __init__(
@@ -173,7 +173,7 @@ class ContractKGBuilder:
 
     def build_from_entity_async(self, entity: ContractEntity, graph_name: str) -> str:
         """
-        Async: từ ContractEntity đã có → build Zep KG (bỏ qua parse step).
+        Async: build Zep KG from an existing ContractEntity (skips the parse step).
         Returns task_id.
         """
         task_id = self.task_manager.create_task(
@@ -188,7 +188,7 @@ class ContractKGBuilder:
         thread.start()
         return task_id
 
-    # ─── Context completeness helpers (Tầng 1 + Tầng 3) ─────────────────────────
+    # ─── Context completeness helpers (Tier 1 + Tier 3) ──────────────────────────
 
     @staticmethod
     @staticmethod
@@ -224,7 +224,7 @@ class ContractKGBuilder:
         source_code: str, func_names: list, max_body_lines: int = 3, max_line_chars: int = 90
     ) -> dict:
         """
-        Tầng 1: extract first N statements from each function body.
+        Tier 1: extract first N statements from each function body.
         Returns {func_name: "stmt1 | stmt2 | stmt3"}.
 
         Agents see actual implementation → can verify safety patterns (SafeMath,
@@ -277,7 +277,7 @@ class ContractKGBuilder:
     @staticmethod
     def _detect_safety_patterns(source_code: str) -> list:
         """
-        Tầng 3: detect safety/protection mechanisms in Solidity source.
+        Tier 3: detect safety/protection mechanisms in Solidity source.
         Returns list of human-readable signal strings for context_summary.
 
         Provides explicit ground-truth context so agents don't need to infer
@@ -586,8 +586,8 @@ class ContractKGBuilder:
         except Exception:
             return ""
 
-    _OP_CAP = 6  # max HIST annotations từ operation track per function
-    _ST_CAP = 4  # max HIST annotations từ structural track per function
+    _OP_CAP = 6  # max HIST annotations from operation track per function
+    _ST_CAP = 4  # max HIST annotations from structural track per function
 
     @staticmethod
     def _generate_operation_queries(fn_name: str, fn_body: str,
@@ -808,17 +808,17 @@ class ContractKGBuilder:
         llm_clients: Optional[List] = None, # preferred: list[LLMClient], 1 per worker
     ) -> str:
         """
-        Build CALL GRAPH với HIST-INV annotations inline.
+        Build CALL GRAPH with inline HIST-INV annotations.
 
-        Với mỗi CG entry:
+        For each CG entry:
           1. LLM generate semantic question query (cached)
           2. Direct fallback: fn_name + ext_markers raw
-          3. Dual query RAG, lấy max score
+          3. Dual query RAG, take max score
           4. score ≥ score_threshold → LLM extract abstract invariant (cached)
           5. Annotate entry: "    ↳ HIST: <invariant>"
 
-        Filter: skip chỉ khi fn_name là trivial exact getter {'get','set','is','has'}
-        VÀ không có external calls. Có ext_markers → luôn process.
+        Filter: skip only when fn_name is a trivial exact getter {'get','set','is','has'}
+        AND has no external calls. If ext_markers present → always process.
         """
         from app.services.contract_hist_inv_cache import HistInvCache as _Cache, HistInvStmtsCache as _StmtsCache
         from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -1195,7 +1195,7 @@ class ContractKGBuilder:
     def build_context_summary(self, entity: ContractEntity) -> str:
         """
         Build a structured text summary of ContractEntity to inject into all agents.
-        Replaces build_attack_surface_context() from Hướng B.
+        Replaces build_attack_surface_context() from Direction B.
 
         Format is designed to be concise and machine-readable for LLM agents.
         """
@@ -1392,7 +1392,7 @@ class ContractKGBuilder:
     def _store_to_zep(self, graph_name: str, entity: ContractEntity,
                       task_id: str = None) -> str:
         """
-        Lưu ContractEntity vào Zep graph.
+        Persist a ContractEntity into a Zep graph.
 
         1. Create graph + set CONTRACT_AUDIT_ONTOLOGY
         2. Add episodic text chunks:

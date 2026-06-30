@@ -1,6 +1,6 @@
 """
-Smart Contract data models cho Multi-Expert Contract Audit Panel (Đề tài 10).
-Tương tự cyber_models.py nhưng thay NetworkAsset → ContractEntity, MITRE → SWC.
+Smart contract data models for the Multi-Expert Contract Audit Panel.
+Mirrors cyber_models.py with NetworkAsset → ContractEntity and MITRE → SWC.
 """
 
 from dataclasses import dataclass, field, asdict
@@ -9,7 +9,7 @@ from enum import Enum
 
 
 class SWCCategory(str, Enum):
-    """Top-level SWC categories — dùng để assign domain expert."""
+    """Top-level SWC categories — used to assign domain expert."""
     REENTRANCY        = "reentrancy"
     ACCESS_CONTROL    = "access_control"
     ARITHMETIC        = "arithmetic"
@@ -52,54 +52,51 @@ class AuditSeverity(str, Enum):
 
 @dataclass
 class ContractFunction:
-    """Một function trong smart contract."""
+    """A function within a smart contract."""
     name:                        str
     visibility:                  str              # FunctionVisibility value
     modifiers:                   List[str]        # ["onlyOwner", "nonReentrant"]
-    has_external_call:           bool             # True nếu gọi external contract/address
-    state_updates:               List[str]        # state vars được modify trong function này
+    has_external_call:           bool             # True if calls external contract/address
+    state_updates:               List[str]        # state vars modified by this function
     external_call_before_state:  bool             # True = reentrancy risk pattern
-    sends_ether:                 bool             # True nếu có .call{value} hoặc .transfer
-    parameters:                  List[str]        # tên parameter
+    sends_ether:                 bool             # True if contains .call{value} or .transfer
+    parameters:                  List[str]        # parameter names
     return_types:                List[str]
-    swc_candidates:              List[str]        # SWC IDs sơ bộ từ static scan
+    swc_candidates:              List[str]        # preliminary SWC IDs from static scan
     source_lines:                Optional[str] = None  # "45-67"
 
 
 @dataclass
 class ContractStateVar:
-    """State variable của smart contract."""
+    """A state variable of a smart contract."""
     name:        str          # "balances"
     var_type:    str          # "mapping(address => uint256)"
     visibility:  str          # FunctionVisibility value
-    is_critical: bool         # True nếu là balance mapping, owner, admin role
-    modified_by: List[str]    # functions nào modify var này (function names)
+    is_critical: bool         # True if balance mapping, owner, or admin role
+    modified_by: List[str]    # functions that modify this var
 
 
 @dataclass
 class ContractEntity:
-    """
-    Toàn bộ thông tin về 1 smart contract.
-    Thay thế NetworkAsset trong Hướng B.
-    """
+    """Complete information for a single smart contract."""
     contract_id:            str                      # "TokenVault"
-    source_code:            str                      # Full Solidity source
+    source_code:            str                      # full Solidity source
     compiler_version:       str                      # "0.8.19"
     contract_type:          str                      # ContractType value
     functions:              List[ContractFunction]
     state_vars:             List[ContractStateVar]
-    external_dependencies:  List[str]                # contracts/interfaces import/call
+    external_dependencies:  List[str]                # contracts/interfaces imported or called
     has_reentrancy_guard:   bool
-    has_access_control:     bool                     # onlyOwner, Role-based
+    has_access_control:     bool                     # onlyOwner, role-based
     has_pausable:           bool
-    uses_oracle:            bool                     # True nếu dùng price oracle
-    uses_flash_loan:        bool                     # True nếu implements flash loan
-    is_upgradeable:         bool                     # Proxy pattern
-    swc_candidates:         List[str]                # Preliminary static findings
-    raw_text:               str = ""                 # Description thêm (nếu có)
+    uses_oracle:            bool                     # True if uses a price oracle
+    uses_flash_loan:        bool                     # True if implements flash loan
+    is_upgradeable:         bool                     # proxy pattern
+    swc_candidates:         List[str]                # preliminary static findings
+    raw_text:               str = ""                 # additional description (if any)
 
     def to_zep_text(self) -> str:
-        """Chuyển thành text để lưu vào Zep episode."""
+        """Serialize to text for storage in a Zep episode."""
         risky_funcs = [
             f.name for f in self.functions
             if f.external_call_before_state or f.sends_ether
@@ -128,7 +125,7 @@ class ContractEntity:
         return "\n".join(lines)
 
     def risk_summary(self) -> Dict[str, Any]:
-        """Tóm tắt risk signals để inject vào agent context."""
+        """Summarize risk signals for injection into agent context."""
         reentrancy_funcs = [
             f.name for f in self.functions if f.external_call_before_state
         ]
@@ -152,29 +149,26 @@ class ContractEntity:
 
 @dataclass
 class AttackerCorroboration:
-    """Phản hồi của 1 attacker profile về 1 contract finding."""
+    """Response from one attacker profile about a contract finding."""
     profile_id:       str    # "flash_loan" | "reentrancy_bot" | "governance_attack" | "mev" | "supply_chain"
     action:           str    # "ATTACKER_CONFIRM" | "ATTACKER_DISMISS" | "ATTACKER_ESCALATE" | "ATTACKER_DOWNGRADE"
     comment:          str
-    exploit_path:     str    # Mô tả cụ thể cách exploit
+    exploit_path:     str    # specific exploit description
     confidence_delta: float  # +0.15 for CONFIRM, -0.20 for DISMISS
 
 
 @dataclass
 class ContractFinding:
-    """
-    Finding từ 1 expert agent trong Phase A hoặc B.
-    Thay thế ExpertFinding trong Hướng B.
-    """
+    """Finding from one expert agent in Phase A or B."""
     finding_id:           str
     author_domain:        str           # "appsec" | "blockchain" | "cryptography" | "defi" | "governance"
     author_persona:       str           # "offensive" | "defensive" | "auditor"
     title:                str
     description:          str
-    affected_functions:   List[str]     # function names bị ảnh hưởng
+    affected_functions:   List[str]     # affected function names
     severity:             str           # AuditSeverity value
     confidence:           float         # 0.0 – 1.0
-    evidence:             List[str]     # trích dẫn từ contract code / KG facts
+    evidence:             List[str]     # citations from contract code / KG facts
     phase:                str           # "A" | "B"
     round_number:         int
 
@@ -197,7 +191,7 @@ class ContractFinding:
 
 @dataclass
 class AttackerContractFinding:
-    """Finding MỚI do attacker profile tạo ra trong Phase C."""
+    """New finding generated by an attacker profile in Phase C."""
     finding_id:       str
     attacker_profile: str     # "flash_loan" | "reentrancy_bot" | ...
     title:            str
@@ -206,7 +200,7 @@ class AttackerContractFinding:
     swc_id:           str
     severity:         str
     base_confidence:  float = 0.60
-    exploit_path:     str = ""         # Chi tiết attack steps
+    exploit_path:     str = ""         # detailed attack steps
     agreed_by:        List[str] = field(default_factory=list)
 
 
@@ -252,11 +246,7 @@ class SemanticFinding:
 
 @dataclass
 class ContractAuditResult:
-    """
-    Vulnerability sau khi qua 3-layer consensus engine.
-    Output cuối để đưa vào ContractAuditReportAgent.
-    Thay thế ConsensusVulnerability.
-    """
+    """Vulnerability after passing through 3-layer consensus engine — final output for ContractAuditReportAgent."""
     vuln_id:               str
     title:                 str
     description:           str
@@ -266,8 +256,8 @@ class ContractAuditResult:
     severity:              str
 
     # 3-layer scores (mirror ConsensusVulnerability)
-    intra_domain_agreement: float       # Layer 1: agreement trong domain (weight 0.30)
-    cross_domain_agreement: float       # Layer 2: validation từ domain khác (weight 0.45)
+    intra_domain_agreement: float       # Layer 1: intra-domain agreement (weight 0.30)
+    cross_domain_agreement: float       # Layer 2: cross-domain validation (weight 0.45)
     attacker_corroboration: float       # Layer 3: attacker profile corroboration (weight 0.25)
     confidence_score:       float       # Final = L1×0.30 + L2×0.45 + L3×0.25
 
@@ -300,19 +290,19 @@ class ContractAuditResult:
 @dataclass
 class ContractGapDeclaration:
     """
-    Khai báo giới hạn tri thức từ 1 expert agent trong contract audit.
-    Cùng cơ chế Delphi GAP từ Hướng B, áp dụng cho contract domain.
+    Knowledge-limit declaration from one expert agent in contract audit.
 
-    Ví dụ: DeFi agent khai báo GAP về cryptography của custom PRNG
-    → routed sang cryptography domain group.
+    Inspired by the Delphi GAP mechanism from Direction B, applied to the contract domain.
+    Example: DeFi agent declares a GAP about a custom PRNG's cryptography
+    → routed to the cryptography domain group.
     """
     gap_id:         str
     author_domain:  str
     author_persona: str
-    analyzed:       str     # function/state_var/contract property được phân tích
-    gap_text:       str     # điều không verify được
+    analyzed:       str     # function/state_var/contract property being analyzed
+    gap_text:       str     # what could not be verified
     round_number:   int
-    routed:         bool = False
+    routed:         bool = False                        # whether already injected into the next round
     routed_to:      List[str] = field(default_factory=list)
 
 
@@ -320,12 +310,9 @@ class ContractGapDeclaration:
 
 @dataclass
 class ContractSessionState:
-    """
-    Trạng thái của 1 phiên audit smart contract.
-    Tương tự CyberSessionState — persist dưới dạng JSON.
-    """
+    """State of one smart contract audit session — persisted as JSON."""
     session_id:       str
-    graph_id:         str           # Zep graph ID chứa contract KG
+    graph_id:         str           # Zep graph ID for the contract knowledge graph
     contract_id:      str           # ContractEntity.contract_id
     current_phase:    str = "idle"  # "idle" | "A" | "B" | "C" | "consensus" | "done"
     current_round:    int = 0
@@ -337,11 +324,11 @@ class ContractSessionState:
     audit_results:       List[Dict[str, Any]] = field(default_factory=list)
     gap_registry:        List[Dict[str, Any]] = field(default_factory=list)
 
-    # Published finding registry — inject vào agent context để giảm duplicates
+    # Published finding registry — injected into agent context to reduce duplicates
     published_finding_titles: List[str] = field(default_factory=list)
 
     agent_config:     Dict[str, Any] = field(default_factory=dict)
-    contract_summary: str = ""      # build_context_summary() từ ContractKGBuilder
+    contract_summary: str = ""      # output of build_context_summary() from ContractKGBuilder
     error:            Optional[str] = None
 
     def phase_label(self) -> str:

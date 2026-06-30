@@ -1,13 +1,13 @@
 """
-Contract Audit OASIS Environment — Đề tài 10 (Smart Contract Audit).
+Contract Audit OASIS Environment — Smart Contract Audit.
 
-Định nghĩa cấu hình OASIS cho Contract Audit Room.
-Tương tự cyber_oasis_env.py — giữ nguyên 3-phase structure,
-đổi action space, finding format, và GAP routing table cho smart contract domain.
+Defines the OASIS configuration for the Contract Audit Room.
+Mirrors cyber_oasis_env.py — preserves the 3-phase structure,
+adapts the action space, finding format, and GAP routing table for the smart contract domain.
 
-Phase A (rounds 1–3):  Domain experts phân tích nội bộ group, attacker agents im lặng
-Phase B (rounds 4–7):  Domain experts challenge nhau cross-group
-Phase C (rounds 8–10): Attacker profiles xác nhận/bác bỏ/bổ sung attack paths
+Phase A (rounds 1–3):  Domain experts analyze within their group; attacker agents are silent
+Phase B (rounds 4–7):  Domain experts challenge each other cross-domain
+Phase C (rounds 8–10): Attacker profiles confirm/dismiss/add attack paths
 """
 
 import re
@@ -1152,13 +1152,13 @@ def parse_all_contract_findings_from_text(
 @dataclass
 class ContractAuditOasisConfig:
     """
-    Configuration cho OASIS Contract Audit Room session.
-    Tương đương CyberOasisConfig — adapted for smart contract domain.
+    Configuration for an OASIS Contract Audit Room session.
+    Equivalent to CyberOasisConfig — adapted for the smart contract domain.
     """
     session_id:       str
     graph_id:         str
     contract_id:      str
-    platform:         str = "reddit"                # reddit cho threaded discussion
+    platform:         str = "reddit"                # reddit for threaded discussion
     environment_name: str = "contract_audit_room"
     total_rounds:     int = TOTAL_ROUNDS
     agents:           List[Dict[str, Any]] = field(default_factory=list)
@@ -1181,8 +1181,8 @@ class ContractAuditOasisConfig:
 
 class ContractAuditEnvBuilder:
     """
-    Xây dựng OASIS environment config cho Contract Audit Room.
-    Tương đương CyberOasisEnvBuilder.
+    Build OASIS environment config for the Contract Audit Room.
+    Equivalent to CyberOasisEnvBuilder.
     """
 
     def __init__(self, manifest: Optional[Dict[str, Any]] = None):
@@ -1202,7 +1202,7 @@ class ContractAuditEnvBuilder:
         sec_str = ", ".join(secondary) if secondary else "none"
 
         lines = [
-            f"\n⚠️ AUDIT SCOPE — Tập trung đúng contract:",
+            f"\n⚠️ AUDIT SCOPE — Focus on the correct contracts:",
             f"  IN-SCOPE PRIMARY  : {primary}",
             f"  IN-SCOPE SECONDARY: {sec_str}",
         ]
@@ -1211,15 +1211,15 @@ class ContractAuditEnvBuilder:
             oos_str = ", ".join(out_of_scope[:6]) + (" ..." if len(out_of_scope) > 6 else "")
             lines += [
                 f"  OUT-OF-SCOPE (stub only): {oos_str}",
-                f"  → Các contracts OUT-OF-SCOPE chỉ có function signatures, KHÔNG có body.",
-                f"  → KHÔNG report findings cho OUT-OF-SCOPE contracts trừ khi chúng",
-                f"    ảnh hưởng trực tiếp đến {primary}.",
+                f"  → OUT-OF-SCOPE contracts have function signatures only — NO body.",
+                f"  → Do NOT report findings for OUT-OF-SCOPE contracts unless they",
+                f"    directly affect {primary}.",
             ]
 
         lines += [
             f"  Analyze ALL in-scope contracts thoroughly — PRIMARY and SECONDARY contracts",
             f"  are equally important. Report findings in any in-scope contract.",
-            f"  Infrastructure/utility bugs chỉ bỏ qua nếu KHÔNG thể exploit từ bất kỳ in-scope contract nào.",
+            f"  Infrastructure/utility bugs may be skipped ONLY IF they cannot be exploited from any in-scope contract.",
         ]
 
         return "\n".join(lines) + "\n"

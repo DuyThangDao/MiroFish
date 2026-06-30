@@ -13,7 +13,7 @@ Entries cũ vẫn được giữ (merge), chỉ overwrite nếu trùng key.
 """
 import sys, os, re, json, argparse, time
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 import pysqlite3; sys.modules['sqlite3'] = pysqlite3
 
 from dotenv import load_dotenv

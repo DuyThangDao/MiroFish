@@ -1,12 +1,12 @@
 """
 Cyber OASIS Environment — Multi-Expert Panel (Direction B)
 
-Định nghĩa cấu hình OASIS cho Security Review Room.
+Defines the OASIS configuration for the Security Review Room.
 3-phase session: A (intra-group) → B (cross-group) → C (attacker challenge)
 
-Phase A (rounds 1–3):  Domain experts thảo luận nội bộ group, attacker agents im lặng
-Phase B (rounds 4–7):  Domain experts challenge nhau cross-group, attacker agents im lặng
-Phase C (rounds 8–10): Attacker profiles phát biểu — confirm/dismiss/add/escalate findings
+Phase A (rounds 1–3):  Domain experts discuss within their group; attacker agents are silent
+Phase B (rounds 4–7):  Domain experts challenge each other cross-group; attacker agents are silent
+Phase C (rounds 8–10): Attacker profiles speak — confirm/dismiss/add/escalate findings
 """
 
 import re
@@ -264,7 +264,7 @@ def build_published_registry(
 
 
 def get_phase_for_round(round_num: int) -> str:
-    """Trả về phase letter (A/B/C) cho round number."""
+    """Return the phase letter (A/B/C) for a given round number."""
     if round_num <= 3:
         return "A"
     elif round_num <= 7:
@@ -276,15 +276,15 @@ def get_phase_for_round(round_num: int) -> str:
 # ─── Attacker Action Types ────────────────────────────────────────────────────
 
 class AttackerAction:
-    """Các action type dành riêng cho attacker profile agents trong Phase C."""
+    """Action types reserved for attacker profile agents in Phase C."""
 
     CONFIRM   = "ATTACKER_CONFIRM"    # Confirm finding → +0.15 confidence
     DISMISS   = "ATTACKER_DISMISS"    # Dismiss finding → -0.20 confidence
     ADD_PATH  = "ATTACKER_ADD_PATH"   # New finding → base confidence 0.60
-    ESCALATE  = "ATTACKER_ESCALATE"   # Upgrade severity (cần ≥2 profiles đồng ý)
-    DOWNGRADE = "ATTACKER_DOWNGRADE"  # Downgrade severity (cần ≥3 profiles đồng ý)
+    ESCALATE  = "ATTACKER_ESCALATE"   # Upgrade severity (requires ≥2 profiles to agree)
+    DOWNGRADE = "ATTACKER_DOWNGRADE"  # Downgrade severity (requires ≥3 profiles to agree)
 
-    # Confidence delta khi parse action từ OASIS post content
+    # Confidence delta when parsing an action from OASIS post content
     CONFIDENCE_DELTA = {
         CONFIRM:   +0.15,
         DISMISS:   -0.20,
@@ -298,7 +298,7 @@ class AttackerAction:
     @staticmethod
     def parse_from_text(text: str) -> Optional[Dict[str, Any]]:
         """
-        Parse attacker action từ OASIS post text.
+        Parse an attacker action from OASIS post text.
 
         Expected format in text:
           [ATTACKER_CONFIRM]
@@ -306,8 +306,8 @@ class AttackerAction:
           Reason: <reason>
           Path: <optional attack path>
 
-        Returns dict với keys: action_type, finding_ref, reason, path
-        Returns None nếu không parse được.
+        Returns a dict with keys: action_type, finding_ref, reason, path.
+        Returns None if parsing fails.
         """
         for action_type in AttackerAction.ALL:
             if f"[{action_type}]" in text:
@@ -341,7 +341,7 @@ def parse_expert_finding_from_text(
     round_num: int,
 ) -> Optional[Dict[str, Any]]:
     """
-    Parse expert finding từ OASIS post text.
+    Parse an expert finding from OASIS post text.
 
     Expected format:
       [FINDING] Title
@@ -351,7 +351,7 @@ def parse_expert_finding_from_text(
       Detail: detailed description
       Recommendation: action
 
-    Returns raw dict hoặc None nếu không có finding.
+    Returns a raw dict, or None if no finding is present.
     """
     if "[FINDING]" not in text:
         return None
@@ -416,16 +416,16 @@ def parse_expert_finding_from_text(
 @dataclass
 class CyberOasisConfig:
     """
-    Configuration cho OASIS Security Review Room session.
-    Tương đương với SimulationConfig của MiroFish gốc.
+    Configuration for an OASIS Security Review Room session.
+    Equivalent to SimulationConfig from the original MiroFish.
     """
     session_id: str
     graph_id: str
-    platform: str = "reddit"           # reddit cho threaded discussion
+    platform: str = "reddit"           # reddit for threaded discussion
     environment_name: str = "security_review_room"
     total_rounds: int = TOTAL_ROUNDS
     agents: List[Dict[str, Any]] = field(default_factory=list)
-    initial_post: str = ""             # seeding post để khởi động thảo luận
+    initial_post: str = ""             # seeding post to start the discussion
     phase_config: Dict[str, Any] = field(default_factory=lambda: PHASE_CONFIG)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -443,7 +443,7 @@ class CyberOasisConfig:
 
 class CyberOasisEnvBuilder:
     """
-    Xây dựng OASIS environment config cho Multi-Expert Panel.
+    Build OASIS environment config for the Multi-Expert Panel.
     """
 
     def build_config(
@@ -455,17 +455,17 @@ class CyberOasisEnvBuilder:
         platform: str = "reddit",
     ) -> CyberOasisConfig:
         """
-        Build full OASIS config từ agent profiles.
+        Build a full OASIS config from agent profiles.
 
         Args:
             session_id: unique session identifier
-            graph_id: Zep graph ID (inject vào initial post)
-            profiles: danh sách 18 CyberAgentProfile
-            network_summary: mô tả hạ tầng để làm seeding post
-            platform: "reddit" (recommended) hoặc "twitter"
+            graph_id: Zep graph ID (injected into the initial post)
+            profiles: list of 18 CyberAgentProfile instances
+            network_summary: infrastructure description used as the seeding post
+            platform: "reddit" (recommended) or "twitter"
 
         Returns:
-            CyberOasisConfig sẵn sàng để pass vào session orchestrator
+            CyberOasisConfig ready to pass to the session orchestrator
         """
         agents = [p.to_oasis_format() for p in profiles]
         initial_post = self._build_initial_post(network_summary, graph_id)
@@ -484,10 +484,10 @@ class CyberOasisEnvBuilder:
         phase: str,
     ) -> List[CyberAgentProfile]:
         """
-        Trả về danh sách agent được phép nói trong phase này.
+        Return the list of agents allowed to speak in the given phase.
 
-        Phase A, B: chỉ Tier 1 (domain experts)
-        Phase C:    tất cả (Tier 1 + Tier 2 attacker profiles)
+        Phase A, B: Tier 1 only (domain experts)
+        Phase C:    all agents (Tier 1 + Tier 2 attacker profiles)
         """
         phase_cfg = PHASE_CONFIG.get(phase, {})
         attacker_active = phase_cfg.get("attacker_active", False)
@@ -502,7 +502,7 @@ class CyberOasisEnvBuilder:
         profiles: List[CyberAgentProfile],
         domain_group: str,
     ) -> List[CyberAgentProfile]:
-        """Trả về agents trong cùng domain group (dùng cho Phase A focus)."""
+        """Return agents in the same domain group (used for Phase A focus)."""
         return [p for p in profiles if p.domain_group == domain_group]
 
     def build_phase_instruction(
@@ -534,8 +534,8 @@ class CyberOasisEnvBuilder:
 
     def _build_initial_post(self, network_summary: str, graph_id: str) -> str:
         """
-        Initial seeding post để khởi động thảo luận trong OASIS.
-        Đây là post đầu tiên mà tất cả agent sẽ đọc.
+        Initial seeding post to start the OASIS discussion.
+        This is the first post that all agents will read.
         """
         return f"""SECURITY REVIEW SESSION — Please analyze the following infrastructure.
 
