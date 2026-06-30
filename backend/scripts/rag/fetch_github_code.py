@@ -5,7 +5,7 @@ fetch_github_code.py — Fetch raw Solidity code from GitHub for done_no_code fi
 For each finding with github_links, fetches the relevant code snippet,
 stores raw_code (original) and code (normalized) in rag_sections_cache.json.
 
-Usage (from MiroFish/backend/ with venv activated):
+Usage (from backend/ with venv activated):
     source .venv/bin/activate
     python scripts/rag/fetch_github_code.py [--dry-run] [--limit N] [--delay 1.5]
 """
@@ -238,7 +238,7 @@ def main() -> None:
 
     n_done = n_fail = n_junk = pending = 0
 
-    with httpx.Client(headers={"User-Agent": "MiroFish-RAG/1.0"}) as client:
+    with httpx.Client(headers={"User-Agent": "AuditEngine-RAG/1.0"}) as client:
         for finding, scored in targets:
             slug     = finding["slug"]
             snippets = []      # raw text per URL fetched

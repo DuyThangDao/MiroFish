@@ -36,8 +36,8 @@ WORKER_CFGS = [
             "LLM_BASE_URL",
             "https://aiplatform.googleapis.com/v1/projects/sigma-comfort-498803-f9/locations/global/endpoints/openapi",
         ),
-        "rpm_file": "/tmp/mirofish_fillraw_w1.json",
-        "rpm_lock": "/tmp/mirofish_fillraw_w1.lock",
+        "rpm_file": "/tmp/audit_fillraw_w1.json",
+        "rpm_lock": "/tmp/audit_fillraw_w1.lock",
     },
     {
         "key_file": str(REPO_ROOT / "vertex-ai-2.json"),
@@ -45,8 +45,8 @@ WORKER_CFGS = [
             "LLM2_BASE_URL",
             "https://aiplatform.googleapis.com/v1/projects/learned-surge-498101-t0/locations/global/endpoints/openapi",
         ),
-        "rpm_file": "/tmp/mirofish_fillraw_w2.json",
-        "rpm_lock": "/tmp/mirofish_fillraw_w2.lock",
+        "rpm_file": "/tmp/audit_fillraw_w2.json",
+        "rpm_lock": "/tmp/audit_fillraw_w2.lock",
     },
 ]
 

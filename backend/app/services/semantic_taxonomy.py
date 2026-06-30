@@ -1,5 +1,5 @@
 """
-Canonical semantic categories for contract audit (MiroFish product taxonomy).
+Canonical semantic categories for contract audit (audit product taxonomy).
 
 Used by:
   - SEMANTIC_FINDING parser (contract_oasis_env)

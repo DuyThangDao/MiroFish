@@ -25,7 +25,7 @@ from ..utils.logger import get_logger
 from .swc_registry import SWCRegistry
 from .semantic_taxonomy import SEMANTIC_CATEGORY_FEW_SHOT, SEMANTIC_CATEGORY_PIPE_STRING
 
-logger = get_logger("mirofish.contract_profile")
+logger = get_logger("contract_profile")
 
 
 # ─── Agent matrix (Epistemic Lens — flat, 19 agents) ─────────────────────────
@@ -940,9 +940,10 @@ class ContractAgentProfile:
 class ContractExpertProfileGenerator:
     """Generate 19 Tier 1 agent profiles (Epistemic Lens) for the Contract Audit Room."""
 
-    def __init__(self, llm_client: Optional[LLMClient] = None):
+    def __init__(self, llm_client: Optional[LLMClient] = None, inject_swc: bool = False):
         self.llm = llm_client or LLMClient()
-        self.swc = SWCRegistry()
+        self.swc = SWCRegistry() if inject_swc else None
+        self._inject_swc = inject_swc
 
     def generate_all_profiles(
         self,
@@ -1010,13 +1011,16 @@ class ContractExpertProfileGenerator:
         contract_summary: str,
         graph_id: Optional[str],
     ) -> str:
-        swc_domain = _DOMAIN_GROUP_TO_SWC_DOMAIN.get(spec["domain_group"], "appsec")
-        swc_context = self.swc.get_swc_context_for_agent(swc_domain, "offensive")
         graph_ref = f"\nKnowledge Graph ID: {graph_id}" if graph_id else ""
         track_d = _TRACK_D_BY_DOMAIN.get(spec["domain_group"], "")
         track_d_section = (
             f"\nTRACK D — SPEC VS IMPLEMENTATION:\n  {track_d}\n"
         ) if track_d else ""
+        swc_section = ""
+        if self._inject_swc and self.swc:
+            swc_domain = _DOMAIN_GROUP_TO_SWC_DOMAIN.get(spec["domain_group"], "appsec")
+            swc_context = self.swc.get_swc_context_for_agent(swc_domain, "offensive")
+            swc_section = f"\n=== YOUR SWC KNOWLEDGE BASE ===\n{swc_context}\n"
 
         return f"""You are {spec['display_name']} — a smart contract security specialist.
 
@@ -1024,9 +1028,7 @@ class ContractExpertProfileGenerator:
 {track_d_section}
 === CONTRACT UNDER AUDIT ===
 {contract_summary}{graph_ref}
-
-=== YOUR SWC KNOWLEDGE BASE ===
-{swc_context}
+{swc_section}
 
 === AUDIT GUIDELINES ===
 When contributing findings, use this EXACT format:

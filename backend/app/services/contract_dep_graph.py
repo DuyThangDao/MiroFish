@@ -34,7 +34,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from ..utils.logger import get_logger
 
-logger = get_logger("mirofish.dep_graph")
+logger = get_logger("dep_graph")
 
 _PRAGMA_VERSION_RE = re.compile(
     r'pragma\s+solidity\s+(?:[>=^~<]+\s*)?([\d]+\.[\d]+(?:\.[\d]+)?)'

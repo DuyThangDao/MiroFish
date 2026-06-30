@@ -8,7 +8,7 @@ Phase B: done findings with raw_code (old 30-line window) → LLM refine → rep
 Workers: 2 Vertex AI workers (sigma + learned-surge), each with separate RPM file.
 RPM: 18/min per worker → ~36/min total.
 
-Usage (from MiroFish/backend/ with venv activated):
+Usage (from backend/ with venv activated):
     python scripts/rag/fetch_github_llm.py [--phase a|b|ab] [--limit N] [--workers 1|2]
 """
 import sys, os, json, re, time, threading, queue, logging, argparse, fcntl
@@ -34,7 +34,7 @@ logging.basicConfig(
 log = logging.getLogger("fetch_llm")
 
 # ── Vertex AI worker configs ───────────────────────────────────────────────────
-REPO_ROOT = SCRIPT_DIR.parent.parent.parent  # MiroFish/
+REPO_ROOT = SCRIPT_DIR.parent.parent.parent  # repo root
 WORKER_CFGS = [
     {
         "key_file": str(REPO_ROOT / "vertex-ai-1.json"),
@@ -42,8 +42,8 @@ WORKER_CFGS = [
             "LLM_BASE_URL",
             "https://aiplatform.googleapis.com/v1/projects/sigma-comfort-498803-f9/locations/global/endpoints/openapi",
         ),
-        "rpm_file": "/tmp/mirofish_fetch_llm_w1.json",
-        "rpm_lock": "/tmp/mirofish_fetch_llm_w1.lock",
+        "rpm_file": "/tmp/audit_fetch_llm_w1.json",
+        "rpm_lock": "/tmp/audit_fetch_llm_w1.lock",
     },
     {
         "key_file": str(REPO_ROOT / "vertex-ai-2.json"),
@@ -51,8 +51,8 @@ WORKER_CFGS = [
             "LLM2_BASE_URL",
             "https://aiplatform.googleapis.com/v1/projects/learned-surge-498101-t0/locations/global/endpoints/openapi",
         ),
-        "rpm_file": "/tmp/mirofish_fetch_llm_w2.json",
-        "rpm_lock": "/tmp/mirofish_fetch_llm_w2.lock",
+        "rpm_file": "/tmp/audit_fetch_llm_w2.json",
+        "rpm_lock": "/tmp/audit_fetch_llm_w2.lock",
     },
 ]
 
@@ -288,7 +288,7 @@ def worker_fn(
     client = build_vertex_client(cfg["key_file"], cfg["base_url"])
     rpm_file = cfg["rpm_file"]
     rpm_lock = cfg["rpm_lock"]
-    http = httpx.Client(headers={"User-Agent": "MiroFish-RAG/1.0"})
+    http = httpx.Client(headers={"User-Agent": "AuditEngine-RAG/1.0"})
     pending = 0
 
     log.info(f"[W{worker_id}] started | key={cfg['key_file']} | endpoint={cfg['base_url'][:70]}")

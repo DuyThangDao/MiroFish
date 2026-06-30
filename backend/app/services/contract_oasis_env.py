@@ -20,7 +20,7 @@ from ..utils.logger import get_logger
 from .contract_profile_generator import ContractAgentProfile
 from .semantic_taxonomy import SEMANTIC_CATEGORY_PIPE_STRING, normalize_semantic_category
 
-logger = get_logger("mirofish.contract_oasis_env")
+logger = get_logger("contract_oasis_env")
 
 # ─── Action Types ─────────────────────────────────────────────────────────────
 
@@ -64,177 +64,6 @@ GAP: Cannot assess oracle freshness — no Chainlink config visible in contract.
 ANALYZED: governance voting
 GAP: None — fully assessed from source.
 """
-
-# ─── Phase Definitions ────────────────────────────────────────────────────────
-
-PHASE_CONFIG = {
-    "A": {
-        "name": "Intra-domain Analysis",
-        "rounds": [1, 2, 3],
-        "description": "Domain experts analyze the contract within their specialization",
-        "attacker_active": False,
-        # Two-stage: Stage 1 — free-form analysis + optional CLAIM declarations
-        "stage1_instruction": (
-            "STAGE 1 — CLAIM DECLARATIONS\n"
-            "Write ONLY 3-5 CLAIM lines from YOUR DOMAIN perspective. No prose, no headers.\n\n"
-            "Format (one per line, start immediately):\n"
-            "  CLAIM: <function_name()> may be vulnerable because <specific one-line reason>\n\n"
-            "Examples:\n"
-            "  CLAIM: fulfill() may be vulnerable because state update happens after external call\n"
-            "  CLAIM: cancel() may be vulnerable because reentrancy guard missing on ETH transfer path\n"
-            "  CLAIM: getPriceFromAMM() may be vulnerable because spot price manipulable via flash loan\n\n"
-            "⚠️ SWC TAGGING RULES — MANDATORY: assign SWC when you see these patterns:\n"
-            "  SWC-101: ANY explicit cast (uint128(x), int24(y), uint160(z), uint256→int256)\n"
-            "           ANY unchecked{} block — Solidity 0.8 DOES NOT protect explicit casts,\n"
-            "           only arithmetic operators (+, -, *). Casts can silently truncate.\n"
-            "  SWC-107: ANY external call BEFORE state update, including via callback/hook/onFlashLoan\n"
-            "  SWC-124: ANY delegatecall, including ones hidden inside batch() or proxy patterns\n"
-            "  SWC-128: ANY loop over array/mapping that can grow unbounded\n\n"
-            "⚠️ REQUIRED COVERAGE — explicitly check for these patterns before writing CLAIMs:\n"
-            "  - Unbounded arrays/loops (SWC-128): any array that grows without a cap, or loops over\n"
-            "    user-controlled data that could exhaust block gas (DoS with Block Gas Limit)\n"
-            "  - Unprotected state-modifying functions any caller can invoke to grief other users\n"
-            "  - Explicit type casts (SWC-101): uint128(x), int24(y), unchecked{} blocks — tag SWC-101\n"
-            "    even on Solidity 0.8 contracts (0.8 does NOT protect casts, only operators)\n"
-            "Include a CLAIM about DoS patterns even if you find no clear issue — write 'no issue found' if clean.\n\n"
-            "Start your response with CLAIM lines directly. No introduction text.\n"
-            "CLAIMs will be shared with ALL experts in Stage 2 for validation or challenge.\n"
-            + GAP_FORMAT_INSTRUCTION
-        ),
-        # Two-stage: Stage 2 — structured findings with full feed context
-        "stage2_instruction": (
-            "STAGE 2 — FINDINGS & DISCUSSION\n"
-            "You have read all domain experts' Stage 1 analyses and CLAIM declarations above.\n\n"
-            "MANDATORY (write at least one before adding new findings):\n"
-            "  1. CHALLENGE a CLAIM or prior-round finding you disagree with:\n"
-            "       CHALLENGE_FINDING: <exact CLAIM or finding title>\n"
-            "       REASON: <specific counter-evidence from code>\n"
-            "       FUNCTION: <function name>\n"
-            "       EVIDENCE: <code quote>\n\n"
-            "  2. VALIDATE a CLAIM or prior-round finding from YOUR domain's angle:\n"
-            "       VALIDATE_FINDING: <exact CLAIM or finding title>\n"
-            "       DOMAIN_EVIDENCE: <your evidence>\n"
-            "       FUNCTION: <function name>\n"
-            "       ADDITIONAL_IMPACT: <extra impact>\n\n"
-            "OPTIONAL (only after addressing the above):\n"
-            "  3. FINDING / SEMANTIC_FINDING: new vulnerabilities from YOUR domain\n\n"
-            "⚠️ FUNCTION FIELD IS MANDATORY IN ALL FINDINGS:\n"
-            "  If you mention a function name anywhere in your description or evidence,\n"
-            "  you MUST include it in the FUNCTION: field. A finding without FUNCTION: is\n"
-            "  demoted to a low-value hint and will NOT appear as a confirmed vulnerability.\n"
-            "  Wrong:   FUNCTION: (empty)  DESCRIPTION: _mint uses unsafe cast...\n"
-            "  Correct: FUNCTION: _mint()  DESCRIPTION: _mint uses unsafe cast...\n"
-            "  If the same SWC appears in 3 functions, write 3 separate FINDINGs.\n\n"
-            "Note: CHALLENGE/VALIDATE target Stage 1 CLAIMs and previous-round findings.\n"
-            "New findings from THIS round's other experts will be challengeable next round.\n"
-            + GAP_FORMAT_INSTRUCTION
-        ),
-        # Backward compat: single-stage (stage=0) path
-        "instruction_addition": (
-            "In this phase, analyze the contract from YOUR DOMAIN EXPERTISE perspective. "
-            "Propose findings with specific SWC IDs, function names, and code evidence. "
-            "Discuss and validate findings with peers in your domain.\n"
-            + GAP_FORMAT_INSTRUCTION
-        ),
-    },
-    "B": {
-        "name": "Cross-domain Challenge",
-        "rounds": [4, 5, 6, 7],
-        "description": "Domain experts challenge and validate findings across specializations",
-        "attacker_active": False,
-        # Two-stage: Stage 1 — cross-domain free-form analysis
-        "stage1_instruction": (
-            "STAGE 1 — CLAIM DECLARATIONS (cross-domain)\n"
-            "Write ONLY 3-5 CLAIM lines from YOUR DOMAIN perspective. No prose, no headers.\n"
-            "Include prior-round findings you want to challenge or validate.\n\n"
-            "Format (one per line, start immediately):\n"
-            "  CLAIM: <function_name()> may be vulnerable because <specific one-line reason>\n\n"
-            "Examples:\n"
-            "  CLAIM: fulfill() may be vulnerable because cross-domain reentrancy via router callback\n"
-            "  CLAIM: addLiquidity() may be vulnerable because missing slippage check interacts with price oracle\n\n"
-            "⚠️ SWC TAGGING RULES — MANDATORY: assign SWC when you see these patterns:\n"
-            "  SWC-101: ANY explicit cast (uint128(x), int24(y), uint160(z)) or unchecked{} block\n"
-            "           Solidity 0.8 DOES NOT protect explicit casts — only arithmetic operators\n"
-            "  SWC-107: ANY external call BEFORE state update, via callback/hook/onFlashLoan\n"
-            "  SWC-124: ANY delegatecall (direct or via proxy/batch)\n"
-            "  SWC-128: ANY loop over unbounded array/mapping\n\n"
-            "Start your response with CLAIM lines directly. No introduction text.\n"
-            + GAP_FORMAT_INSTRUCTION
-        ),
-        # Two-stage: Stage 2 — cross-domain challenge + validate
-        "stage2_instruction": (
-            "STAGE 2 — CROSS-DOMAIN FINDINGS & CHALLENGE\n"
-            "You have read all domain experts' Stage 1 analyses and CLAIM declarations above.\n\n"
-            "MANDATORY (write at least one before adding new findings):\n"
-            "1. CHALLENGE a Stage 1 CLAIM or prior-round finding you disagree with:\n"
-            "   CHALLENGE_FINDING: <exact CLAIM title or prior finding title>\n"
-            "   REASON: <specific counter-evidence from code>\n"
-            "   FUNCTION: <function name>\n"
-            "   EVIDENCE: <code quote>\n\n"
-            "2. VALIDATE a Stage 1 CLAIM or prior-round finding from YOUR domain's angle:\n"
-            "   VALIDATE_FINDING: <exact CLAIM title or prior finding title>\n"
-            "   DOMAIN_EVIDENCE: <your evidence>\n"
-            "   FUNCTION: <function>\n"
-            "   ADDITIONAL_IMPACT: <extra impact>\n\n"
-            "OPTIONAL (only after addressing the above):\n"
-            "3. Add NEW findings missed by all domains.\n"
-            "4. Reclassify business-logic bugs (no SWC → use SEMANTIC_FINDING).\n\n"
-            "Note: CLAIM titles come from the Stage 1 feed above — use exact wording to match.\n\n"
-            "⚠️ FUNCTION FIELD IS MANDATORY IN ALL FINDINGS:\n"
-            "  If you mention a function name anywhere in your description or evidence,\n"
-            "  you MUST include it in the FUNCTION: field. A finding without FUNCTION: is\n"
-            "  demoted to a low-value hint and will NOT appear as a confirmed vulnerability.\n"
-            "  Wrong:   FUNCTION: (empty)  DESCRIPTION: _mint uses unsafe cast...\n"
-            "  Correct: FUNCTION: _mint()  DESCRIPTION: _mint uses unsafe cast...\n"
-            "  If the same SWC appears in 3 functions, write 3 separate FINDINGs.\n\n"
-            + GAP_FORMAT_INSTRUCTION
-        ),
-        # Backward compat: single-stage (stage=0) path
-        "instruction_addition": (
-            "In this phase, READ findings from OTHER domain groups and challenge them. "
-            "Ask: Is this finding accurate? Is the severity correct? "
-            "Does this function actually exhibit the claimed vulnerability pattern? "
-            "Add new findings if you notice another domain missed something important.\n"
-            + GAP_FORMAT_INSTRUCTION
-        ),
-    },
-    "C": {
-        "name": "Attacker Challenge",
-        "rounds": [8, 9, 10],
-        "description": "Attacker profiles validate exploitability and propose attack paths",
-        "attacker_active": True,
-        "instruction_addition": (
-            "ATTACKER PHASE — Your visible response MUST begin with [ATTACKER_XXX] declaration blocks.\n\n"
-            "=== REQUIRED FORMAT (write these blocks as the FIRST lines of your response) ===\n\n"
-            "  [ATTACKER_CONFIRM SWC-114 approve()]\n"
-            "  Finding: approve() race condition\n"
-            "  Path: 1) Alice calls approve(Bob,100) 2) Bob front-runs transferFrom — spends old+new allowance\n"
-            "  ---\n"
-            "  [ATTACKER_DISMISS SWC-101 transfer()]\n"
-            "  Finding: Integer overflow in transfer\n"
-            "  Reason: transfer() uses SafeMath.sub() — reverts on underflow, no overflow possible\n"
-            "  ---\n"
-            "  [ATTACKER_EXPLOIT INV-001]\n"
-            "  Path: 1. Call addLiquidity(amount, assetId, victimRouter) from any address\n"
-            "        2. No require(router == msg.sender) — any caller accepted\n"
-            "        3. Call removeLiquidity() to drain victim router's funds\n"
-            "  Impact: Full liquidity drain of any router\n"
-            "  Feasible: yes\n"
-            "  ---\n\n"
-            "=== RULES ===\n"
-            "• DEFAULT STANCE: DISMISS. Every claim is UNVERIFIED until you independently confirm it.\n"
-            "• CONFIRM only with a concrete step-by-step exploit traceable through THIS contract's code.\n"
-            "• DISMISS for: out-of-scope claims, SafeMath/require-protected ops, no traceable exploit.\n"
-            "• Write one block per claim in the UNVERIFIED CLAIMS LIST above.\n"
-            "• For INVARIANT ATTACK OBJECTIVES: use [ATTACKER_EXPLOIT INV-xxx] if you can violate the invariant.\n"
-            "• Dismissing false positives is MORE valuable than confirming an obvious finding.\n"
-            "Domain expert agents: respond only if an attacker directly challenges your specific finding.\n"
-        ),
-    },
-}
-
-TOTAL_ROUNDS = 10
-
 
 # ─── GAP Routing Table ────────────────────────────────────────────────────────
 
@@ -986,131 +815,6 @@ _SEMANTIC_ATTACK_PATH_RE = re.compile(
 )
 
 
-def parse_semantic_finding_from_text(
-    text: str,
-    agent_profile: "ContractAgentProfile",
-    round_num: int,
-    known_functions: Optional[set] = None,
-) -> Optional[Dict[str, Any]]:
-    """
-    Parse a SEMANTIC_FINDING block from an agent post.
-
-    Expected format:
-      SEMANTIC_FINDING: <title>
-      CATEGORY: <category>
-      SEVERITY: <critical|high|medium|low>
-      FUNCTION: <affected_function()>
-      EVIDENCE: <specific code pattern or economic invariant violated>
-      ATTACK_PATH: <step-by-step scenario>
-
-    Returns raw dict or None if no semantic finding detected.
-    """
-    if not re.search(r'(?i)^SEMANTIC_FINDING\s*:', text, re.MULTILINE):
-        return None
-
-    lines = text.split("\n")
-    title = ""
-    category = "other"
-    severity = "medium"
-    affected_functions: List[str] = []
-    evidence = ""
-    attack_path: List[str] = []
-    patch_suggestion = None
-    phase = get_phase_for_round(round_num)
-
-    current_field = None
-    current_value: List[str] = []
-
-    def _flush():
-        nonlocal evidence, attack_path, patch_suggestion
-        if current_field == "evidence" and current_value:
-            evidence = " ".join(current_value)
-        elif current_field == "attack_path" and current_value:
-            attack_path = [v for v in current_value if v.strip()]
-        elif current_field == "patch" and current_value:
-            patch_suggestion = " ".join(current_value)
-
-    _FIELD_RE = re.compile(
-        r'(?i)^(SEMANTIC_FINDING|CATEGORY|SEVERITY|FUNCTION|EVIDENCE|ATTACK_PATH|PATCH)\s*:',
-        re.MULTILINE
-    )
-
-    for line in lines:
-        stripped = line.strip()
-        lower = stripped.lower()
-
-        if _FIELD_RE.match(stripped):
-            _flush()
-            current_field = None
-            current_value = []
-
-        if re.match(r'(?i)^SEMANTIC_FINDING\s*:', stripped):
-            title = re.sub(r'(?i)^SEMANTIC_FINDING\s*:', '', stripped).strip()
-        elif lower.startswith("category:"):
-            cat_raw = stripped.split(":", 1)[1].strip()
-            category = normalize_semantic_category(cat_raw)
-        elif lower.startswith("severity:"):
-            sev_raw = stripped.split(":", 1)[1].strip().lower()
-            if sev_raw in {"critical", "high", "medium", "low", "info"}:
-                severity = sev_raw
-        elif lower.startswith("function:"):
-            func_raw = stripped.split(":", 1)[1].strip()
-            affected_functions = _parse_function_field(func_raw)
-        elif lower.startswith("evidence:"):
-            current_field = "evidence"
-            current_value = [stripped.split(":", 1)[1].strip()]
-        elif lower.startswith("attack_path:"):
-            current_field = "attack_path"
-            val = stripped.split(":", 1)[1].strip()
-            current_value = [val] if val else []
-        elif lower.startswith("patch:"):
-            current_field = "patch"
-            current_value = [stripped.split(":", 1)[1].strip()]
-        elif current_field and stripped and not _PROTOCOL_KW_RE.match(stripped):
-            current_value.append(stripped)
-
-    _flush()
-
-    if not title:
-        return None
-
-    # Validate known functions if provided
-    if known_functions and affected_functions:
-        validated = [f for f in affected_functions if f.rstrip("()").lower() in known_functions]
-        if validated:
-            affected_functions = validated
-        elif len(known_functions) >= 3:
-            affected_functions = []
-
-    # Require at least some evidence text
-    if not evidence or len(evidence.strip()) < 10:
-        logger.debug(
-            f"Semantic evidence gate: dropped '{title[:60]}' from {agent_profile.agent_id} "
-            f"— evidence too short or missing"
-        )
-        return None
-
-    return {
-        "finding_id":          f"sf_{uuid.uuid4().hex[:8]}",
-        "author_domain":       agent_profile.domain_group,
-        "author_persona":      agent_profile.persona,
-        "title":               title,
-        "category":            category,
-        "severity":            severity,
-        "affected_functions":  affected_functions,
-        "evidence":            evidence,
-        "attack_path":         attack_path,
-        "patch_suggestion":    patch_suggestion,
-        "phase":               phase,
-        "round_number":        round_num,
-        "confidence":          _initial_confidence(severity, phase),
-        "validated_by":        [],
-        "challenged_by":       [],
-        "is_exploitable":      None,
-        "is_attacker_surfaced": False,
-    }
-
-
 # ─── v2 Multi-finding Parser ─────────────────────────────────────────────────
 
 def parse_all_contract_findings_from_text(
@@ -1148,36 +852,6 @@ def parse_all_contract_findings_from_text(
 
 
 # ─── OASIS Config Builder ─────────────────────────────────────────────────────
-
-@dataclass
-class ContractAuditOasisConfig:
-    """
-    Configuration for an OASIS Contract Audit Room session.
-    Equivalent to CyberOasisConfig — adapted for the smart contract domain.
-    """
-    session_id:       str
-    graph_id:         str
-    contract_id:      str
-    platform:         str = "reddit"                # reddit for threaded discussion
-    environment_name: str = "contract_audit_room"
-    total_rounds:     int = TOTAL_ROUNDS
-    agents:           List[Dict[str, Any]] = field(default_factory=list)
-    initial_post:     str = ""
-    phase_config:     Dict[str, Any] = field(default_factory=lambda: PHASE_CONFIG)
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "session_id":       self.session_id,
-            "graph_id":         self.graph_id,
-            "contract_id":      self.contract_id,
-            "platform":         self.platform,
-            "environment_name": self.environment_name,
-            "total_rounds":     self.total_rounds,
-            "agent_count":      len(self.agents),
-            "phase_config":     self.phase_config,
-            "has_initial_post": bool(self.initial_post),
-        }
-
 
 class ContractAuditEnvBuilder:
     """
@@ -1232,9 +906,9 @@ class ContractAuditEnvBuilder:
         profiles: List[ContractAgentProfile],
         contract_summary: str,
         platform: str = "reddit",
-    ) -> ContractAuditOasisConfig:
+    ) -> Dict[str, Any]:
         """
-        Build full OASIS config from agent profiles.
+        Build OASIS config from agent profiles.
 
         Args:
             session_id: unique session identifier
@@ -1247,62 +921,15 @@ class ContractAuditEnvBuilder:
         agents = [p.to_oasis_format() for p in profiles]
         initial_post = self._build_initial_post(contract_id, contract_summary, graph_id)
 
-        return ContractAuditOasisConfig(
-            session_id=session_id,
-            graph_id=graph_id,
-            contract_id=contract_id,
-            platform=platform,
-            agents=agents,
-            initial_post=initial_post,
-        )
-
-    def get_active_agents_for_phase(
-        self,
-        profiles: List[ContractAgentProfile],
-        phase: str,
-    ) -> List[ContractAgentProfile]:
-        """Phase A/B: Tier-1 experts only; Phase C: all agents (Tier-1 + Tier-2 attackers)."""
-        phase_cfg = PHASE_CONFIG.get(phase, {})
-        attacker_active = phase_cfg.get("attacker_active", False)
-        return profiles if attacker_active else [p for p in profiles if p.tier == 1]
-
-    def build_phase_instruction(
-        self,
-        phase: str,
-        round_num: int,
-        gap_context: str = "",
-        phase_c_review_list: str = "",
-        stage: int = 0,
-    ) -> str:
-        """
-        Build system instruction injected at the start of each round.
-
-        stage=0: single-stage mode (backward compat — uses instruction_addition)
-        stage=1: two-stage Stage 1 — free-form analysis + CLAIM declarations
-        stage=2: two-stage Stage 2 — FINDING/SEMANTIC_FINDING + CHALLENGE/VALIDATE
-        """
-        phase_cfg = PHASE_CONFIG.get(phase, {})
-        if stage == 1:
-            instruction_text = phase_cfg.get("stage1_instruction", phase_cfg.get("instruction_addition", ""))
-        elif stage == 2:
-            instruction_text = phase_cfg.get("stage2_instruction", phase_cfg.get("instruction_addition", ""))
-        else:
-            instruction_text = phase_cfg.get("instruction_addition", "")
-
-        # S2a: prepend focus directive to Stage 1 instructions only
-        if stage == 1:
-            instruction_text = self._build_focus_directive() + instruction_text
-
-        instruction = (
-            f"=== Phase {phase}: {phase_cfg.get('name', '')} | Round {round_num}/{TOTAL_ROUNDS} ===\n"
-            f"{instruction_text}"
-        )
-        # RC-3 Two-step Phase C: inject preliminary consensus findings for attackers to review
-        if phase == "C" and phase_c_review_list:
-            instruction = phase_c_review_list + "\n" + instruction
-        if gap_context:
-            instruction = gap_context + "\n" + instruction
-        return instruction
+        return {
+            "session_id":       session_id,
+            "graph_id":         graph_id,
+            "contract_id":      contract_id,
+            "platform":         platform,
+            "environment_name": "contract_audit_room",
+            "agents":           agents,
+            "initial_post":     initial_post,
+        }
 
     def _build_initial_post(
         self,

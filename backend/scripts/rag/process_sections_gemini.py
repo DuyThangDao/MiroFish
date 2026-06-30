@@ -6,7 +6,7 @@ Reads work_queue.json, skips already-processed slugs from rag_sections_cache.jso
 calls google/gemini-3-flash-preview via Vertex AI OpenAI-compatible endpoint with
 2 workers in parallel, saves results incrementally.
 
-Usage (from MiroFish/backend/ with venv activated):
+Usage (from backend/ with venv activated):
     source .venv/bin/activate
     python scripts/rag/process_sections_gemini.py [--dry-run] [--workers 2] [--batch-size 15]
 
@@ -33,7 +33,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 SCRIPT_DIR = Path(__file__).parent.resolve()
-REPO_DIR = SCRIPT_DIR.parent.parent.parent  # MiroFish/
+REPO_DIR = SCRIPT_DIR.parent.parent.parent  # repo root
 
 
 def _load_env(path: Path) -> None:
@@ -64,8 +64,8 @@ logging.basicConfig(
 log = logging.getLogger("process_sections")
 
 # ── Rate limiter (shared across threads via file lock) ────────────────────────
-_RPM_FILE = "/tmp/mirofish_rag_rpm.json"
-_RPM_LOCK = "/tmp/mirofish_rag_rpm.lock"
+_RPM_FILE = "/tmp/audit_rag_rpm.json"
+_RPM_LOCK = "/tmp/audit_rag_rpm.lock"
 _RPM_LIMIT = int(os.environ.get("LLM_GLOBAL_RPM_LIMIT", "18"))
 _SUBMIT_DELAY = float(os.environ.get("LLM_SUBMIT_DELAY_S", "8"))
 

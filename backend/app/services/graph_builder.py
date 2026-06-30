@@ -54,7 +54,7 @@ class GraphBuilderService:
         self,
         text: str,
         ontology: Dict[str, Any],
-        graph_name: str = "MiroFish Graph",
+        graph_name: str = "Audit Graph",
         chunk_size: int = 500,
         chunk_overlap: int = 50,
         batch_size: int = 3
@@ -187,14 +187,14 @@ class GraphBuilderService:
     def create_graph(self, name: str) -> str:
         """Create a Zep graph (public method)."""
         import time as _time
-        graph_id = f"mirofish_{uuid.uuid4().hex[:16]}"
+        graph_id = f"audit_{uuid.uuid4().hex[:16]}"
 
         for attempt in range(6):
             try:
                 self.client.graph.create(
                     graph_id=graph_id,
                     name=name,
-                    description="MiroFish Social Simulation Graph"
+                    description="Audit Knowledge Graph"
                 )
                 return graph_id
             except Exception as e:
@@ -205,7 +205,7 @@ class GraphBuilderService:
                     m = _re.search(r"retry-after['\": ]+(\d+)", str(e).lower())
                     wait = int(m.group(1)) + 1 if m else min(15 * (2 ** attempt), 120)
                     import logging as _log
-                    _log.getLogger("mirofish.graph_builder").warning(
+                    _log.getLogger("graph_builder").warning(
                         f"Zep 429 on create_graph (attempt {attempt+1}/6), waiting {wait}s"
                     )
                     _time.sleep(wait)

@@ -32,7 +32,7 @@ def _zep_retry(fn: Callable, max_attempts: int = 8, retry_episode_limit: bool = 
     (useful for episode batch upload — caller handles graceful degradation).
     """
     import logging as _logging
-    _log = _logging.getLogger("mirofish.contract_kg")
+    _log = _logging.getLogger("contract_kg")
     for attempt in range(max_attempts):
         try:
             return fn()
@@ -57,7 +57,7 @@ from ..models.contract_models import ContractEntity, ContractFunction
 from .graph_builder import GraphBuilderService
 from .contract_parser import ContractParser
 
-logger = get_logger("mirofish.contract_kg")
+logger = get_logger("contract_kg")
 
 
 # ─── Contract Audit Ontology for Zep ──────────────────────────────────────────
@@ -415,7 +415,7 @@ class ContractKGBuilder:
                 vertex_key_file=key1,
                 base_url=url1,
                 model=getattr(_Config, "LLM_MODEL_NAME", None),
-                rpm_slot_file="/tmp/mirofish_hist_inv_0.json",
+                rpm_slot_file="/tmp/audit_hist_inv_0.json",
                 rpm_limit=rpm,
             ))
         # Worker 1: LLM2 (vertex-ai-2)
@@ -426,7 +426,7 @@ class ContractKGBuilder:
                 vertex_key_file=key2,
                 base_url=url2,
                 model=getattr(_Config, "LLM_MODEL_NAME", None),
-                rpm_slot_file="/tmp/mirofish_hist_inv_1.json",
+                rpm_slot_file="/tmp/audit_hist_inv_1.json",
                 rpm_limit=rpm,
             ))
         # Worker 2: LLM3 (vertex-ai-3)
@@ -437,7 +437,7 @@ class ContractKGBuilder:
                 vertex_key_file=key3,
                 base_url=url3,
                 model=getattr(_Config, "LLM_MODEL_NAME", None),
-                rpm_slot_file="/tmp/mirofish_hist_inv_2.json",
+                rpm_slot_file="/tmp/audit_hist_inv_2.json",
                 rpm_limit=rpm,
             ))
         # Worker 3: LLM4 (vertex-ai-4)
@@ -448,13 +448,13 @@ class ContractKGBuilder:
                 vertex_key_file=key4,
                 base_url=url4,
                 model=getattr(_Config, "LLM_MODEL_NAME", None),
-                rpm_slot_file="/tmp/mirofish_hist_inv_3.json",
+                rpm_slot_file="/tmp/audit_hist_inv_3.json",
                 rpm_limit=rpm,
             ))
         if not clients:
             # Fallback: default LLM client
             clients.append(LLMClient(
-                rpm_slot_file="/tmp/mirofish_hist_inv_0.json",
+                rpm_slot_file="/tmp/audit_hist_inv_0.json",
                 rpm_limit=max(rpm // 4, 3),
             ))
         return clients  # [client_llm1, client_llm2] or subset
@@ -972,7 +972,7 @@ class ContractKGBuilder:
                     ordered[idx] = fut.result()
                 except Exception as _exc:
                     import logging as _log
-                    _log.getLogger("mirofish.hist_inv").warning(
+                    _log.getLogger("hist_inv").warning(
                         "[HIST-INV] _process_entry exc entry[%d]: %s: %s", idx, type(_exc).__name__, _exc
                     )
                     ordered[idx] = (entries[idx], [])

@@ -22,11 +22,11 @@ import sys, os, re, json, time, threading
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pysqlite3; sys.modules['sqlite3'] = pysqlite3
 
 from dotenv import load_dotenv
-load_dotenv(os.path.join(os.path.dirname(__file__), '../../.env'))
+load_dotenv(os.path.join(os.path.dirname(__file__), '../.env'))
 
 KEY_FILE = os.getenv('LLM_VERTEX_AI_KEY_FILE', '')
 os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = KEY_FILE
@@ -90,6 +90,7 @@ _parser.add_argument('--single-agent', default='',           help='If set, every
 _parser.add_argument('--rt',            action='store_true',  help='Enable red-team (RT) attacker agents (disabled by default)')
 _parser.add_argument('--max-fns-per-chunk', type=int, default=0, help='Max functions per (domain×contract) chunk; 0=no limit (default: 0)')
 _parser.add_argument('--no-full-aux',  action='store_true',  help='Use only directly-called functions from aux contracts instead of full source (default: full aux)')
+_parser.add_argument('--swc',          action='store_true',  help='Inject SWC knowledge base into agent system prompts (disabled by default)')
 _args = _parser.parse_args()
 
 CONTEST_ID    = _args.contest_id
@@ -106,7 +107,7 @@ FULL_AUX          = not _args.no_full_aux
 SKIP_DIRS     = {'interfaces', 'test', 'workInProgress', 'flat', 'mocks', 'mock', 'node_modules', 'artifacts'}
 
 _inv_tag     = 'no_inv' if NO_INV else 'with_inv'
-_BENCH_DIR   = os.path.join(os.path.dirname(__file__), '../../benchmark/web3bugs/agent-redesign', CONTEST_ID)
+_BENCH_DIR   = os.path.join(os.path.dirname(__file__), '../benchmark/web3bugs/agent-redesign', CONTEST_ID)
 _default_out = os.path.join(_BENCH_DIR, f'sim_e2e_v10_{_inv_tag}_cg_cot_dedup2')
 OUT_DIR      = _args.out_dir if _args.out_dir else _default_out
 os.makedirs(OUT_DIR, exist_ok=True)
@@ -200,7 +201,7 @@ def _get_call_graph_block(contract_names: list) -> str:
 # ─── HIST-INV ─────────────────────────────────────────────────────────────────
 _CACHE_PATH = _args.cache_path if _args.cache_path else \
     os.path.join(_BENCH_DIR, 'hist_inv_cache.json')
-_RAG_CACHE  = os.path.join(os.path.dirname(__file__), 'rag/rag_sections_cache.json')
+_RAG_CACHE  = os.path.join(os.path.dirname(__file__), 'scripts/rag/rag_sections_cache.json')
 
 hc = HistInvCache(_CACHE_PATH)
 matched_slugs = hc.get_matched_slugs()
@@ -1130,7 +1131,7 @@ if not _context_summary:
 
 # Build profiles from primary contract
 _primary_src = _find_primary_src(contracts)
-gen = Gen()
+gen = Gen(inject_swc=_args.swc)
 profiles_map = {p.agent_id: p for p in gen.generate_tier1_profiles(_primary_src)}
 
 # Full GT source for dedup CODE_ANCHOR check

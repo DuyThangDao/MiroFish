@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from ..utils.logger import get_logger
 from .cyber_expert_profile_generator import CyberAgentProfile
 
-logger = get_logger("mirofish.cyber_oasis_env")
+logger = get_logger("cyber_oasis_env")
 
 
 # ─── GAP Output Format ────────────────────────────────────────────────────────
@@ -417,7 +417,7 @@ def parse_expert_finding_from_text(
 class CyberOasisConfig:
     """
     Configuration for an OASIS Security Review Room session.
-    Equivalent to SimulationConfig from the original MiroFish.
+    Equivalent to SimulationConfig from the original pipeline.
     """
     session_id: str
     graph_id: str

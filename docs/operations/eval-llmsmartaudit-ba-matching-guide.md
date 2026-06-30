@@ -3,7 +3,7 @@
 ## Tổng quan
 
 LLMSmartAudit **SmartContractBA** tạo ra **markdown free-form text** thay vì structured JSON.
-Cần quy trình eval khác với `eval-manual-matching-guide.md` (dùng cho MiroFish JSON output).
+Cần quy trình eval khác với `eval-manual-matching-guide.md` (dùng cho audit JSON output).
 
 ---
 
@@ -197,7 +197,7 @@ BA chạy 3 CodeReview cycles → mỗi cycle tạo ra findings, nhiều finding
 
 ### 4b. Không có T1/T2/T3 framework
 
-MiroFish dùng function_name + contract_name để tìm T1 candidates.
+Pipeline dùng function_name + contract_name để tìm T1 candidates.
 BA không có cấu trúc này — findings là free-form text, cần đọc toàn bộ.
 
 ### 4c. Severity label ≠ GT severity
@@ -315,9 +315,9 @@ NOTES
 
 ---
 
-## So sánh với eval-manual-matching-guide.md (MiroFish)
+## So sánh với eval-manual-matching-guide.md (Audit)
 
-| Khía cạnh | MiroFish Guide | BA Guide |
+| Khía cạnh | Audit Guide | BA Guide |
 |-----------|---------------|---------|
 | Output | Structured JSON findings[] | Free-form markdown |
 | Search method | T1/T2/T3 framework | Manual section reading |

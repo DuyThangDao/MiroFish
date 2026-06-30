@@ -20,7 +20,7 @@ from ..models.contract_models import (
     FunctionVisibility,
 )
 
-logger = get_logger("mirofish.contract_parser")
+logger = get_logger("contract_parser")
 
 
 # ─── Static SWC patterns (regex-based, deterministic) ────────────────────────

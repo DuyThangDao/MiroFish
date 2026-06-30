@@ -36,14 +36,14 @@ WORKER_CFGS = [
     {
         "key_file": str(REPO_ROOT / "vertex-ai-1.json"),
         "base_url": "https://aiplatform.googleapis.com/v1/projects/sigma-comfort-498803-f9/locations/global/endpoints/openapi",
-        "rpm_file": "/tmp/mirofish_fillop_w1.json",
-        "rpm_lock": "/tmp/mirofish_fillop_w1.lock",
+        "rpm_file": "/tmp/audit_fillop_w1.json",
+        "rpm_lock": "/tmp/audit_fillop_w1.lock",
     },
     {
         "key_file": str(REPO_ROOT / "vertex-ai-2.json"),
         "base_url": "https://aiplatform.googleapis.com/v1/projects/learned-surge-498101-t0/locations/global/endpoints/openapi",
-        "rpm_file": "/tmp/mirofish_fillop_w2.json",
-        "rpm_lock": "/tmp/mirofish_fillop_w2.lock",
+        "rpm_file": "/tmp/audit_fillop_w2.json",
+        "rpm_lock": "/tmp/audit_fillop_w2.lock",
     },
 ]
 

@@ -13,15 +13,15 @@ from openai import OpenAI
 
 from ..config import Config
 
-_logger = logging.getLogger("mirofish.llm_client")
+_logger = logging.getLogger("llm_client")
 
 # ─── Global rate limiter (shared across all threads/processes) ────────────────
 import fcntl
 import os as _os
 import threading
 
-_GLOBAL_RPM_FILE = "/tmp/mirofish_rpm_0.json"
-_GLOBAL_RPM_LOCK = "/tmp/mirofish_rpm_0.lock"
+_GLOBAL_RPM_FILE = "/tmp/audit_rpm_0.json"
+_GLOBAL_RPM_LOCK = "/tmp/audit_rpm_0.lock"
 
 
 def _acquire_global_slot(slot_file: str = _GLOBAL_RPM_FILE,

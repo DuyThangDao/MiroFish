@@ -17,7 +17,7 @@ from ..utils.llm_client import LLMClient
 from ..utils.logger import get_logger
 from .mitre_reference import MitreReference
 
-logger = get_logger("mirofish.cyber_profile")
+logger = get_logger("cyber_profile")
 
 _CODE_SIMILARITY_SYSTEM_PROMPT = (
     "You are a Code Similarity Auditor specializing in smart contract security. "
