@@ -71,3 +71,24 @@ data/
 /benchmark
 /GPTScan
 /scabench
+
+# RAG large data files (generated outputs, not source)
+backend/scripts/rag/rag_sections_cache.json
+backend/scripts/rag/work_queue.json
+backend/scripts/rag/seen_slugs.json
+backend/data/rag_db/
+
+# LLMSmartAudit generated outputs
+LLMSmartAudit/WareHouse/
+
+# External tool submodules (cloned separately)
+/DeFiHackLabs/
+/DefiVulnLabs/
+/LLMSmartAudit/
+/slither/
+/slither-wiki/
+
+# Archived docs and scripts (kept locally, not pushed)
+/archived-docs/
+/archived-scripts/
+/frontend/
